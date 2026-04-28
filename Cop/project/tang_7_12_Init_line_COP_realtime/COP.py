@@ -9,8 +9,6 @@ import threading
 
 
 # ===================== 算法参数（仅与CoP计算相关）=====================
-THRESHOLD = 200
-DIR_SMOOTH_ALPHA = 0.15                 # 方向滤波系数
 COP_STABILITY_FRAMES_REQUIRED = 5       # 初始稳定帧数
 TOTAL_PRESSURE_LOW_THRESHOLD = 500      # 低压判定阈值
 SENSOR_ROWS = 12                        # 传感器阵列行数
@@ -19,7 +17,7 @@ SENSOR_COLS = 7                         # 传感器阵列列数
 
 # ===================== 直线方向稳定判断参数 =====================
 LINE_DIST_THRESHOLD = 0.1               # 点到直线最大允许距离 (CoP单位)
-DIR_DOT_THRESHOLD = 0.7                 # 方向一致性最小点积 (cos(夹角), 0.6 约 53.1度)
+DIR_DOT_THRESHOLD = 0.7                 # 方向一致性最小点积 cos(夹角)
 
 
 # ===================== 线程安全全局状态 =====================
@@ -41,6 +39,7 @@ total_pressure_low_counter = 0           # 压力低于阈值计数器
 
 adc_filtered_dir = None                  # 滤波后的方向向量
 grad_table_data = np.zeros((12, 7, 2))   # 梯度表（用于绘图）
+grad_table_lock = threading.Lock()       # 新增：梯度表读写锁（关键！）
 
 
 # ===================== 基线减除 =====================
@@ -76,7 +75,8 @@ def reset_cop_state():
     total_pressure_low_counter = 0
     initial_cop_x_buffer.clear()         # 清空缓冲器
     initial_cop_y_buffer.clear()         # 清空缓冲器
-    grad_table_data = np.zeros((12, 7, 2))
+    with grad_table_lock:
+        grad_table_data.fill(0)
 
 
 # ===================== 核心CoP计算 =====================
@@ -106,7 +106,8 @@ def compute_pressure_direction(baseline_subtracted_frame):
             gx = right - left
             gy = up - down
             grad[y, x] = (gx, gy)
-    grad_table_data = grad.copy()
+    with grad_table_lock:
+        grad_table_data[:] = grad[:]
 
     # 总压力判断
     total_pressure = np.sum(frame2d)

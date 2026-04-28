@@ -15,14 +15,14 @@ BAUDRATE_PRESS = 921600
 BAUDRATE_FORCE = 460860
 
 # ===================== 压力传感器 =====================
-class PressureSensor:
+class PressureSensor:                              # 为什么定义成类而不是函数？1.包含很多函数，2.方便管理状态，有很多global变量
     def __init__(self):
-        self.ser = None
+        self.ser = None                            # self.变量是默认global
         self.port = None
         self.last = None
         self.auto_find_port()
 
-    def auto_find_port(self):
+    def auto_find_port(self):                      #类里的函数，第一个参数必须是self，调用的时候代表对象自己
         """自动寻找可用串口"""
         ports = list(serial.tools.list_ports.comports())
         for p, _, _ in ports:

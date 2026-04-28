@@ -4,7 +4,8 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.gridspec import GridSpec
 from collections import deque
 import threading
-from COP import grad_table_data  # 仅导入需要的变量，不整合COP逻辑
+import COP as COP
+
 
 # Plotting constants
 PLOT_INTERVAL_MS = 100
@@ -21,11 +22,19 @@ class RealTimePlot:
         plt.rcParams['axes.unicode_minus'] = False
         self.rows, self.cols = 12, 7
 
-        # 新增：初始化ROI范围变量（修复未定义错误）
+        # 初始化ROI范围变量（修复未定义错误）
         self.final_r1 = 0
         self.final_r2 = self.rows - 1
         self.final_c1 = 0
         self.final_c2 = self.cols - 1
+
+        # epsilon 用于避免绘制极小的箭头
+        self.epsilon = 0.01 
+
+        # ===================== 全程数据存储列表 =====================
+        self.full_time_list = []          # 存储全程时间戳 (ms)
+        self.full_adc_mag_list = []       # 存储全程 CoP 偏移幅值
+        self.full_force_mag_list = []     # 存储全程力传感器幅值
 
         self.fig = plt.figure(figsize=(16, 12))
         self.build_layout()
@@ -67,8 +76,9 @@ class RealTimePlot:
         self.ax2.axis('off')
         self.ax2.set_title("Magnitude Arrows (CoP Offset & Force)", fontsize=10)
 
+        # ========== 修改点1：更新子图标题为 ADC Mag ==========
         self.ax3a = plt.subplot(gs_outer[1, 0])
-        self.ax3a.set_title("Raw ADC Sum (Original Values)", fontsize=10)
+        self.ax3a.set_title("ADC Magnitude (CoP Offset)", fontsize=10)  # 标题改为ADC Mag
         self.ax3a.grid(True, alpha=0.3)
         self.raw_adc_line, = self.ax3a.plot([], [], 'b-', linewidth=1.5)
 
@@ -92,9 +102,10 @@ class RealTimePlot:
         self.ax6.set_title("Gradient Arrows", fontsize=10)
         self.ax6.axis('off')
 
+    # ========== 修改点2：初始化历史队列，将raw_adc_sum_history改为adc_mag_history ==========
     def init_history(self):
         self.angle_error_history = deque(maxlen=ERROR_PLOT_LEN)
-        self.raw_adc_sum_history = deque(maxlen=MAG_PLOT_LEN)
+        self.adc_mag_history = deque(maxlen=MAG_PLOT_LEN)  # 替换原raw_adc_sum_history
         self.raw_force_mag_history = deque(maxlen=MAG_PLOT_LEN)
 
     def set_data(self, adc_angle, adc_mag, force_angle, force_mag, diff_frame, raw_adc_sum, raw_force_mag,
@@ -116,8 +127,18 @@ class RealTimePlot:
             error = min(diff, 360 - diff)
             self.angle_error_history.append(error)
 
-            self.raw_adc_sum_history.append(raw_adc_sum)
+            # ========== 修改点3：追加adc_mag到历史队列（不再使用raw_adc_sum） ==========
+            self.adc_mag_history.append(adc_mag)
             self.raw_force_mag_history.append(raw_force_mag)
+
+    def append_full_data(self, current_ms, adc_mag, force_mag):
+        """
+        单独的函数：向全程列表追加数据
+        """
+        with self.lock:
+            self.full_time_list.append(current_ms)
+            self.full_adc_mag_list.append(adc_mag)
+            self.full_force_mag_list.append(force_mag)
 
     def update_all(self, frame):
         self.update_direction_arrows()
@@ -158,14 +179,36 @@ class RealTimePlot:
         self.ax2.axis('off')
         self.ax2.set_title("Magnitude Arrows (CoP Offset & Force)", fontsize=10)
 
+        # ========== 黑色箭头（CoP Offset）逻辑 ==========
         th_adc = np.deg2rad(a)
         max_adc_length = 0.45
-        l_adc = (m / 10.0) * max_adc_length if m > 0.0 else 0.0
-        l_adc = min(l_adc, max_adc_length)
-        self.ax2.arrow(0.5, 0.5, l_adc*np.cos(th_adc), l_adc*np.sin(th_adc),
-                       head_width=0.12, fc='k', ec='k', lw=2.5, length_includes_head=True)
+        
+        # 优化点1: 调整归一化分母。假设CoP偏移的幅值m最大约为15（12x7的网格中，sqrt(6^2+11^2)约等于12.5）。
+        # 如果m/adc_normalize_denominator过小，箭头会一直很短。
+        # 如果m/adc_normalize_denominator过大，箭头会很快达到max_adc_length。
+        # 建议根据实际运行中adc_mag的典型最大值进行微调。
+        adc_normalize_denominator = 15.0 # 根据最大理论CoP偏移幅值12.5附近调整，比如15.0，这样当m接近15时箭头接近max_adc_length
+
+        l_adc = (m / adc_normalize_denominator) * max_adc_length if m > self.epsilon else 0.0
+        l_adc = min(l_adc, max_adc_length) # 确保箭头不会超出绘图区域
+
+        # 优化点2: 动态调整箭头样式，借鉴红色箭头的逻辑
+        if l_adc > 0.02:  # 长度足够时显示带箭头的箭头
+            head_width_adc = max(0.06, l_adc * 0.15) # 头部宽度至少0.06，且随箭头长度线性增长
+            head_length_adc = max(0.04, l_adc * 0.1) # 头部长度至少0.04，且随箭头长度线性增长
+            self.ax2.arrow(0.5, 0.5, l_adc*np.cos(th_adc), l_adc*np.sin(th_adc),
+                        head_width=head_width_adc, head_length=head_length_adc,
+                        fc='k', ec='k', lw=2.5, length_includes_head=True,
+                        alpha=1.0, joinstyle='round', capstyle='round')
+        elif l_adc > self.epsilon:  # 长度过小时显示纯线段 (避免绘制太小的箭头头)
+            self.ax2.plot([0.5, 0.5 + l_adc*np.cos(th_adc)],
+                        [0.5, 0.5 + l_adc*np.sin(th_adc)],
+                        'k-', lw=2.5, alpha=1.0)
+        # 如果 l_adc <= self.epsilon，则不绘制任何东西
+
         self.ax2.text(0.5, 0.1, f"CoP Offset: {m:.2f}", ha='center', va='center', fontsize=8, color='black')
 
+        # ========== 红色箭头（Force）逻辑保持不变 ==========
         th_force = np.deg2rad(fa)
         max_force_length = 0.4
         l_force = (abs(fm) / 20.0) * max_force_length if abs(fm) > 0.0 else 0.0
@@ -185,10 +228,11 @@ class RealTimePlot:
 
         self.ax2.text(0.5, 0.9, f"Force: {fm:.1f}", ha='center', va='center', fontsize=8, color='red')
 
+    # ========== 修改点4：更新绘图逻辑，读取adc_mag_history ==========
     def update_raw_adc(self):
-        if len(self.raw_adc_sum_history) > 0:
-            xs = list(range(len(self.raw_adc_sum_history)))
-            ys = list(self.raw_adc_sum_history)
+        if len(self.adc_mag_history) > 0:
+            xs = list(range(len(self.adc_mag_history)))
+            ys = list(self.adc_mag_history)
             self.raw_adc_line.set_data(xs, ys)
             self.ax3a.set_xlim(0, len(xs))
             self.ax3a.set_ylim(min(ys)*0.95, max(ys)*1.05 if max(ys) > 0 else 1)
@@ -267,7 +311,11 @@ class RealTimePlot:
         更新梯度箭头图 (ax6)，显示每个点的梯度。
         """
         with self.lock:
-            data = grad_table_data.copy()  # 使用从COP导入的变量
+            # 第一步：加锁读取梯度数据（避免脏读）
+            # 注意：这里需要修改为 COP.grad_table_lock 和 COP.grad_table_data
+            with COP.grad_table_lock: 
+                data = COP.grad_table_data.copy()
+            # 第二步：读取其他变量（原逻辑不变）
             cop_x_plot = self.cop_x
             cop_y_plot = self.cop_y
             r1, r2, c1, c2 = self.final_r1, self.final_r2, self.final_c1, self.final_c2
@@ -295,11 +343,21 @@ class RealTimePlot:
             for c in range(ncols):
                 gx, gy = data[r, c, 0], data[r, c, 1]
                 mag = np.hypot(gx, gy)
-                if mag > 1.0:
+
+                if mag > 1.0: # 保持你原来的阈值 1.0
                     gx_norm = gx / mag
                     gy_norm = gy / mag
-                    self.ax6.quiver(c, r, gx_norm, gy_norm, color='k',
-                                    scale=2.5, width=0.02, headwidth=6, headlength=8)
+
+                    self.ax6.quiver(c, r, gx_norm, gy_norm,
+                                    color='k',
+                                    scale=2.5,
+                                    width=0.02,
+                                    headwidth=6,
+                                    headlength=8,
+                                    headaxislength=7,
+                                    angles='xy',
+                                    scale_units='xy',
+                                    zorder=5)
 
         # CoP 标记
         if not np.isnan(cop_x_plot) and not np.isnan(cop_y_plot):
@@ -322,6 +380,47 @@ class RealTimePlot:
         self.ax6.add_patch(roi_rect)
 
         self.ax6.legend(loc='upper left', fontsize=8)
+
+    # ==================== 程序结束绘制全程静态图 ====================
+    def plot_full_magnitude_curve(self, save_dir):
+        """
+        在程序结束后绘制全程的ADC(CoP偏移)和力传感器幅值曲线。
+        :param save_dir: 图片保存路径
+        """
+        import os
+        
+        # 如果没有数据，直接返回
+        if len(self.full_time_list) == 0:
+            print("⚠️ 没有采集到全程数据，跳过绘图。")
+            return
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+
+        # 绘制 CoP 偏移幅值
+        if len(self.full_adc_mag_list) > 0:
+            ax1.plot(self.full_time_list, self.full_adc_mag_list, 'b-', linewidth=1.5, label='CoP Offset Magnitude')
+            ax1.set_title("CoP Offset Magnitude Over Time", fontsize=14)
+            ax1.set_xlabel("Time (ms)", fontsize=12)
+            ax1.set_ylabel("CoP Offset Magnitude (Units)", fontsize=12)
+            ax1.grid(True, alpha=0.3)
+            ax1.legend(fontsize=12)
+            ax1.set_ylim(0, max(self.full_adc_mag_list) * 1.1 if max(self.full_adc_mag_list) > 0 else 1)
+
+        # 绘制力传感器幅值
+        if len(self.full_force_mag_list) > 0:
+            ax2.plot(self.full_time_list, self.full_force_mag_list, 'r-', linewidth=1.5, label='Force Magnitude')
+            ax2.set_title("Force Magnitude Over Time", fontsize=14)
+            ax2.set_xlabel("Time (ms)", fontsize=12)
+            ax2.set_ylabel("Force Magnitude (N)", fontsize=12)
+            ax2.grid(True, alpha=0.3)
+            ax2.legend(fontsize=12)
+            ax2.set_ylim(0, max(self.full_force_mag_list) * 1.1 if max(self.full_force_mag_list) > 0 else 1)
+
+        plt.tight_layout()
+        save_path = os.path.join(save_dir, "full_magnitude_curve_cop.png")
+        plt.savefig(save_path, dpi=300)
+        print(f"📊 全程幅值曲线已保存至：{save_path}")
+        plt.show()
 
     def show(self):
         plt.tight_layout()
