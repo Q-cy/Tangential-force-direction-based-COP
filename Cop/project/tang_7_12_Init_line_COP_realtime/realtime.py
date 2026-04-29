@@ -187,7 +187,7 @@ class RealTimePlot:
         # 如果m/adc_normalize_denominator过小，箭头会一直很短。
         # 如果m/adc_normalize_denominator过大，箭头会很快达到max_adc_length。
         # 建议根据实际运行中adc_mag的典型最大值进行微调。
-        adc_normalize_denominator = 15.0 # 根据最大理论CoP偏移幅值12.5附近调整，比如15.0，这样当m接近15时箭头接近max_adc_length
+        adc_normalize_denominator = 5.0 # 根据最大理论CoP偏移幅值12.5附近调整，比如15.0，这样当m接近15时箭头接近max_adc_length
 
         l_adc = (m / adc_normalize_denominator) * max_adc_length if m > self.epsilon else 0.0
         l_adc = min(l_adc, max_adc_length) # 确保箭头不会超出绘图区域
