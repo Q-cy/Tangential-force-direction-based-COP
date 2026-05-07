@@ -125,6 +125,13 @@ def compute_pressure_direction(baseline_subtracted_frame):
     if total_pressure == 0:
         return 0.0, 0.0, 0, rows-1, 0, cols-1, 0.0, 0.0, 0.0, 0.0  # 10个值
 
+    # 已建立初始接触但当前压力过低 → 跳过噪声CoP计算，返回零偏移
+    if contact_initialized and total_pressure < TOTAL_PRESSURE_LOW_THRESHOLD:
+        return (first_contact_CoP_x, first_contact_CoP_y,
+                0, rows-1, 0, cols-1,
+                0.0, 0.0,
+                first_contact_CoP_x, first_contact_CoP_y)
+
     # 计算CoP中心
     x_grid = np.tile(np.arange(cols), (rows, 1))
     y_grid = np.repeat(np.arange(rows), cols).reshape(rows, cols)

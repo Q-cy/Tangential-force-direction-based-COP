@@ -2,6 +2,7 @@
 
 import time
 import os
+from collections import deque
 import numpy as np
 import threading
 import matplotlib
@@ -80,6 +81,13 @@ def data_loop():
     print("🎨 绘图已打开")
     t0 = time.perf_counter()
 
+    # 中值滤波窗口（窗口大小=5）
+    MEDIAN_WINDOW = 5
+    buf_dx = deque(maxlen=MEDIAN_WINDOW)
+    buf_dy = deque(maxlen=MEDIAN_WINDOW)
+    buf_fx = deque(maxlen=MEDIAN_WINDOW)
+    buf_fy = deque(maxlen=MEDIAN_WINDOW)
+
     while not stop_event.is_set():
         now = time.perf_counter()
         rel_ms = int((now - t0) * 1000)  # 相对毫秒数
@@ -105,10 +113,20 @@ def data_loop():
 
         # 解析力传感器数据
         fx, fy, fz, mx, my, mz = force_data_item["data"]
-        
-        # 计算角度和幅值
-        adc_angle, adc_mag = angle.compute_PZT_angle(dx, dy)
-        force_angle, force_mag = angle.compute_6Dforce_angle(fx, fy)
+
+        # 中值滤波：消除偶发尖峰
+        buf_dx.append(dx)
+        buf_dy.append(dy)
+        buf_fx.append(fx)
+        buf_fy.append(fy)
+        dx_f = np.median(buf_dx)
+        dy_f = np.median(buf_dy)
+        fx_f = np.median(buf_fx)
+        fy_f = np.median(buf_fy)
+
+        # 计算角度和幅值（使用滤波后的值）
+        adc_angle, adc_mag = angle.compute_PZT_angle(dx_f, dy_f)
+        force_angle, force_mag = angle.compute_6Dforce_angle(fx_f, fy_f)
         
         # 构造CSV行数据（调用封装函数）
         csv_row = table.build_csv_row(
@@ -117,10 +135,10 @@ def data_loop():
             ch_data=press_data_item["data"],
             force_data=force_data_item["data"],
             force_timestamp=force_data_item["t"],
-            delta_cop_x=dx, 
-            delta_cop_y=dy, 
-            delta_force_x=fx,       # <--- ADDED THIS LINE
-            delta_force_y=fy,       # <--- ADDED THIS LINE
+            delta_cop_x=dx_f,
+            delta_cop_y=dy_f,
+            delta_force_x=fx_f,
+            delta_force_y=fy_f,
             adc_angle=adc_angle,
             adc_mag=adc_mag,
             force_angle=force_angle,
@@ -135,8 +153,8 @@ def data_loop():
         plot.set_data(
             adc_angle, adc_mag, force_angle, force_mag,
             base, np.sum(press_data_item["data"]), force_mag,
-            cx, cy, bx, by, dx, dy, # 原始 delta_cop_x, delta_cop_y
-            fx, fy # 新增 force_fx, force_fy
+            cx, cy, bx, by, dx_f, dy_f,  # 滤波后 delta_cop_x, delta_cop_y
+            fx_f, fy_f  # 滤波后 force_fx, force_fy
         )
         # 追加全程数据
         if COP.contact_initialized: 
