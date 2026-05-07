@@ -58,8 +58,13 @@ class RealTimePlot:
         self.base_cop_y = 0.0
         self.delta_cop_x = 0.0
         self.delta_cop_y = 0.0
-        self.raw_fx = 0.0 # 新增
-        self.raw_fy = 0.0 # 新增
+        self.raw_fx = 0.0
+        self.raw_fy = 0.0
+        self.regions = []  # 多COP区域列表
+
+        # 多COP颜色表
+        self.cop_colors = ['green', 'cyan', 'orange', 'yellow',
+                           'magenta', 'brown', 'gray', 'purple']
 
     def build_layout(self):
         # 调整GridSpec以容纳更多图表
@@ -139,7 +144,7 @@ class RealTimePlot:
 
 
     def set_data(self, adc_angle, adc_mag, force_angle, force_mag, diff_frame, total_pressure_sum, force_total_mag,
-                 cop_x, cop_y, base_cop_x, base_cop_y, delta_cop_x, delta_cop_y, raw_fx, raw_fy): #  raw_fx, raw_fy
+                 cop_x, cop_y, base_cop_x, base_cop_y, delta_cop_x, delta_cop_y, raw_fx, raw_fy, regions=None):
         with self.lock:
             self.adc_angle = adc_angle
             self.adc_mag = adc_mag
@@ -152,8 +157,9 @@ class RealTimePlot:
             self.base_cop_y = base_cop_y
             self.delta_cop_x = delta_cop_x
             self.delta_cop_y = delta_cop_y
-            self.raw_fx = raw_fx # 存储 fx
-            self.raw_fy = raw_fy # 存储 fy
+            self.raw_fx = raw_fx
+            self.raw_fy = raw_fy
+            self.regions = regions if regions else []
 
             diff = abs(adc_angle - force_angle)
             error = min(diff, 360 - diff)
@@ -197,15 +203,31 @@ class RealTimePlot:
         with self.lock:
             a = self.adc_angle
             f = self.force_angle
+            regions = list(self.regions)
+
         self.ax1.clear()
         self.ax1.set_xlim(0, 1)
         self.ax1.set_ylim(0, 1)
         self.ax1.set_aspect('equal')
         self.ax1.axis('off')
         self.ax1.set_title("Direction Arrows (CoP Offset & Force)")
-        self.ax1.arrow(0.5, 0.5, 0.4*np.cos(np.radians(a)), 0.4*np.sin(np.radians(a)),
-                       head_width=0.12, fc='k', ec='k', lw=2.5)
-        self.ax1.arrow(0.5, 0.5, 0.35*np.cos(np.radians(f)), 0.35*np.sin(np.radians(f)),
+
+        # 最多显示前3个COP的方向箭头
+        cop_arrow_colors = ['k', 'gray', 'darkgray']
+        for i, r in enumerate(regions[:3]):
+            ang = r.get('angle', 0.0)
+            lw = 2.5 if i == 0 else 1.5
+            hw = 0.12 if i == 0 else 0.08
+            length = 0.4 if i == 0 else 0.3
+            self.ax1.arrow(0.5, 0.5,
+                           length * np.cos(np.radians(ang)),
+                           length * np.sin(np.radians(ang)),
+                           head_width=hw, fc=cop_arrow_colors[i],
+                           ec=cop_arrow_colors[i], lw=lw)
+
+        # 力传感器方向（红色）
+        self.ax1.arrow(0.5, 0.5, 0.35 * np.cos(np.radians(f)),
+                       0.35 * np.sin(np.radians(f)),
                        head_width=0.1, fc='r', ec='r', lw=2)
 
 
@@ -215,6 +237,7 @@ class RealTimePlot:
             m = self.adc_mag
             fa = self.force_angle
             fm = self.force_mag
+            regions = list(self.regions)
 
         self.ax2.clear()
         self.ax2.set_xlim(0, 1)
@@ -223,35 +246,40 @@ class RealTimePlot:
         self.ax2.axis('off')
         self.ax2.set_title("Magnitude Arrows (CoP Offset & Force)", fontsize=10)
 
-        # ========== 黑色箭头（CoP Offset）逻辑 ==========
-        th_adc = np.deg2rad(a)
-        max_adc_length = 0.45
-        
-        # 调整归一化分母。假设CoP偏移的幅值m最大约为15（12x7的网格中，sqrt(6^2+11^2)约等于12.5）。
-        # 如果m/adc_normalize_denominator过小，箭头会一直很短。
-        # 如果m/adc_normalize_denominator过大，箭头会很快达到max_adc_length。
-        adc_normalize_denominator = 5.0 # 根据最大理论CoP偏移幅值12.5附近调整，比如15.0，这样当m接近15时箭头接近max_adc_length
+        adc_normalize_denominator = 5.0
 
-        l_adc = (m / adc_normalize_denominator) * max_adc_length if m > self.epsilon else 0.0
-        l_adc = min(l_adc, max_adc_length) # 确保箭头不会超出绘图区域
+        # 绘制前3个COP的幅值箭头
+        cop_colors = ['k', 'gray', 'darkgray']
+        cop_labels = []
+        for i, r in enumerate(regions[:3]):
+            ang = np.deg2rad(r.get('angle', 0.0))
+            mag = r.get('mag', 0.0)
+            max_len = 0.45 if i == 0 else 0.35
 
-        # 动态调整箭头样式，借鉴红色箭头的逻辑
-        if l_adc > 0.02:  # 长度足够时显示带箭头的箭头
-            head_width_adc = max(0.06, l_adc * 0.15) # 头部宽度至少0.06，且随箭头长度线性增长
-            head_length_adc = max(0.04, l_adc * 0.1) # 头部长度至少0.04，且随箭头长度线性增长
-            self.ax2.arrow(0.5, 0.5, l_adc*np.cos(th_adc), l_adc*np.sin(th_adc),
-                        head_width=head_width_adc, head_length=head_length_adc,
-                        fc='k', ec='k', lw=2.5, length_includes_head=True,
-                        alpha=1.0, joinstyle='round', capstyle='round')
-        elif l_adc > self.epsilon:  # 长度过小时显示纯线段
-            self.ax2.plot([0.5, 0.5 + l_adc*np.cos(th_adc)],
-                        [0.5, 0.5 + l_adc*np.sin(th_adc)],
-                        'k-', lw=2.5, alpha=1.0)
-        # 如果 l_adc <= self.epsilon，则不绘制任何东西
+            l = (mag / adc_normalize_denominator) * max_len if mag > self.epsilon else 0.0
+            l = min(l, max_len)
 
-        self.ax2.text(0.5, 0.1, f"CoP Offset: {m:.2f}", ha='center', va='center', fontsize=8, color='black')
+            if l > 0.02:
+                hw = max(0.04, l * 0.12)
+                hl = max(0.03, l * 0.08)
+                self.ax2.arrow(0.5, 0.5, l * np.cos(ang), l * np.sin(ang),
+                               head_width=hw, head_length=hl,
+                               fc=cop_colors[i], ec=cop_colors[i],
+                               lw=2.0 if i == 0 else 1.2,
+                               length_includes_head=True,
+                               alpha=0.9, joinstyle='round', capstyle='round')
+            elif l > self.epsilon:
+                self.ax2.plot([0.5, 0.5 + l * np.cos(ang)],
+                              [0.5, 0.5 + l * np.sin(ang)],
+                              color=cop_colors[i], lw=2.0 if i == 0 else 1.2, alpha=0.9)
+            cop_labels.append(f"COP{i+1}: {mag:.2f}")
 
-        # ========== 红色箭头（Force）==========
+        # COP 标签（底部堆叠）
+        for i, label in enumerate(cop_labels):
+            self.ax2.text(0.5, 0.05 + i * 0.06, label, ha='center', va='center',
+                          fontsize=7, color=cop_colors[i])
+
+        # 红色箭头（Force）
         th_force = np.deg2rad(fa)
         max_force_length = 0.4
         l_force = (abs(fm) / 20.0) * max_force_length if abs(fm) > 0.0 else 0.0
@@ -260,16 +288,17 @@ class RealTimePlot:
         if l_force > 0.02:
             head_width = max(0.06, l_force * 0.15)
             head_length = max(0.04, l_force * 0.1)
-            self.ax2.arrow(0.5, 0.5, l_force*np.cos(th_force), l_force*np.sin(th_force),
-                          head_width=head_width, head_length=head_length,
-                          fc='red', ec='darkred', lw=3.5, length_includes_head=True,
-                          alpha=1.0, joinstyle='round', capstyle='round')
+            self.ax2.arrow(0.5, 0.5, l_force * np.cos(th_force), l_force * np.sin(th_force),
+                           head_width=head_width, head_length=head_length,
+                           fc='red', ec='darkred', lw=3.5, length_includes_head=True,
+                           alpha=1.0, joinstyle='round', capstyle='round')
         else:
-            self.ax2.plot([0.5, 0.5 + l_force*np.cos(th_force)],
-                          [0.5, 0.5 + l_force*np.sin(th_force)],
+            self.ax2.plot([0.5, 0.5 + l_force * np.cos(th_force)],
+                          [0.5, 0.5 + l_force * np.sin(th_force)],
                           'r-', lw=3.5, alpha=1.0)
 
-        self.ax2.text(0.5, 0.9, f"Force: {fm:.1f}", ha='center', va='center', fontsize=8, color='red')
+        self.ax2.text(0.5, 0.92, f"Force: {fm:.1f}", ha='center', va='center',
+                      fontsize=8, color='red')
 
 
     # ========== 更新绘图逻辑，读取adc_mag_history ==========
@@ -335,18 +364,10 @@ class RealTimePlot:
 
 
     def update_pressure_table(self):
-        """
-        更新压力表 (ax5)，显示初始CoP、动态CoP和CoP偏移向量。
-        """
         with self.lock:
             data = self.diff_frame.copy()
-            cop_x_plot = self.cop_x
-            cop_y_plot = self.cop_y
             r1, r2, c1, c2 = self.final_r1, self.final_r2, self.final_c1, self.final_c2
-            delta_cop_x = self.delta_cop_x
-            delta_cop_y = self.delta_cop_y
-            base_cop_x = self.base_cop_x
-            base_cop_y = self.base_cop_y
+            regions = list(self.regions)
 
         self.ax5.clear()
         self.ax5.set_title("Pressure Table", fontsize=10)
@@ -375,37 +396,43 @@ class RealTimePlot:
         for i in range(nrows):
             for j in range(ncols):
                 cell = self.table_plot[(i, j)]
-                cell.set_height(1/nrows)
-                cell.set_width(1/ncols)
+                cell.set_height(1 / nrows)
+                cell.set_width(1 / ncols)
 
-        # 初始CoP 与 CoP 偏移向量
-        if not np.isnan(base_cop_x) and not np.isnan(base_cop_y):
-            self.ax5.plot(base_cop_x, base_cop_y, 'bx', markersize=10, label='Initial CoP')
-        self.ax5.scatter(cop_x_plot, cop_y_plot, s=150, color='green', label='Current CoP')
-        if np.hypot(delta_cop_x, delta_cop_y) > 0.05:
-            self.ax5.arrow(base_cop_x, base_cop_y, delta_cop_x, -delta_cop_y,                          #-delta_cop_y是因为y坐标轴是索引大的在上(self.ax5.set_ylim(nrows - 0.5, -0.5))
-                           head_width=0.3, head_length=0.3, fc='purple', ec='purple', linewidth=2)
+        # 绘制所有COP
+        for idx, r in enumerate(regions):
+            color = self.cop_colors[idx % len(self.cop_colors)]
+            size = 150 if idx == 0 else 80
+            label_suffix = f" COP{idx + 1}" if idx > 0 else ""
 
-        self.ax5.legend(fontsize=8)
+            # 初始点
+            if r.get('is_initialized'):
+                self.ax5.plot(r['base_cop_x'], r['base_cop_y'],
+                              'x', color=color, markersize=8 if idx == 0 else 6,
+                              label=f'Init{label_suffix}')
+
+            # 当前点
+            self.ax5.scatter(r['cop_x'], r['cop_y'], s=size,
+                             color=color, edgecolors='black' if idx == 0 else 'none',
+                             linewidths=0.8 if idx == 0 else 0,
+                             label=f'CoP{label_suffix}', zorder=10)
+
+            # 偏移箭头
+            if r.get('is_initialized') and np.hypot(r['delta_cop_x'], r['delta_cop_y']) > 0.05:
+                self.ax5.arrow(r['base_cop_x'], r['base_cop_y'],
+                               r['delta_cop_x'], -r['delta_cop_y'],
+                               head_width=0.25, head_length=0.25,
+                               fc=color, ec=color, linewidth=1.5, alpha=0.7)
+
+        self.ax5.legend(fontsize=7, loc='upper right')
 
 
     def update_gradient_table(self):
-        """
-        更新梯度箭头图 (ax6)，显示每个点的梯度。
-        """
         with self.lock:
-            # 第一步：加锁读取梯度数据（避免脏读）
-            # 注意：这里需要修改为 COP.grad_table_lock 和 COP.grad_table_data
-            with COP.grad_table_lock: 
+            with COP.grad_table_lock:
                 data = COP.grad_table_data.copy()
-            # 第二步：读取其他变量（原逻辑不变）
-            cop_x_plot = self.cop_x
-            cop_y_plot = self.cop_y
             r1, r2, c1, c2 = self.final_r1, self.final_r2, self.final_c1, self.final_c2
-            delta_cop_x = self.delta_cop_x
-            delta_cop_y = self.delta_cop_y
-            base_cop_x = self.base_cop_x
-            base_cop_y = self.base_cop_y
+            regions = list(self.regions)
 
         self.ax6.clear()
         self.ax6.set_title("Gradient Arrows (gx, gy) 12×7", fontsize=10)
@@ -415,51 +442,49 @@ class RealTimePlot:
         self.ax6.set_aspect('equal')
         self.ax6.axis('off')
 
-        # 网格
         for r_grid in range(nrows + 1):
             self.ax6.axhline(r_grid - 0.5, color='black', linestyle='-', linewidth=0.5, zorder=0)
         for c_grid in range(ncols + 1):
             self.ax6.axvline(c_grid - 0.5, color='black', linestyle='-', linewidth=0.5, zorder=0)
 
-        # 梯度箭头
         for r in range(nrows):
             for c in range(ncols):
                 gx, gy = data[r, c, 0], data[r, c, 1]
                 mag = np.hypot(gx, gy)
-
-                if mag > 1.0: # 阈值 1.0
+                if mag > 1.0:
                     gx_norm = gx / mag
                     gy_norm = gy / mag
-
                     self.ax6.quiver(c, r, gx_norm, gy_norm,
-                                    color='k',
-                                    scale=2.5,
-                                    width=0.02,
-                                    headwidth=6,
-                                    headlength=8,
-                                    headaxislength=7,
-                                    angles='xy',
-                                    scale_units='xy',
-                                    zorder=5)
+                                    color='k', scale=2.5, width=0.02,
+                                    headwidth=6, headlength=8, headaxislength=7,
+                                    angles='xy', scale_units='xy', zorder=5)
 
-        # CoP 标记
-        if not np.isnan(cop_x_plot) and not np.isnan(cop_y_plot):
-            self.ax6.scatter(cop_x_plot, cop_y_plot, s=150, color='green', marker='o', zorder=10)
+        # 绘制所有COP标记
+        for idx, r in enumerate(regions):
+            color = self.cop_colors[idx % len(self.cop_colors)]
+            size = 150 if idx == 0 else 80
+            self.ax6.scatter(r['cop_x'], r['cop_y'], s=size,
+                             color=color, edgecolors='black' if idx == 0 else 'none',
+                             linewidths=0.8 if idx == 0 else 0, zorder=10)
 
-        if not np.isnan(base_cop_x) and not np.isnan(base_cop_y):
-            self.ax6.plot(base_cop_x, base_cop_y, 'bx', markersize=10, zorder=10)
+            if r.get('is_initialized'):
+                self.ax6.plot(r['base_cop_x'], r['base_cop_y'],
+                              'x', color=color, markersize=8 if idx == 0 else 6, zorder=10)
 
-        if np.hypot(delta_cop_x, delta_cop_y) > 0.05:
-            self.ax6.arrow(base_cop_x, base_cop_y, delta_cop_x, -delta_cop_y,
-                           head_width=0.3, head_length=0.3, fc='purple', ec='purple', linewidth=2)
+                if np.hypot(r['delta_cop_x'], r['delta_cop_y']) > 0.05:
+                    self.ax6.arrow(r['base_cop_x'], r['base_cop_y'],
+                                   r['delta_cop_x'], -r['delta_cop_y'],
+                                   head_width=0.25, head_length=0.25,
+                                   fc=color, ec=color, linewidth=1.5, alpha=0.7, zorder=9)
 
-        # ROI 框（与压力表可对齐）
+        # ROI 框
         rect_x = c1 - 0.5
         rect_y = r1 - 0.5
         rect_width = (c2 - c1 + 1)
         rect_height = (r2 - r1 + 1)
         roi_rect = plt.Rectangle((rect_x, rect_y), rect_width, rect_height,
-                                 linewidth=3, edgecolor='blue', facecolor='none', linestyle='--', zorder=5)
+                                 linewidth=3, edgecolor='blue', facecolor='none',
+                                 linestyle='--', zorder=5)
         self.ax6.add_patch(roi_rect)
 
         self.ax6.legend(loc='upper left', fontsize=8)

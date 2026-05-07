@@ -24,11 +24,11 @@ CSV_HEADER = [
     "Fx", "Fy", "Fz", "Mx", "My", "Mz",
     # 时间戳相关
     "press_t", "force_t", "dt",
-    # 新增 CoP 偏移分量
+    # 新增 CoP 偏移分量 (主CoP)
     "delta_CoP_X", "delta_CoP_Y",
     # 新增 Force 分量
-    "delta_Force_X", "delta_Force_Y", # <--- ADDED THESE TWO LINES
-    # 角度和幅值
+    "delta_Force_X", "delta_Force_Y", 
+    # 角度和幅值 (主CoP)
     "ADC_angle", "ADC_mag", "Force_angle", "Force_mag"
 ]
 
@@ -62,12 +62,12 @@ def build_csv_row(
     ch_data: list,           # 84通道压力数据
     force_data: list,        # 六维力传感器数据 [Fx,Fy,Fz,Mx,My,Mz]
     force_timestamp: float,  # 力传感器时间戳（秒）
-    delta_cop_x: float,      # 新增 CoP 偏移X分量
-    delta_cop_y: float,      # 新增 CoP 偏移Y分量
-    delta_force_x: float,    # <--- ADDED THIS PARAMETER
-    delta_force_y: float,    # <--- ADDED THIS PARAMETER
-    adc_angle: float,        # ADC角度
-    adc_mag: float,          # ADC幅值
+    delta_cop_x: float,      # 主CoP 偏移X分量
+    delta_cop_y: float,      # 主CoP 偏移Y分量
+    delta_force_x: float,    
+    delta_force_y: float,    
+    adc_angle: float,        # 主CoP ADC角度
+    adc_mag: float,          # 主CoP ADC幅值
     force_angle: float,      # 力传感器角度
     force_mag: float         # 力传感器幅值
 ) -> list:
@@ -89,8 +89,8 @@ def build_csv_row(
         dt,                      # dt：时间戳差值（秒）
         delta_cop_x,             # delta_CoP_X
         delta_cop_y,             # delta_CoP_Y
-        delta_force_x,           # <--- ADDED THIS TO THE ROW
-        delta_force_y,           # <--- ADDED THIS TO THE ROW
+        delta_force_x,           
+        delta_force_y,           
         adc_angle,               # ADC_angle：PZT计算的角度
         adc_mag,                 # ADC_mag：CoP偏移幅值
         force_angle,             # Force_angle：力传感器计算的角度
