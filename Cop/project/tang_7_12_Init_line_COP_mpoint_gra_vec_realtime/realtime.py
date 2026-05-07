@@ -4,24 +4,24 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.gridspec import GridSpec
 from collections import deque
 import threading
-import COP as COP # 引入COP模块
+import COP as COP
+
 
 # Plotting constants
 PLOT_INTERVAL_MS = 100
 ERROR_PLOT_LEN = 100
 MAG_PLOT_LEN = 100
 
+
 class RealTimePlot:
     """
     实时绘图类，使用 Matplotlib 绘制传感器数据。
     集成了多个子图，以 GridSpec 布局实现。
-    支持多点CoP绘制。
     """
     def __init__(self):
         plt.rcParams['font.family'] = 'DejaVu Sans'
-        plt.rcParams['axes.unicode_minus'] = False # 解决负号显示问题
-
-        self.rows, self.cols = COP.SENSOR_ROWS, COP.SENSOR_COLS # 从COP模块获取行列数
+        plt.rcParams['axes.unicode_minus'] = False
+        self.rows, self.cols = 12, 7
 
         # 初始化ROI范围变量（修复未定义错误）
         self.final_r1 = 0
@@ -34,33 +34,42 @@ class RealTimePlot:
 
         # ===================== 全程数据存储列表 =====================
         self.full_time_list = []          # 存储全程时间戳 (ms)
-        self.full_adc_mag_list = []       # 存储全程 CoP 偏移幅值 (主CoP)
+        self.full_adc_mag_list = []       # 存储全程 CoP 偏移幅值
         self.full_force_mag_list = []     # 存储全程力传感器幅值
 
         self.fig = plt.figure(figsize=(16, 12))
         self.build_layout()
 
         self.ani = FuncAnimation(self.fig, self.update_all, interval=PLOT_INTERVAL_MS, cache_frame_data=False)
-        self.lock = threading.Lock() # 用于保护绘图数据
+        self.lock = threading.Lock()
 
         self.init_history()
 
         # 初始化默认数据，确保不会出现 None 值
-        # 这些变量现在存储“主CoP”的数据
         self.adc_angle = 0.0
         self.adc_mag = 0.0
         self.force_angle = 0.0
         self.force_mag = 0.0
-        self.raw_fx = 0.0 # 主CoP对应的力传感器分量
-        self.raw_fy = 0.0 # 主CoP对应的力传感器分量
+        self.diff_frame = np.zeros((12, 7))
 
-        self.diff_frame = np.zeros((self.rows, self.cols)) # 用于显示压力分布
-        self.total_pressure_sum = 0.0
+        self.cop_x = 0.0
+        self.cop_y = 0.0
+        self.base_cop_x = 0.0
+        self.base_cop_y = 0.0
+        self.delta_cop_x = 0.0
+        self.delta_cop_y = 0.0
+        self.raw_fx = 0.0
+        self.raw_fy = 0.0
+        self.regions = []  # 多COP区域列表
 
-        # 新增：存储所有CoP的数据列表
-        self.current_cops_data = [] # 存储从COP.py获取的CoP列表
+        # 多COP颜色表
+        self.cop_colors = ['green', 'cyan', 'orange', 'yellow',
+                           'magenta', 'brown', 'gray', 'purple']
 
     def build_layout(self):
+        # 调整GridSpec以容纳更多图表
+        # 将原始的 [6, 1, 1, 1] height_ratios 调整为 [6, 1, 1, 1, 1, 1] 使得 ax3a, ax3b, ax4 可以分别再拆分
+        # 实际操作是，将 ax3a, ax3b 的位置变成 subgridspec
         gs_outer = GridSpec(4, 2, width_ratios=[1, 1], height_ratios=[6, 2, 2, 1], hspace=0.3, wspace=0.3)
         gs_arrows = gs_outer[0, 0].subgridspec(1, 2, wspace=0.3)
 
@@ -78,7 +87,9 @@ class RealTimePlot:
         self.ax2.axis('off')
         self.ax2.set_title("Magnitude Arrows (CoP Offset & Force)", fontsize=10)
 
-        gs_adc_components = gs_outer[1, 0].subgridspec(1, 2, hspace=0.4)
+        # ========== 修改点1：更新子图标题为 ADC Mag ==========
+        # 为 ADC Fx 和 Fy 创建子图
+        gs_adc_components = gs_outer[1, 0].subgridspec(1, 2, hspace=0.4)          # 主网格中选择第 2 行、第 1 列的单元格,并且划分 1 行 2 列个子网格
         self.ax_adc_dx = plt.subplot(gs_adc_components[0, 0])
         self.ax_adc_dx.set_title("PZT_Fx Magnitude (CoP Offset X)", fontsize=10)
         self.ax_adc_dx.grid(True, alpha=0.3)
@@ -89,6 +100,7 @@ class RealTimePlot:
         self.ax_adc_dy.grid(True, alpha=0.3)
         self.line_adc_dy, = self.ax_adc_dy.plot([], [], 'c-', linewidth=1.5)
 
+        # 为 Force Fx 和 Fy 创建子图
         gs_force_components = gs_outer[2, 0].subgridspec(1, 2, hspace=0.4)
         self.ax_force_fx = plt.subplot(gs_force_components[0, 0])
         self.ax_force_fx.set_title("Force_Fx Magnitude", fontsize=10)
@@ -100,8 +112,9 @@ class RealTimePlot:
         self.ax_force_fy.grid(True, alpha=0.3)
         self.line_force_fy, = self.ax_force_fy.plot([], [], 'm-', linewidth=1.5)
 
+        # Angle Error 保持不变，但更新标题
         self.ax4 = plt.subplot(gs_outer[3, 0])
-        self.ax4.set_title("Angle Error between CoP Offset and Force (Main CoP)", fontsize=10)
+        self.ax4.set_title("Angle Error between CoP Offset and Force", fontsize=10)
         self.ax4.set_ylim(0, 180)
         self.ax4.grid(True, alpha=0.3)
         self.error_line, = self.ax4.plot([], [], 'g-o', linewidth=1.5, markersize=2)
@@ -115,55 +128,65 @@ class RealTimePlot:
         self.ax6.set_title("Gradient Arrows", fontsize=10)
         self.ax6.axis('off')
 
+    # ========== 修改点2：初始化历史队列，将raw_adc_sum_history改为adc_mag_history ==========
     def init_history(self):
         self.angle_error_history = deque(maxlen=ERROR_PLOT_LEN)
+        # ADC (CoP Offset) 分量历史
         self.adc_dx_history = deque(maxlen=MAG_PLOT_LEN)
         self.adc_dy_history = deque(maxlen=MAG_PLOT_LEN)
+        # Force 分量历史
         self.force_fx_history = deque(maxlen=MAG_PLOT_LEN)
         self.force_fy_history = deque(maxlen=MAG_PLOT_LEN)
+
+        # 保留原有的总幅值历史，用于结束时的全程曲线绘制
         self.adc_mag_history = deque(maxlen=MAG_PLOT_LEN) 
         self.raw_force_mag_history = deque(maxlen=MAG_PLOT_LEN)
 
-    def set_data(self, main_adc_angle, main_adc_mag, main_force_angle, main_force_mag, 
-                 diff_frame, total_pressure_sum, raw_fx, raw_fy, list_of_cop_data): # list_of_cop_data 是新增的
 
+    def set_data(self, adc_angle, adc_mag, force_angle, force_mag, diff_frame, total_pressure_sum, force_total_mag,
+                 cop_x, cop_y, base_cop_x, base_cop_y, delta_cop_x, delta_cop_y, raw_fx, raw_fy, regions=None):
         with self.lock:
-            # 更新主CoP数据
-            self.adc_angle = main_adc_angle
-            self.adc_mag = main_adc_mag
-            self.force_angle = main_force_angle
-            self.force_mag = main_force_mag
+            self.adc_angle = adc_angle
+            self.adc_mag = adc_mag
+            self.force_angle = force_angle
+            self.force_mag = force_mag
+            self.diff_frame = diff_frame.reshape(self.rows, self.cols)
+            self.cop_x = cop_x
+            self.cop_y = cop_y
+            self.base_cop_x = base_cop_x
+            self.base_cop_y = base_cop_y
+            self.delta_cop_x = delta_cop_x
+            self.delta_cop_y = delta_cop_y
             self.raw_fx = raw_fx
             self.raw_fy = raw_fy
+            self.regions = regions if regions else []
 
-            # 更新用于压力图的数据
-            self.diff_frame = diff_frame.reshape(self.rows, self.cols)
-            self.total_pressure_sum = total_pressure_sum
-
-            # 更新所有CoP的数据列表
-            self.current_cops_data = list_of_cop_data
-
-            # 计算角度误差
-            diff = abs(self.adc_angle - self.force_angle)
+            diff = abs(adc_angle - force_angle)
             error = min(diff, 360 - diff)
             self.angle_error_history.append(error)
 
-            # 更新历史数据 (主CoP)
-            self.adc_mag_history.append(self.adc_mag)
-            self.raw_force_mag_history.append(self.force_mag) # 这里用force_mag而不是force_total_mag，因为main.py里已计算好
-            self.adc_dx_history.append(self.current_cops_data[0]['delta_cop_x'] if self.current_cops_data else 0.0)
-            self.adc_dy_history.append(self.current_cops_data[0]['delta_cop_y'] if self.current_cops_data else 0.0)
-            self.force_fx_history.append(self.raw_fx)
-            self.force_fy_history.append(self.raw_fy)
+            # ========== adc_mag到历史队列（不再使用raw_adc_sum） ==========
+            self.adc_mag_history.append(adc_mag) # 用于绘制全程总幅值曲线
+            self.raw_force_mag_history.append(force_total_mag)
+
+            # 追加 CoP 偏移分量 (PZT Fx/Fy)
+            self.adc_dx_history.append(delta_cop_x)
+            self.adc_dy_history.append(delta_cop_y)
+
+            # 追加力传感器分量 (Force Fx/Fy)
+            self.force_fx_history.append(raw_fx)
+            self.force_fy_history.append(raw_fy)
+
 
     def append_full_data(self, current_ms, adc_mag, force_mag):
         """
-        单独的函数：向全程列表追加数据 (主CoP)
+        单独的函数：向全程列表追加数据
         """
         with self.lock:
             self.full_time_list.append(current_ms)
             self.full_adc_mag_list.append(adc_mag)
             self.full_force_mag_list.append(force_mag)
+
 
     def update_all(self, frame):
         self.update_direction_arrows()
@@ -175,20 +198,38 @@ class RealTimePlot:
         self.update_gradient_table()
         return []
 
+
     def update_direction_arrows(self):
         with self.lock:
             a = self.adc_angle
             f = self.force_angle
+            regions = list(self.regions)
+
         self.ax1.clear()
         self.ax1.set_xlim(0, 1)
         self.ax1.set_ylim(0, 1)
         self.ax1.set_aspect('equal')
         self.ax1.axis('off')
         self.ax1.set_title("Direction Arrows (CoP Offset & Force)")
-        self.ax1.arrow(0.5, 0.5, 0.4*np.cos(np.radians(a)), 0.4*np.sin(np.radians(a)),
-                       head_width=0.12, fc='k', ec='k', lw=2.5)
-        self.ax1.arrow(0.5, 0.5, 0.35*np.cos(np.radians(f)), 0.35*np.sin(np.radians(f)),
+
+        # 最多显示前3个COP的方向箭头
+        cop_arrow_colors = ['k', 'gray', 'darkgray']
+        for i, r in enumerate(regions[:3]):
+            ang = r.get('angle', 0.0)
+            lw = 2.5 if i == 0 else 1.5
+            hw = 0.12 if i == 0 else 0.08
+            length = 0.4 if i == 0 else 0.3
+            self.ax1.arrow(0.5, 0.5,
+                           length * np.cos(np.radians(ang)),
+                           length * np.sin(np.radians(ang)),
+                           head_width=hw, fc=cop_arrow_colors[i],
+                           ec=cop_arrow_colors[i], lw=lw)
+
+        # 力传感器方向（红色）
+        self.ax1.arrow(0.5, 0.5, 0.35 * np.cos(np.radians(f)),
+                       0.35 * np.sin(np.radians(f)),
                        head_width=0.1, fc='r', ec='r', lw=2)
+
 
     def update_magnitude_arrows(self):
         with self.lock:
@@ -196,6 +237,7 @@ class RealTimePlot:
             m = self.adc_mag
             fa = self.force_angle
             fm = self.force_mag
+            regions = list(self.regions)
 
         self.ax2.clear()
         self.ax2.set_xlim(0, 1)
@@ -204,25 +246,38 @@ class RealTimePlot:
         self.ax2.axis('off')
         self.ax2.set_title("Magnitude Arrows (CoP Offset & Force)", fontsize=10)
 
-        # 黑色箭头（CoP Offset）逻辑
-        th_adc = np.deg2rad(a)
-        max_adc_length = 0.45
-        adc_normalize_denominator = 5.0 # 根据最大理论CoP偏移幅值12.5附近调整
-        l_adc = (m / adc_normalize_denominator) * max_adc_length if m > self.epsilon else 0.0
-        l_adc = min(l_adc, max_adc_length)
+        adc_normalize_denominator = 5.0
 
-        if l_adc > 0.02:
-            head_width_adc = max(0.06, l_adc * 0.15)
-            head_length_adc = max(0.04, l_adc * 0.1)
-            self.ax2.arrow(0.5, 0.5, l_adc*np.cos(th_adc), l_adc*np.sin(th_adc),
-                        head_width=head_width_adc, head_length=head_length_adc,
-                        fc='k', ec='k', lw=2.5, length_includes_head=True,
-                        alpha=1.0, joinstyle='round', capstyle='round')
-        elif l_adc > self.epsilon:
-            self.ax2.plot([0.5, 0.5 + l_adc*np.cos(th_adc)],
-                        [0.5, 0.5 + l_adc*np.sin(th_adc)],
-                        'k-', lw=2.5, alpha=1.0)
-        self.ax2.text(0.5, 0.1, f"CoP Offset: {m:.2f}", ha='center', va='center', fontsize=8, color='black')
+        # 绘制前3个COP的幅值箭头
+        cop_colors = ['k', 'gray', 'darkgray']
+        cop_labels = []
+        for i, r in enumerate(regions[:3]):
+            ang = np.deg2rad(r.get('angle', 0.0))
+            mag = r.get('mag', 0.0)
+            max_len = 0.45 if i == 0 else 0.35
+
+            l = (mag / adc_normalize_denominator) * max_len if mag > self.epsilon else 0.0
+            l = min(l, max_len)
+
+            if l > 0.02:
+                hw = max(0.04, l * 0.12)
+                hl = max(0.03, l * 0.08)
+                self.ax2.arrow(0.5, 0.5, l * np.cos(ang), l * np.sin(ang),
+                               head_width=hw, head_length=hl,
+                               fc=cop_colors[i], ec=cop_colors[i],
+                               lw=2.0 if i == 0 else 1.2,
+                               length_includes_head=True,
+                               alpha=0.9, joinstyle='round', capstyle='round')
+            elif l > self.epsilon:
+                self.ax2.plot([0.5, 0.5 + l * np.cos(ang)],
+                              [0.5, 0.5 + l * np.sin(ang)],
+                              color=cop_colors[i], lw=2.0 if i == 0 else 1.2, alpha=0.9)
+            cop_labels.append(f"COP{i+1}: {mag:.2f}")
+
+        # COP 标签（底部堆叠）
+        for i, label in enumerate(cop_labels):
+            self.ax2.text(0.5, 0.05 + i * 0.06, label, ha='center', va='center',
+                          fontsize=7, color=cop_colors[i])
 
         # 红色箭头（Force）
         th_force = np.deg2rad(fa)
@@ -233,16 +288,20 @@ class RealTimePlot:
         if l_force > 0.02:
             head_width = max(0.06, l_force * 0.15)
             head_length = max(0.04, l_force * 0.1)
-            self.ax2.arrow(0.5, 0.5, l_force*np.cos(th_force), l_force*np.sin(th_force),
-                          head_width=head_width, head_length=head_length,
-                          fc='red', ec='darkred', lw=3.5, length_includes_head=True,
-                          alpha=1.0, joinstyle='round', capstyle='round')
+            self.ax2.arrow(0.5, 0.5, l_force * np.cos(th_force), l_force * np.sin(th_force),
+                           head_width=head_width, head_length=head_length,
+                           fc='red', ec='darkred', lw=3.5, length_includes_head=True,
+                           alpha=1.0, joinstyle='round', capstyle='round')
         else:
-            self.ax2.plot([0.5, 0.5 + l_force*np.cos(th_force)],
-                          [0.5, 0.5 + l_force*np.sin(th_force)],
+            self.ax2.plot([0.5, 0.5 + l_force * np.cos(th_force)],
+                          [0.5, 0.5 + l_force * np.sin(th_force)],
                           'r-', lw=3.5, alpha=1.0)
-        self.ax2.text(0.5, 0.9, f"Force: {fm:.1f}", ha='center', va='center', fontsize=8, color='red')
 
+        self.ax2.text(0.5, 0.92, f"Force: {fm:.1f}", ha='center', va='center',
+                      fontsize=8, color='red')
+
+
+    # ========== 更新绘图逻辑，读取adc_mag_history ==========
     def update_adc_components(self):
         # PZT_Fx (delta_cop_x)
         if len(self.adc_dx_history) > 0:
@@ -250,8 +309,9 @@ class RealTimePlot:
             ys = list(self.adc_dx_history)
             self.line_adc_dx.set_data(xs, ys)
             self.ax_adc_dx.set_xlim(0, len(xs))
+            # 动态调整Y轴范围，避免数据被截断，且考虑零值情况
             min_y_dx, max_y_dx = min(ys) * 0.95, max(ys) * 1.05
-            if min_y_dx == max_y_dx:
+            if min_y_dx == max_y_dx: # 如果所有值都相同
                 self.ax_adc_dx.set_ylim(min_y_dx - 1, max_y_dx + 1)
             else:
                 self.ax_adc_dx.set_ylim(min_y_dx, max_y_dx)
@@ -267,6 +327,7 @@ class RealTimePlot:
                 self.ax_adc_dy.set_ylim(min_y_dy - 1, max_y_dy + 1)
             else:
                 self.ax_adc_dy.set_ylim(min_y_dy, max_y_dy)
+
 
     def update_force_components(self):
         # Force_Fx
@@ -293,6 +354,7 @@ class RealTimePlot:
             else:
                 self.ax_force_fy.set_ylim(min_y_fy, max_y_fy)
 
+
     def update_error(self):
         if len(self.angle_error_history) > 0:
             xs = list(range(len(self.angle_error_history)))
@@ -300,21 +362,19 @@ class RealTimePlot:
             self.error_line.set_data(xs, ys)
             self.ax4.set_xlim(0, len(xs))
 
+
     def update_pressure_table(self):
-        """
-        更新压力表 (ax5)，显示初始CoP、动态CoP和CoP偏移向量。
-        现在支持显示多个CoP。
-        """
         with self.lock:
             data = self.diff_frame.copy()
-            cops_to_plot = self.current_cops_data # 获取所有CoP数据
+            r1, r2, c1, c2 = self.final_r1, self.final_r2, self.final_c1, self.final_c2
+            regions = list(self.regions)
 
         self.ax5.clear()
         self.ax5.set_title("Pressure Table", fontsize=10)
         self.ax5.axis('off')
         nrows, ncols = self.rows, self.cols
         self.ax5.set_xlim(-0.5, ncols - 0.5)
-        self.ax5.set_ylim(nrows - 0.5, -0.5) # Y轴反向，索引大的在上方
+        self.ax5.set_ylim(nrows - 0.5, -0.5)
         self.ax5.set_aspect('equal')
 
         vmax = np.max(data) if np.max(data) != 0 else 1
@@ -336,44 +396,50 @@ class RealTimePlot:
         for i in range(nrows):
             for j in range(ncols):
                 cell = self.table_plot[(i, j)]
-                cell.set_height(1/nrows)
-                cell.set_width(1/ncols)
+                cell.set_height(1 / nrows)
+                cell.set_width(1 / ncols)
 
-        # 绘制所有检测到的CoP
-        for i, cop_info in enumerate(cops_to_plot):
-            cop_x_plot = cop_info['cop_y'] # 注意这里x和y是反的，因为COP.py中x是列，y是行
-            cop_y_plot = cop_info['cop_x']
-            base_cop_x = cop_info['initial_cop_y']
-            base_cop_y = cop_info['initial_cop_x']
-            delta_cop_x = cop_info['delta_cop_y']
-            delta_cop_y = cop_info['delta_cop_x'] # 这里的delta_cop_y是负的，因为y轴反向
+        # 绘制所有COP
+        for idx, r in enumerate(regions):
+            color = self.cop_colors[idx % len(self.cop_colors)]
+            size = 150 if idx == 0 else 80
+            label_suffix = f" COP{idx + 1}" if idx > 0 else ""
 
-            color = plt.cm.get_cmap('Set1', len(cops_to_plot))(i) # 为每个CoP分配不同颜色
-            
-            # 绘制初始CoP
-            if cop_info['is_initialized']:
-                self.ax5.plot(base_cop_x, base_cop_y, 'x', markersize=10, color=color, label=f'Initial CoP {cop_info["id"]}')
-            
-            # 绘制当前CoP
-            self.ax5.scatter(cop_x_plot, cop_y_plot, s=150, facecolors='none', edgecolors=color, linewidths=2, label=f'Current CoP {cop_info["id"]}')
+            # 初始点
+            if r.get('is_initialized'):
+                self.ax5.plot(r['base_cop_x'], r['base_cop_y'],
+                              'x', color=color, markersize=8 if idx == 0 else 6,
+                              label=f'Init{label_suffix}')
 
-            # 绘制CoP偏移向量
-            if cop_info['is_initialized'] and np.hypot(delta_cop_x, delta_cop_y) > 0.05:
-                # delta_cop_y 为负值，因为绘制时Y轴向上为正，但我们的传感器Y轴向下
-                self.ax5.arrow(base_cop_x, base_cop_y, delta_cop_x, -delta_cop_y, 
-                               head_width=0.3, head_length=0.3, fc=color, ec=color, linewidth=2, alpha=0.7)
+            # 当前点
+            self.ax5.scatter(r['cop_x'], r['cop_y'], s=size,
+                             color=color, edgecolors='black' if idx == 0 else 'none',
+                             linewidths=0.8 if idx == 0 else 0,
+                             label=f'CoP{label_suffix}', zorder=10)
 
-        # self.ax5.legend(fontsize=8, loc='upper left') # 太多CoP时legend可能不好看
+            # 偏移箭头
+            if r.get('is_initialized') and np.hypot(r['delta_cop_x'], r['delta_cop_y']) > 0.05:
+                self.ax5.arrow(r['base_cop_x'], r['base_cop_y'],
+                               r['delta_cop_x'], -r['delta_cop_y'],
+                               head_width=0.25, head_length=0.25,
+                               fc=color, ec=color, linewidth=1.5, alpha=0.7)
+
+            # 连通域边界描边
+            for (by, bx) in r.get('boundary_cells', []):
+                rect = plt.Rectangle((bx - 0.5, by - 0.5), 1, 1,
+                                     fill=False, edgecolor=color,
+                                     linewidth=1.5, alpha=0.7, zorder=5)
+                self.ax5.add_patch(rect)
+
+        self.ax5.legend(fontsize=7, loc='upper right')
+
 
     def update_gradient_table(self):
-        """
-        更新梯度箭头图 (ax6)，显示每个点的梯度。
-        现在支持显示多个CoP。
-        """
         with self.lock:
-            with COP.grad_table_lock: 
+            with COP.grad_table_lock:
                 data = COP.grad_table_data.copy()
-            cops_to_plot = self.current_cops_data
+            r1, r2, c1, c2 = self.final_r1, self.final_r2, self.final_c1, self.final_c2
+            regions = list(self.regions)
 
         self.ax6.clear()
         self.ax6.set_title("Gradient Arrows (gx, gy) 12×7", fontsize=10)
@@ -383,57 +449,52 @@ class RealTimePlot:
         self.ax6.set_aspect('equal')
         self.ax6.axis('off')
 
-        # 网格
         for r_grid in range(nrows + 1):
             self.ax6.axhline(r_grid - 0.5, color='black', linestyle='-', linewidth=0.5, zorder=0)
         for c_grid in range(ncols + 1):
             self.ax6.axvline(c_grid - 0.5, color='black', linestyle='-', linewidth=0.5, zorder=0)
 
-        # 梯度箭头
         for r in range(nrows):
             for c in range(ncols):
                 gx, gy = data[r, c, 0], data[r, c, 1]
                 mag = np.hypot(gx, gy)
-
-                if mag > 1.0: # 阈值 1.0
+                if mag > 1.0:
                     gx_norm = gx / mag
                     gy_norm = gy / mag
+                    self.ax6.quiver(c, r, gx_norm, gy_norm,
+                                    color='k', scale=2.5, width=0.02,
+                                    headwidth=6, headlength=8, headaxislength=7,
+                                    angles='xy', scale_units='xy', zorder=5)
 
-                    self.ax6.quiver(c, r, gx_norm, gy_norm, # x=col, y=row
-                                    color='k',
-                                    scale=2.5,
-                                    width=0.02,
-                                    headwidth=6,
-                                    headlength=8,
-                                    headaxislength=7,
-                                    angles='xy',
-                                    scale_units='xy',
-                                    zorder=5)
+        # 绘制所有COP标记
+        for idx, r in enumerate(regions):
+            color = self.cop_colors[idx % len(self.cop_colors)]
+            size = 150 if idx == 0 else 80
+            self.ax6.scatter(r['cop_x'], r['cop_y'], s=size,
+                             color=color, edgecolors='black' if idx == 0 else 'none',
+                             linewidths=0.8 if idx == 0 else 0, zorder=10)
 
-        # 绘制所有检测到的CoP
-        for i, cop_info in enumerate(cops_to_plot):
-            cop_x_plot = cop_info['cop_y'] # CoP的x是列索引，对应绘图的x
-            cop_y_plot = cop_info['cop_x'] # CoP的y是行索引，对应绘图的y
-            base_cop_x = cop_info['initial_cop_y']
-            base_cop_y = cop_info['initial_cop_x']
-            delta_cop_x = cop_info['delta_cop_y']
-            delta_cop_y = cop_info['delta_cop_x'] # 这里的delta_cop_y是负的，因为y轴反向
+            if r.get('is_initialized'):
+                self.ax6.plot(r['base_cop_x'], r['base_cop_y'],
+                              'x', color=color, markersize=8 if idx == 0 else 6, zorder=10)
 
-            color = plt.cm.get_cmap('Set1', len(cops_to_plot))(i)
+                if np.hypot(r['delta_cop_x'], r['delta_cop_y']) > 0.05:
+                    self.ax6.arrow(r['base_cop_x'], r['base_cop_y'],
+                                   r['delta_cop_x'], -r['delta_cop_y'],
+                                   head_width=0.25, head_length=0.25,
+                                   fc=color, ec=color, linewidth=1.5, alpha=0.7, zorder=9)
 
-            # 绘制初始CoP
-            if cop_info['is_initialized']:
-                self.ax6.plot(base_cop_x, base_cop_y, 'x', markersize=10, color=color, zorder=10)
-            
-            # 绘制当前CoP
-            self.ax6.scatter(cop_x_plot, cop_y_plot, s=150, facecolors='none', edgecolors=color, linewidths=2, zorder=10)
+        # ROI 框
+        rect_x = c1 - 0.5
+        rect_y = r1 - 0.5
+        rect_width = (c2 - c1 + 1)
+        rect_height = (r2 - r1 + 1)
+        roi_rect = plt.Rectangle((rect_x, rect_y), rect_width, rect_height,
+                                 linewidth=3, edgecolor='blue', facecolor='none',
+                                 linestyle='--', zorder=5)
+        self.ax6.add_patch(roi_rect)
 
-            # 绘制CoP偏移向量
-            if cop_info['is_initialized'] and np.hypot(delta_cop_x, delta_cop_y) > 0.05:
-                self.ax6.arrow(base_cop_x, base_cop_y, delta_cop_x, -delta_cop_y,
-                               head_width=0.3, head_length=0.3, fc=color, ec=color, linewidth=2, zorder=10)
-
-        # self.ax6.legend(loc='upper left', fontsize=8) # 太多CoP时legend可能不好看
+        self.ax6.legend(loc='upper left', fontsize=8)
 
     # ==================== 程序结束绘制全程静态图 ====================
     def plot_full_magnitude_curve(self, save_dir):
@@ -452,8 +513,8 @@ class RealTimePlot:
 
         # 绘制 CoP 偏移幅值
         if len(self.full_adc_mag_list) > 0:
-            ax1.plot(self.full_time_list, self.full_adc_mag_list, 'b-', linewidth=1.5, label='CoP Offset Magnitude (Main CoP)')
-            ax1.set_title("CoP Offset Magnitude Over Time (Main CoP)", fontsize=14)
+            ax1.plot(self.full_time_list, self.full_adc_mag_list, 'b-', linewidth=1.5, label='CoP Offset Magnitude')
+            ax1.set_title("CoP Offset Magnitude Over Time", fontsize=14)
             ax1.set_xlabel("Time (ms)", fontsize=12)
             ax1.set_ylabel("CoP Offset Magnitude (Units)", fontsize=12)
             ax1.grid(True, alpha=0.3)
@@ -482,6 +543,7 @@ class RealTimePlot:
         plt.savefig(save_path, dpi=300)
         print(f"📊 全程幅值曲线已保存至：{save_path}")
         plt.close(fig) # 关闭静态图，避免与实时图冲突
+
 
     def show(self):
         plt.tight_layout()
