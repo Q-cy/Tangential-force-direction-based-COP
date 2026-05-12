@@ -33,14 +33,24 @@ class RealTimePlot:
         self.epsilon = 0.01 
 
         # ===================== 全程数据存储列表 =====================
-        self.full_time_list = []          # 存储全程时间戳 (ms)
-        self.full_adc_mag_list = []       # 存储全程 CoP 偏移幅值
-        self.full_force_mag_list = []     # 存储全程力传感器幅值
-        self.full_cal_mag_list = []       # 存储全程标定力幅值
-        self.full_fx_list = []            # 全程实测 Fx
-        self.full_fy_list = []            # 全程实测 Fy
-        self.full_fx_cal_list = []        # 全程标定 Fx
-        self.full_fy_cal_list = []        # 全程标定 Fy
+        self.full_time_list = []
+        # PZT
+        self.full_adc_angle_list = []
+        self.full_adc_mag_list = []
+        self.full_total_pressure_list = []
+        self.full_adc_dx_list = []
+        self.full_adc_dy_list = []
+        # Force
+        self.full_force_angle_list = []
+        self.full_force_mag_list = []
+        self.full_fz_list = []
+        self.full_fx_list = []
+        self.full_fy_list = []
+        # Calibrated
+        self.full_cal_angle_list = []
+        self.full_cal_mag_list = []
+        self.full_fx_cal_list = []
+        self.full_fy_cal_list = []
 
         self.fig = plt.figure(figsize=(16, 12))
         self.build_layout()
@@ -228,20 +238,28 @@ class RealTimePlot:
                 self.force_fy_cal_history.append(fy_cal)
 
 
-    def append_full_data(self, current_ms, adc_mag, force_mag, cal_mag=None,
-                          fx=None, fy=None, fx_cal=None, fy_cal=None):
-        """
-        单独的函数：向全程列表追加数据
-        """
+    def append_full_data(self, current_ms,
+                          adc_angle, adc_mag, total_pressure, dx_f, dy_f,
+                          force_angle, force_mag, fz, fx, fy,
+                          cal_angle=None, cal_mag=None, fx_cal=None, fy_cal=None):
         with self.lock:
             self.full_time_list.append(current_ms)
+            # PZT
+            self.full_adc_angle_list.append(adc_angle)
             self.full_adc_mag_list.append(adc_mag)
+            self.full_total_pressure_list.append(total_pressure)
+            self.full_adc_dx_list.append(dx_f)
+            self.full_adc_dy_list.append(dy_f)
+            # Force
+            self.full_force_angle_list.append(force_angle)
             self.full_force_mag_list.append(force_mag)
+            self.full_fz_list.append(fz)
+            self.full_fx_list.append(fx)
+            self.full_fy_list.append(fy)
+            # Calibrated
             if cal_mag is not None:
+                self.full_cal_angle_list.append(cal_angle)
                 self.full_cal_mag_list.append(cal_mag)
-            if fx is not None:
-                self.full_fx_list.append(fx)
-                self.full_fy_list.append(fy)
                 self.full_fx_cal_list.append(fx_cal if fx_cal is not None else float('nan'))
                 self.full_fy_cal_list.append(fy_cal if fy_cal is not None else float('nan'))
 
@@ -550,88 +568,75 @@ class RealTimePlot:
 
     # ==================== 程序结束绘制全程综合图 ====================
     def plot_full_magnitude_curve(self, save_dir):
-        """
-        程序结束后绘制 6 面板综合图：
-        (1) CoP Offset Magnitude, (2) Force Magnitude (实测+标定),
-        (3) Fx (实测+标定), (4) Fy (实测+标定),
-        (5) Error Fx + RMS, (6) Error Fy + RMS
-        """
+        """5×2=10 面板：左 PZT，右 Measured vs Calibrated"""
         import os
 
         if len(self.full_time_list) == 0:
             print("⚠️ 没有采集到全程数据，跳过绘图。")
             return
 
-        has_cal = len(self.full_fx_cal_list) == len(self.full_time_list)
-        has_fx = len(self.full_fx_list) == len(self.full_time_list)
-
-        fig, axes = plt.subplots(3, 2, figsize=(16, 18))
-        (ax1, ax2), (ax3, ax4), (ax5, ax6) = axes
+        has_cal = len(self.full_cal_mag_list) == len(self.full_time_list)
         t = self.full_time_list
 
-        # --- (1) CoP Offset Magnitude ---
-        if len(self.full_adc_mag_list) > 0:
-            ax1.plot(t, self.full_adc_mag_list, 'b-', linewidth=1.0)
-            ax1.set_title("CoP Offset Magnitude", fontsize=11)
-            ax1.set_ylabel("Magnitude", fontsize=9)
-            ax1.grid(True, alpha=0.3)
+        fig, axes = plt.subplots(5, 2, figsize=(18, 24))
+        (aL1, aR1), (aL2, aR2), (aL3, aR3), (aL4, aR4), (aL5, aR5) = axes
 
-        # --- (2) Force Magnitude (实测 + 标定) ---
-        if len(self.full_force_mag_list) > 0:
-            ax2.plot(t, self.full_force_mag_list, 'r-', linewidth=1.0, label='Measured')
-            if has_cal and len(self.full_cal_mag_list) == len(t):
-                ax2.plot(t, self.full_cal_mag_list, 'g--', linewidth=1.0, label='Calibrated')
-            ax2.set_title("Force Magnitude", fontsize=11)
-            ax2.set_ylabel("Force (N)", fontsize=9)
-            ax2.grid(True, alpha=0.3)
-            ax2.legend(fontsize=8)
+        # ===== 左列: PZT =====
+        def _safe_plot(ax, data, color, label):
+            if data and len(data) == len(t):
+                ax.plot(t, data, color, linewidth=1.0, label=label)
 
-        # --- (3) Fx (实测 + 标定) ---
-        if has_fx:
-            ax3.plot(t, self.full_fx_list, 'r-', linewidth=1.0, label='Fx measured')
-            if has_cal:
-                ax3.plot(t, self.full_fx_cal_list, 'g--', linewidth=1.0, label='Fx calibrated')
-            ax3.set_title("Fx: Measured vs Calibrated", fontsize=11)
-            ax3.set_ylabel("Force (N)", fontsize=9)
-            ax3.grid(True, alpha=0.3)
-            ax3.legend(fontsize=8)
+        _safe_plot(aL1, self.full_adc_angle_list, 'b-', 'PZT Angle')
+        aL1.set_title("PZT Angle", fontsize=11); aL1.set_ylabel("deg", fontsize=9); aL1.grid(True, alpha=0.3)
 
-        # --- (4) Fy (实测 + 标定) ---
-        if has_fx:
-            ax4.plot(t, self.full_fy_list, 'm-', linewidth=1.0, label='Fy measured')
-            if has_cal:
-                ax4.plot(t, self.full_fy_cal_list, 'c--', linewidth=1.0, label='Fy calibrated')
-            ax4.set_title("Fy: Measured vs Calibrated", fontsize=11)
-            ax4.set_ylabel("Force (N)", fontsize=9)
-            ax4.grid(True, alpha=0.3)
-            ax4.legend(fontsize=8)
+        _safe_plot(aL2, self.full_adc_mag_list, 'b-', 'PZT Mag')
+        aL2.set_title("PZT Mag", fontsize=11); aL2.set_ylabel("Mag", fontsize=9); aL2.grid(True, alpha=0.3)
 
-        # --- (5) Error Fx ---
-        if has_fx and has_cal:
-            fx_err = [fx - fxc for fx, fxc in zip(self.full_fx_list, self.full_fx_cal_list)]
-            rms_fx = np.sqrt(np.mean(np.array(fx_err)**2))
-            ax5.plot(t, fx_err, 'r-', linewidth=1.0)
-            ax5.axhline(0, color='gray', linestyle=':', alpha=0.5)
-            ax5.set_title(f"Error Fx (RMS={rms_fx:.3f} N)", fontsize=11)
-            ax5.set_ylabel("Error (N)", fontsize=9)
-            ax5.grid(True, alpha=0.3)
-            ax5.text(0.02, 0.95, f"RMS={rms_fx:.3f} N", transform=ax5.transAxes,
-                     fontsize=10, va='top', color='red')
+        _safe_plot(aL3, self.full_total_pressure_list, 'b-', 'PZT Fz')
+        aL3.set_title("PZT Fz", fontsize=11); aL3.set_ylabel("Pressure", fontsize=9); aL3.grid(True, alpha=0.3)
 
-        # --- (6) Error Fy ---
-        if has_fx and has_cal:
-            fy_err = [fy - fyc for fy, fyc in zip(self.full_fy_list, self.full_fy_cal_list)]
-            rms_fy = np.sqrt(np.mean(np.array(fy_err)**2))
-            ax6.plot(t, fy_err, 'm-', linewidth=1.0)
-            ax6.axhline(0, color='gray', linestyle=':', alpha=0.5)
-            ax6.set_title(f"Error Fy (RMS={rms_fy:.3f} N)", fontsize=11)
-            ax6.set_ylabel("Error (N)", fontsize=9)
-            ax6.grid(True, alpha=0.3)
-            ax6.text(0.02, 0.95, f"RMS={rms_fy:.3f} N", transform=ax6.transAxes,
-                     fontsize=10, va='top', color='red')
+        _safe_plot(aL4, self.full_adc_dx_list, 'b-', 'PZT Fx')
+        aL4.set_title("PZT Fx", fontsize=11); aL4.set_ylabel("ΔCoP X", fontsize=9); aL4.grid(True, alpha=0.3)
 
-        for ax in [ax1, ax2, ax3, ax4, ax5, ax6]:
-            ax.set_xlabel("Time (ms)", fontsize=9)
+        _safe_plot(aL5, self.full_adc_dy_list, 'c-', 'PZT Fy')
+        aL5.set_title("PZT Fy", fontsize=11); aL5.set_ylabel("ΔCoP Y", fontsize=9); aL5.grid(True, alpha=0.3)
+
+        # ===== 右列: Measured vs Calibrated =====
+        # Angle
+        _safe_plot(aR1, self.full_force_angle_list, 'r-', 'Measured')
+        if has_cal: _safe_plot(aR1, self.full_cal_angle_list, 'g--', 'Calibrated')
+        aR1.set_title("Angle: Meas vs Cal", fontsize=11); aR1.set_ylabel("deg", fontsize=9)
+        aR1.grid(True, alpha=0.3)
+        if has_cal: aR1.legend(fontsize=8)
+
+        # Mag
+        _safe_plot(aR2, self.full_force_mag_list, 'r-', 'Measured')
+        if has_cal: _safe_plot(aR2, self.full_cal_mag_list, 'g--', 'Calibrated')
+        aR2.set_title("Mag: Meas vs Cal", fontsize=11); aR2.set_ylabel("N", fontsize=9)
+        aR2.grid(True, alpha=0.3)
+        if has_cal: aR2.legend(fontsize=8)
+
+        # Fz (单线, 无标定)
+        _safe_plot(aR3, self.full_fz_list, 'r-', 'Fz')
+        aR3.set_title("Fz: Measured", fontsize=11); aR3.set_ylabel("N", fontsize=9); aR3.grid(True, alpha=0.3)
+
+        # Fx
+        _safe_plot(aR4, self.full_fx_list, 'r-', 'Measured')
+        if has_cal: _safe_plot(aR4, self.full_fx_cal_list, 'g--', 'Calibrated')
+        aR4.set_title("Fx: Meas vs Cal", fontsize=11); aR4.set_ylabel("N", fontsize=9)
+        aR4.grid(True, alpha=0.3)
+        if has_cal: aR4.legend(fontsize=8)
+
+        # Fy
+        _safe_plot(aR5, self.full_fy_list, 'm-', 'Measured')
+        if has_cal: _safe_plot(aR5, self.full_fy_cal_list, 'c--', 'Calibrated')
+        aR5.set_title("Fy: Meas vs Cal", fontsize=11); aR5.set_ylabel("N", fontsize=9)
+        aR5.grid(True, alpha=0.3)
+        if has_cal: aR5.legend(fontsize=8)
+
+        for ax_row in axes:
+            for ax in ax_row:
+                ax.set_xlabel("Time (ms)", fontsize=9)
 
         plt.tight_layout()
         idx = 1

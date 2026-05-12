@@ -82,20 +82,20 @@ def data_loop():
     print("🎨 绘图已打开")
     t0 = time.perf_counter()
 
-    # 尝试加载标定插值器
-    cal_path = os.path.join(SAVE_DIR, "cal_interp.pkl")
+    # 尝试加载标定查找表
+    cal_path = os.path.join(SAVE_DIR, "cal_lookup.npz")
     cal_ready = False
-    interp_fx, interp_fy = None, None
+    pts, fx_lut, fy_lut = None, None, None
     if os.path.exists(cal_path):
         try:
-            interp_fx, interp_fy = calibrate.load_interpolator(cal_path)
+            pts, fx_lut, fy_lut = calibrate.load_lookup(cal_path)
             cal_ready = True
-            print(f"📐 标定插值器已加载: {cal_path}")
+            print(f"📐 标定查找表已加载: {cal_path}")
         except Exception as e:
-            print(f"⚠️ 标定插值器加载失败: {e}")
+            print(f"⚠️ 标定查找表加载失败: {e}")
     else:
         print("💡 未找到标定文件。如需标定，先运行本程序采集CSV，然后执行：")
-        print("   python /home/qcy/Project/code/Tangential/finger_tang_7_12/Cop/project/tang_7_12_Init_line_COP_vec_cal_inter_realtime/calibrate.py 1")
+        print("   python /home/qcy/Project/code/Tangential/finger_tang_7_12/Cop/project/tang_7_12_Init_line_stable_COP_vec_cal_inter_realtime/calibrate.py 1")
 
     # 中值滤波窗口（窗口大小=5）
     MEDIAN_WINDOW = 5
@@ -150,7 +150,7 @@ def data_loop():
 
         # 标定：CoP位移 → 切向力（插值）
         if cal_ready:
-            fx_cal, fy_cal = calibrate.apply(dx_f, dy_f, interp_fx, interp_fy)
+            fx_cal, fy_cal = calibrate.apply(dx_f, dy_f, pts, fx_lut, fy_lut)
             cal_angle, cal_mag = angle.compute_vector_angle(fx_cal, fy_cal)
         else:
             fx_cal, fy_cal, cal_angle, cal_mag = None, None, None, None
@@ -191,8 +191,11 @@ def data_loop():
         )
         # 追加全程数据
         if COP.contact_initialized:
-                    plot.append_full_data(rel_ms, adc_mag, force_mag, cal_mag,
-                                          fx_f, fy_f, fx_cal, fy_cal)
+                    plot.append_full_data(
+                        rel_ms,
+                        adc_angle, adc_mag, total_pressure, dx_f, dy_f,
+                        force_angle, force_mag, fz_f, fx_f, fy_f,
+                        cal_angle, cal_mag, fx_cal, fy_cal)
         
         # 控制采集频率
         elapsed = time.perf_counter() - now
