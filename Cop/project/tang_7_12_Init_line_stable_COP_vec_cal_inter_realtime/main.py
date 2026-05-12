@@ -103,6 +103,7 @@ def data_loop():
     buf_dy = deque(maxlen=MEDIAN_WINDOW)
     buf_fx = deque(maxlen=MEDIAN_WINDOW)
     buf_fy = deque(maxlen=MEDIAN_WINDOW)
+    buf_fz = deque(maxlen=MEDIAN_WINDOW)
 
     while not stop_event.is_set():
         now = time.perf_counter()
@@ -135,10 +136,13 @@ def data_loop():
         buf_dy.append(dy)
         buf_fx.append(fx)
         buf_fy.append(fy)
+        buf_fz.append(fz)
         dx_f = np.median(buf_dx)
         dy_f = np.median(buf_dy)
         fx_f = np.median(buf_fx)
         fy_f = np.median(buf_fy)
+        fz_f = np.median(buf_fz)
+        total_pressure = np.sum(press_data_item["data"])
 
         # 计算角度和幅值（使用滤波后的值）
         adc_angle, adc_mag = angle.compute_PZT_angle(dx_f, dy_f)
@@ -162,6 +166,7 @@ def data_loop():
             delta_cop_y=dy_f,
             delta_force_x=fx_f,
             delta_force_y=fy_f,
+            delta_force_z=fz_f,
             adc_angle=adc_angle,
             adc_mag=adc_mag,
             force_angle=force_angle,
@@ -179,9 +184,9 @@ def data_loop():
         # 更新绘图数据
         plot.set_data(
             adc_angle, adc_mag, force_angle, force_mag,
-            base, np.sum(press_data_item["data"]), force_mag,
+            base, total_pressure, force_mag,
             cx, cy, bx, by, dx_f, dy_f,  # 滤波后 delta_cop_x, delta_cop_y
-            fx_f, fy_f,  # 滤波后 force_fx, force_fy
+            fx_f, fy_f, fz_f,  # 滤波后 force_fx, force_fy, force_fz
             fx_cal, fy_cal, cal_angle, cal_mag,  # 标定力
         )
         # 追加全程数据

@@ -63,8 +63,10 @@ class RealTimePlot:
         self.base_cop_y = 0.0
         self.delta_cop_x = 0.0
         self.delta_cop_y = 0.0
-        self.raw_fx = 0.0 # 新增
-        self.raw_fy = 0.0 # 新增
+        self.raw_fx = 0.0
+        self.raw_fy = 0.0
+        self.raw_fz = 0.0
+        self.total_pressure = 0.0
         self.fx_cal = None   # 标定力 X
         self.fy_cal = None   # 标定力 Y
         self.cal_angle = None
@@ -77,80 +79,101 @@ class RealTimePlot:
                                             fontsize=12, color='green', va='top', ha='left', weight='bold')
 
     def build_layout(self):
-        # 调整GridSpec以容纳更多图表
-        # 将原始的 [6, 1, 1, 1] height_ratios 调整为 [6, 1, 1, 1, 1, 1] 使得 ax3a, ax3b, ax4 可以分别再拆分
-        # 实际操作是，将 ax3a, ax3b 的位置变成 subgridspec
-        gs_outer = GridSpec(4, 2, width_ratios=[1, 1], height_ratios=[6, 2, 2, 1], hspace=0.3, wspace=0.3)
-        gs_arrows = gs_outer[0, 0].subgridspec(1, 2, wspace=0.3)
+        # 左右各 50%
+        gs_outer = GridSpec(1, 2, width_ratios=[1, 1], wspace=0.25)
+
+        # ===== 左列: 4行×2列 + 底部跨列 =====
+        gs_left = gs_outer[0, 0].subgridspec(4, 2, height_ratios=[1, 1, 1, 0.5], hspace=0.35, wspace=0.25)
+
+        # PZT 列 (左子列)
+        self.ax_pzt_fz = plt.subplot(gs_left[0, 0])
+        self.ax_pzt_fz.set_title("PZT_Fz", fontsize=10)
+        self.ax_pzt_fz.grid(True, alpha=0.3)
+        self.line_pzt_fz, = self.ax_pzt_fz.plot([], [], 'b-', linewidth=1.2)
+        self.txt_pzt_fz = self.ax_pzt_fz.text(0.98, 0.95, "", transform=self.ax_pzt_fz.transAxes,
+                                               fontsize=8, color='blue', va='top', ha='right')
+
+        self.ax_pzt_fx = plt.subplot(gs_left[1, 0])
+        self.ax_pzt_fx.set_title("PZT_Fx", fontsize=10)
+        self.ax_pzt_fx.grid(True, alpha=0.3)
+        self.line_pzt_fx, = self.ax_pzt_fx.plot([], [], 'b-', linewidth=1.2)
+        self.txt_pzt_fx = self.ax_pzt_fx.text(0.98, 0.95, "", transform=self.ax_pzt_fx.transAxes,
+                                               fontsize=8, color='blue', va='top', ha='right')
+
+        self.ax_pzt_fy = plt.subplot(gs_left[2, 0])
+        self.ax_pzt_fy.set_title("PZT_Fy", fontsize=10)
+        self.ax_pzt_fy.grid(True, alpha=0.3)
+        self.line_pzt_fy, = self.ax_pzt_fy.plot([], [], 'c-', linewidth=1.2)
+        self.txt_pzt_fy = self.ax_pzt_fy.text(0.98, 0.95, "", transform=self.ax_pzt_fy.transAxes,
+                                               fontsize=8, color='cyan', va='top', ha='right')
+
+        # Force 列 (右子列)
+        self.ax_force_fz = plt.subplot(gs_left[0, 1])
+        self.ax_force_fz.set_title("Force_Fz", fontsize=10)
+        self.ax_force_fz.grid(True, alpha=0.3)
+        self.line_force_fz, = self.ax_force_fz.plot([], [], 'r-', linewidth=1.2)
+        self.txt_force_fz = self.ax_force_fz.text(0.98, 0.95, "", transform=self.ax_force_fz.transAxes,
+                                                   fontsize=8, color='red', va='top', ha='right')
+
+        self.ax_force_fx = plt.subplot(gs_left[1, 1])
+        self.ax_force_fx.set_title("Force_Fx", fontsize=10)
+        self.ax_force_fx.grid(True, alpha=0.3)
+        self.line_force_fx, = self.ax_force_fx.plot([], [], 'r-', linewidth=1.2)
+        self.line_force_fx_cal, = self.ax_force_fx.plot([], [], 'g--', linewidth=1.2, alpha=0.8)
+        self.txt_force_fx = self.ax_force_fx.text(0.98, 0.95, "", transform=self.ax_force_fx.transAxes,
+                                                   fontsize=8, color='red', va='top', ha='right')
+
+        self.ax_force_fy = plt.subplot(gs_left[2, 1])
+        self.ax_force_fy.set_title("Force_Fy", fontsize=10)
+        self.ax_force_fy.grid(True, alpha=0.3)
+        self.line_force_fy, = self.ax_force_fy.plot([], [], 'm-', linewidth=1.2)
+        self.line_force_fy_cal, = self.ax_force_fy.plot([], [], 'g--', linewidth=1.2, alpha=0.8)
+        self.txt_force_fy = self.ax_force_fy.text(0.98, 0.95, "", transform=self.ax_force_fy.transAxes,
+                                                   fontsize=8, color='magenta', va='top', ha='right')
+
+        # Angle Error (底部跨两列)
+        self.ax_err = plt.subplot(gs_left[3, :])
+        self.ax_err.set_title("Angle Error", fontsize=10)
+        self.ax_err.set_ylim(0, 180)
+        self.ax_err.grid(True, alpha=0.3)
+        self.error_line, = self.ax_err.plot([], [], 'g-o', linewidth=1.2, markersize=2)
+        self.txt_err = self.ax_err.text(0.98, 0.95, "", transform=self.ax_err.transAxes,
+                                         fontsize=8, color='green', va='top', ha='right')
+
+        # ===== 右列 =====
+        gs_right = gs_outer[0, 1].subgridspec(2, 1, height_ratios=[1, 2.5], hspace=0.25)
+        gs_arrows = gs_right[0, 0].subgridspec(1, 2, wspace=0.2)
 
         self.ax1 = plt.subplot(gs_arrows[0, 0])
-        self.ax1.set_xlim(0, 1)
-        self.ax1.set_ylim(0, 1)
-        self.ax1.set_aspect('equal')
-        self.ax1.axis('off')
-        self.ax1.set_title("Direction Arrows (CoP Offset & Force)", fontsize=10)
+        self.ax1.set_xlim(0, 1); self.ax1.set_ylim(0, 1)
+        self.ax1.set_aspect('equal'); self.ax1.axis('off')
+        self.ax1.set_title("Direction Arrows", fontsize=10)
 
         self.ax2 = plt.subplot(gs_arrows[0, 1])
-        self.ax2.set_xlim(0, 1)
-        self.ax2.set_ylim(0, 1)
-        self.ax2.set_aspect('equal')
-        self.ax2.axis('off')
-        self.ax2.set_title("Magnitude Arrows (CoP Offset & Force)", fontsize=10)
+        self.ax2.set_xlim(0, 1); self.ax2.set_ylim(0, 1)
+        self.ax2.set_aspect('equal'); self.ax2.axis('off')
+        self.ax2.set_title("Magnitude Arrows", fontsize=10)
 
-        # ========== 修改点1：更新子图标题为 ADC Mag ==========
-        # 为 ADC Fx 和 Fy 创建子图
-        gs_adc_components = gs_outer[1, 0].subgridspec(1, 2, hspace=0.4)          # 主网格中选择第 2 行、第 1 列的单元格,并且划分 1 行 2 列个子网格
-        self.ax_adc_dx = plt.subplot(gs_adc_components[0, 0])
-        self.ax_adc_dx.set_title("PZT_Fx Magnitude (CoP Offset X)", fontsize=10)
-        self.ax_adc_dx.grid(True, alpha=0.3)
-        self.line_adc_dx, = self.ax_adc_dx.plot([], [], 'b-', linewidth=1.5)
+        gs_tables = gs_right[1, 0].subgridspec(1, 2, wspace=0.2)
+        self.ax5 = plt.subplot(gs_tables[0, 0])
+        self.ax5.set_title("Pressure Table", fontsize=10); self.ax5.axis('off')
 
-        self.ax_adc_dy = plt.subplot(gs_adc_components[0, 1])
-        self.ax_adc_dy.set_title("PZT_Fy Magnitude (CoP Offset Y)", fontsize=10)
-        self.ax_adc_dy.grid(True, alpha=0.3)
-        self.line_adc_dy, = self.ax_adc_dy.plot([], [], 'c-', linewidth=1.5)
-
-        # 为 Force Fx 和 Fy 创建子图
-        gs_force_components = gs_outer[2, 0].subgridspec(1, 2, hspace=0.4)
-        self.ax_force_fx = plt.subplot(gs_force_components[0, 0])
-        self.ax_force_fx.set_title("Force_Fx Magnitude", fontsize=10)
-        self.ax_force_fx.grid(True, alpha=0.3)
-        self.line_force_fx, = self.ax_force_fx.plot([], [], 'r-', linewidth=1.5)
-        self.line_force_fx_cal, = self.ax_force_fx.plot([], [], 'g--', linewidth=1.5, alpha=0.8)
-
-        self.ax_force_fy = plt.subplot(gs_force_components[0, 1])
-        self.ax_force_fy.set_title("Force_Fy Magnitude", fontsize=10)
-        self.ax_force_fy.grid(True, alpha=0.3)
-        self.line_force_fy, = self.ax_force_fy.plot([], [], 'm-', linewidth=1.5)
-        self.line_force_fy_cal, = self.ax_force_fy.plot([], [], 'g--', linewidth=1.5, alpha=0.8)
-
-        # Angle Error 保持不变，但更新标题
-        self.ax4 = plt.subplot(gs_outer[3, 0])
-        self.ax4.set_title("Angle Error between CoP Offset and Force", fontsize=10)
-        self.ax4.set_ylim(0, 180)
-        self.ax4.grid(True, alpha=0.3)
-        self.error_line, = self.ax4.plot([], [], 'g-o', linewidth=1.5, markersize=2)
-
-        gs_right = gs_outer[:, 1].subgridspec(1, 2, width_ratios=[1, 1], wspace=0.3)
-        self.ax5 = self.fig.add_subplot(gs_right[0, 0])
-        self.ax5.set_title("Pressure Table", fontsize=10)
-        self.ax5.axis('off')
-
-        self.ax6 = self.fig.add_subplot(gs_right[0, 1])
-        self.ax6.set_title("Gradient Arrows", fontsize=10)
-        self.ax6.axis('off')
+        self.ax6 = plt.subplot(gs_tables[0, 1])
+        self.ax6.set_title("Gradient Arrows", fontsize=10); self.ax6.axis('off')
 
     # ========== 修改点2：初始化历史队列，将raw_adc_sum_history改为adc_mag_history ==========
     def init_history(self):
         self.angle_error_history = deque(maxlen=ERROR_PLOT_LEN)
-        # ADC (CoP Offset) 分量历史
+        # PZT 分量历史
+        self.pzt_fz_history = deque(maxlen=MAG_PLOT_LEN)
         self.adc_dx_history = deque(maxlen=MAG_PLOT_LEN)
         self.adc_dy_history = deque(maxlen=MAG_PLOT_LEN)
         # Force 分量历史
+        self.force_fz_history = deque(maxlen=MAG_PLOT_LEN)
         self.force_fx_history = deque(maxlen=MAG_PLOT_LEN)
         self.force_fy_history = deque(maxlen=MAG_PLOT_LEN)
 
-        # 保留原有的总幅值历史，用于结束时的全程曲线绘制
+        # 总幅值历史（全程曲线用）
         self.adc_mag_history = deque(maxlen=MAG_PLOT_LEN)
         self.raw_force_mag_history = deque(maxlen=MAG_PLOT_LEN)
 
@@ -160,7 +183,7 @@ class RealTimePlot:
 
 
     def set_data(self, adc_angle, adc_mag, force_angle, force_mag, diff_frame, total_pressure_sum, force_total_mag,
-                 cop_x, cop_y, base_cop_x, base_cop_y, delta_cop_x, delta_cop_y, raw_fx, raw_fy,
+                 cop_x, cop_y, base_cop_x, base_cop_y, delta_cop_x, delta_cop_y, raw_fx, raw_fy, raw_fz,
                  fx_cal=None, fy_cal=None, cal_angle=None, cal_mag=None):
         with self.lock:
             self.adc_angle = adc_angle
@@ -176,6 +199,8 @@ class RealTimePlot:
             self.delta_cop_y = delta_cop_y
             self.raw_fx = raw_fx
             self.raw_fy = raw_fy
+            self.raw_fz = raw_fz
+            self.total_pressure = total_pressure_sum
             self.fx_cal = fx_cal
             self.fy_cal = fy_cal
             self.cal_angle = cal_angle
@@ -185,19 +210,19 @@ class RealTimePlot:
             error = min(diff, 360 - diff)
             self.angle_error_history.append(error)
 
-            # ========== adc_mag到历史队列（不再使用raw_adc_sum） ==========
-            self.adc_mag_history.append(adc_mag) # 用于绘制全程总幅值曲线
+            self.adc_mag_history.append(adc_mag)
             self.raw_force_mag_history.append(force_total_mag)
 
-            # 追加 CoP 偏移分量 (PZT Fx/Fy)
+            # PZT 分量
+            self.pzt_fz_history.append(total_pressure_sum)
             self.adc_dx_history.append(delta_cop_x)
             self.adc_dy_history.append(delta_cop_y)
 
-            # 追加力传感器分量 (Force Fx/Fy)
+            # Force 分量
+            self.force_fz_history.append(raw_fz)
             self.force_fx_history.append(raw_fx)
             self.force_fy_history.append(raw_fy)
 
-            # 追加标定力分量
             if fx_cal is not None:
                 self.force_fx_cal_history.append(fx_cal)
                 self.force_fy_cal_history.append(fy_cal)
@@ -224,8 +249,8 @@ class RealTimePlot:
     def update_all(self, frame):
         self.update_direction_arrows()
         self.update_magnitude_arrows()
-        self.update_adc_components() 
-        self.update_force_components() 
+        self.update_pzt_rows()
+        self.update_force_rows()
         self.update_error()
         self.update_pressure_table()
         self.update_gradient_table()
@@ -285,8 +310,6 @@ class RealTimePlot:
                         'k-', lw=2.5, alpha=1.0)
         # 如果 l_adc <= self.epsilon，则不绘制任何东西
 
-        self.ax2.text(0.5, 0.1, f"CoP Offset: {m:.2f}", ha='center', va='center', fontsize=8, color='black')
-
         # ========== 红色箭头（Force）==========
         th_force = np.deg2rad(fa)
         max_force_length = 0.4
@@ -331,70 +354,61 @@ class RealTimePlot:
             self.cal_info_text.set_text("")
 
 
-    # ========== 更新绘图逻辑，读取adc_mag_history ==========
-    def update_adc_components(self):
-        # PZT_Fx (delta_cop_x)
-        if len(self.adc_dx_history) > 0:
-            xs = list(range(len(self.adc_dx_history)))
-            ys = list(self.adc_dx_history)
-            self.line_adc_dx.set_data(xs, ys)
-            self.ax_adc_dx.set_xlim(0, len(xs))
-            # 动态调整Y轴范围，避免数据被截断，且考虑零值情况
-            min_y_dx, max_y_dx = min(ys) * 0.95, max(ys) * 1.05
-            if min_y_dx == max_y_dx: # 如果所有值都相同
-                self.ax_adc_dx.set_ylim(min_y_dx - 1, max_y_dx + 1)
+    # ========== 左列 PZT 行 ==========
+    def _update_line_plot(self, ax, line, history, txt_obj, label, color):
+        if len(history) > 0:
+            xs = list(range(len(history)))
+            ys = list(history)
+            line.set_data(xs, ys)
+            ax.set_xlim(0, max(len(xs) - 1, 1))
+            mn, mx = min(ys), max(ys)
+            if mn == mx:
+                ax.set_ylim(mn - 1, mx + 1)
             else:
-                self.ax_adc_dx.set_ylim(min_y_dx, max_y_dx)
-        
-        # PZT_Fy (delta_cop_y)
-        if len(self.adc_dy_history) > 0:
-            xs = list(range(len(self.adc_dy_history)))
-            ys = list(self.adc_dy_history)
-            self.line_adc_dy.set_data(xs, ys)
-            self.ax_adc_dy.set_xlim(0, len(xs))
-            min_y_dy, max_y_dy = min(ys) * 0.95, max(ys) * 1.05
-            if min_y_dy == max_y_dy:
-                self.ax_adc_dy.set_ylim(min_y_dy - 1, max_y_dy + 1)
-            else:
-                self.ax_adc_dy.set_ylim(min_y_dy, max_y_dy)
+                rng = mx - mn
+                ax.set_ylim(mn - rng * 0.1, mx + rng * 0.1)
+            txt_obj.set_text(f"{ys[-1]:.2f}")
 
+    def update_pzt_rows(self):
+        self._update_line_plot(self.ax_pzt_fz, self.line_pzt_fz, self.pzt_fz_history, self.txt_pzt_fz, "PZT_Fz", "blue")
+        self._update_line_plot(self.ax_pzt_fx, self.line_pzt_fx, self.adc_dx_history, self.txt_pzt_fx, "PZT_Fx", "blue")
+        self._update_line_plot(self.ax_pzt_fy, self.line_pzt_fy, self.adc_dy_history, self.txt_pzt_fy, "PZT_Fy", "cyan")
 
-    def update_force_components(self):
-        # Force_Fx
+    def update_force_rows(self):
+        # Force_Fz (单线)
+        self._update_line_plot(self.ax_force_fz, self.line_force_fz, self.force_fz_history, self.txt_force_fz, "Force_Fz", "red")
+        # Force_Fx (实测 + 标定)
         if len(self.force_fx_history) > 0:
             xs = list(range(len(self.force_fx_history)))
             ys = list(self.force_fx_history)
             self.line_force_fx.set_data(xs, ys)
-            self.ax_force_fx.set_xlim(0, len(xs))
+            self.ax_force_fx.set_xlim(0, max(len(xs) - 1, 1))
             all_ys = list(ys)
             if len(self.force_fx_cal_history) > 0:
                 cal_xs = list(range(len(self.force_fx_cal_history)))
                 cal_ys = list(self.force_fx_cal_history)
                 self.line_force_fx_cal.set_data(cal_xs, cal_ys)
                 all_ys.extend(cal_ys)
-            min_y_fx, max_y_fx = min(all_ys) * 0.95, max(all_ys) * 1.05
-            if min_y_fx == max_y_fx:
-                self.ax_force_fx.set_ylim(min_y_fx - 1, max_y_fx + 1)
-            else:
-                self.ax_force_fx.set_ylim(min_y_fx, max_y_fx)
-
-        # Force_Fy
+            mn, mx = min(all_ys), max(all_ys)
+            rng = mx - mn if mx != mn else 1
+            self.ax_force_fx.set_ylim(mn - rng * 0.1, mx + rng * 0.1)
+            self.txt_force_fx.set_text(f"{ys[-1]:.2f}")
+        # Force_Fy (实测 + 标定)
         if len(self.force_fy_history) > 0:
             xs = list(range(len(self.force_fy_history)))
             ys = list(self.force_fy_history)
             self.line_force_fy.set_data(xs, ys)
-            self.ax_force_fy.set_xlim(0, len(xs))
+            self.ax_force_fy.set_xlim(0, max(len(xs) - 1, 1))
             all_ys = list(ys)
             if len(self.force_fy_cal_history) > 0:
                 cal_xs = list(range(len(self.force_fy_cal_history)))
                 cal_ys = list(self.force_fy_cal_history)
                 self.line_force_fy_cal.set_data(cal_xs, cal_ys)
                 all_ys.extend(cal_ys)
-            min_y_fy, max_y_fy = min(all_ys) * 0.95, max(all_ys) * 1.05
-            if min_y_fy == max_y_fy:
-                self.ax_force_fy.set_ylim(min_y_fy - 1, max_y_fy + 1)
-            else:
-                self.ax_force_fy.set_ylim(min_y_fy, max_y_fy)
+            mn, mx = min(all_ys), max(all_ys)
+            rng = mx - mn if mx != mn else 1
+            self.ax_force_fy.set_ylim(mn - rng * 0.1, mx + rng * 0.1)
+            self.txt_force_fy.set_text(f"{ys[-1]:.2f}")
 
 
     def update_error(self):
@@ -402,7 +416,8 @@ class RealTimePlot:
             xs = list(range(len(self.angle_error_history)))
             ys = list(self.angle_error_history)
             self.error_line.set_data(xs, ys)
-            self.ax4.set_xlim(0, len(xs))
+            self.ax_err.set_xlim(0, max(len(xs) - 1, 1))
+            self.txt_err.set_text(f"{ys[-1]:.1f}°")
 
 
     def update_pressure_table(self):
@@ -532,8 +547,6 @@ class RealTimePlot:
         roi_rect = plt.Rectangle((rect_x, rect_y), rect_width, rect_height,
                                  linewidth=3, edgecolor='blue', facecolor='none', linestyle='--', zorder=5)
         self.ax6.add_patch(roi_rect)
-
-        self.ax6.legend(loc='upper left', fontsize=8)
 
     # ==================== 程序结束绘制全程综合图 ====================
     def plot_full_magnitude_curve(self, save_dir):
