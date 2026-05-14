@@ -5,13 +5,11 @@ import os
 from collections import deque
 import numpy as np
 import threading
-import matplotlib
-matplotlib.use('TkAgg')
-import matplotlib.pyplot as plt
+from pyqtgraph.Qt import QtWidgets
+import sys
 
-# 导入自定义模块
 import angle as angle
-import COP as COP  
+import COP as COP
 import data as data
 import realtime as realtime
 import table as table
@@ -19,7 +17,7 @@ import calibrate
 
 # ===================== 配置 =====================
 SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
-TARGET_FPS = 100
+TARGET_FPS = 200
 MAX_TIME_DIFF = 0.015
 stop_event = threading.Event()
 plot = None
@@ -208,16 +206,18 @@ def data_loop():
 # ===================== 主函数 =====================
 def main():
     global plot
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
+
     plot = realtime.RealTimePlot()
-    # 启动数据采集线程
     data_thread = threading.Thread(target=data_loop)
     data_thread.start()
-    plt.show()  # 阻塞直到关闭绘图窗口
-    
-    # 停止采集线程
+
+    app.exec()
+
     stop_event.set()
     data_thread.join(timeout=2)
-    # 绘制全程静态图
     plot.plot_full_magnitude_curve(SAVE_DIR)
 
 if __name__ == "__main__":
