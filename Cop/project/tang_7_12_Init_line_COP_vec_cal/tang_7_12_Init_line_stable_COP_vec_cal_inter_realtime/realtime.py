@@ -424,40 +424,54 @@ class RealTimePlot:
             y_hi = self.p_err.viewRange()[1][1]
             self._t_err.setPos(max(len(x_vals) - 1, 1), y_hi)
 
-        # Pressure table
-        cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
-        self._cell_grid.set_data(press_table_arr, cell_vmax)
-        for row_idx in range(12):
-            for col_idx in range(7):
-                cell_val = press_table_arr[row_idx, col_idx]
-                self._cell_txts[row_idx][col_idx].setText(f"{cell_val:.0f}" if cell_val > 0 else "")
-        # CoP dots + arrow
-        spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
-        if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
-            spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
-        self._cop_dots.setData(spots=spots)
-        if not np.isnan(cop_base_x) and not np.isnan(cop_base_y) and np.hypot(cop_delta_x, cop_delta_y) > 0.05:
-            self._update_arrow((self._cop_arr, self._cop_hL, self._cop_hR),
-                               np.degrees(np.arctan2(-cop_delta_y, cop_delta_x)) if abs(cop_delta_x) + abs(cop_delta_y) > 1e-6 else 0,
-                               np.hypot(cop_delta_x, cop_delta_y), 'r', (cop_base_x, cop_base_y))
+        # Pressure table + CoP + Gradient：仅在初始 CoP 确定后显示
+        if COP.g_cop_contact_init_flag:
+            cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
+            self._cell_grid.set_data(press_table_arr, cell_vmax)
+            for row_idx in range(12):
+                for col_idx in range(7):
+                    cell_val = press_table_arr[row_idx, col_idx]
+                    self._cell_txts[row_idx][col_idx].setText(f"{cell_val:.0f}" if cell_val > 0 else "")
+            # CoP dots + arrow
+            spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+            if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
+                spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+            self._cop_dots.setData(spots=spots)
+            if not np.isnan(cop_base_x) and not np.isnan(cop_base_y) and np.hypot(cop_delta_x, cop_delta_y) > 0.05:
+                self._update_arrow((self._cop_arr, self._cop_hL, self._cop_hR),
+                                   np.degrees(np.arctan2(-cop_delta_y, cop_delta_x)) if abs(cop_delta_x) + abs(cop_delta_y) > 1e-6 else 0,
+                                   np.hypot(cop_delta_x, cop_delta_y), 'r', (cop_base_x, cop_base_y))
+            else:
+                self._cop_arr.setData([], [])
+                self._cop_hL.setData([], [])
+                self._cop_hR.setData([], [])
+
+            # Gradient arrows
+            for grad_idx, (grad_ln, grad_dot) in enumerate(zip(self._g_lines, self._g_heads)):
+                grad_row, grad_col = divmod(grad_idx, 7)
+                grad_x, grad_y = grad_arr[grad_row, grad_col, 0], grad_arr[grad_row, grad_col, 1]
+                grad_mag = np.hypot(grad_x, grad_y)
+                if grad_mag > 1.0:
+                    arrow_dx = -grad_x / grad_mag * 0.3
+                    arrow_dy = grad_y / grad_mag * 0.3
+                    tip_x = grad_col + arrow_dx
+                    tip_y = grad_row + arrow_dy
+                    grad_ln.setData([grad_col, tip_x], [grad_row, tip_y])
+                    grad_dot.setData(x=[tip_x], y=[tip_y], brush='k', size=4)
+                else:
+                    grad_ln.setData([], [])
+                    grad_dot.setData(x=[], y=[])
         else:
+            # CoP 未确定：清空两张表
+            self._cell_grid.set_data(np.zeros((12, 7)), 1.0)
+            for row_idx in range(12):
+                for col_idx in range(7):
+                    self._cell_txts[row_idx][col_idx].setText("")
+            self._cop_dots.setData(spots=[])
             self._cop_arr.setData([], [])
             self._cop_hL.setData([], [])
             self._cop_hR.setData([], [])
-
-        # Gradient arrows
-        for grad_idx, (grad_ln, grad_dot) in enumerate(zip(self._g_lines, self._g_heads)):
-            grad_row, grad_col = divmod(grad_idx, 7)
-            grad_x, grad_y = grad_arr[grad_row, grad_col, 0], grad_arr[grad_row, grad_col, 1]
-            grad_mag = np.hypot(grad_x, grad_y)
-            if grad_mag > 1.0:
-                arrow_dx = -grad_x / grad_mag * 0.3  # 反方向
-                arrow_dy = grad_y / grad_mag * 0.3
-                tip_x = grad_col + arrow_dx
-                tip_y = grad_row + arrow_dy
-                grad_ln.setData([grad_col, tip_x], [grad_row, tip_y])
-                grad_dot.setData(x=[tip_x], y=[tip_y], brush='k', size=4)
-            else:
+            for grad_ln, grad_dot in zip(self._g_lines, self._g_heads):
                 grad_ln.setData([], [])
                 grad_dot.setData(x=[], y=[])
 
