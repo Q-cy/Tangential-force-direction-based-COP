@@ -72,14 +72,14 @@ def apply(dx: float, dy: float, points: np.ndarray, fx_vals: np.ndarray, fy_vals
 
 
 # ==================== CLI 入口 ====================
-DEFAULT_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
+CAL_DEFAULT_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
 
 
 def _resolve_path(arg: str) -> str:
     if arg.isdigit():
-        return os.path.join(DEFAULT_SAVE_DIR, f"data_{arg}.csv")
+        return os.path.join(CAL_DEFAULT_SAVE_DIR, f"data_{arg}.csv")
     if os.path.sep not in arg and not arg.startswith("."):
-        return os.path.join(DEFAULT_SAVE_DIR, arg)
+        return os.path.join(CAL_DEFAULT_SAVE_DIR, arg)
     return arg
 
 
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("用法: python calibrate.py <csv_path|N|filename>")
         print("  python calibrate.py 1              → data_1.csv")
-        print("  python calibrate.py data_1.csv     → SAVE_DIR/data_1.csv")
+        print("  python calibrate.py data_1.csv     → CAL_DEFAULT_SAVE_DIR/data_1.csv")
         sys.exit(1)
 
     csv_path = _resolve_path(sys.argv[1])

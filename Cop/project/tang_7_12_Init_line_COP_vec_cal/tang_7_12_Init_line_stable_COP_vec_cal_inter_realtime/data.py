@@ -11,8 +11,8 @@ from collections import deque
 import threading
 import numpy as np
 
-BAUDRATE_PRESS = 921600
-BAUDRATE_FORCE = 460860
+DATA_BAUDRATE_PRESS = 921600  # 压力传感器串口波特率
+DATA_BAUDRATE_FORCE = 460860  # 六维力传感器串口波特率
 
 # ===================== 压力传感器 =====================
 class PressureSensor:                              # 为什么定义成类而不是函数？1.包含很多函数，2.方便管理状态，有很多global变量
@@ -29,7 +29,7 @@ class PressureSensor:                              # 为什么定义成类而不
             if p == "/dev/ttyUSB0":
                 continue
             try:
-                self.ser = serial.Serial(p, BAUDRATE_PRESS, timeout=0.01)
+                self.ser = serial.Serial(p, DATA_BAUDRATE_PRESS, timeout=0.01)
                 self.port = p
                 time.sleep(0.1)
                 self.ser.reset_input_buffer()
@@ -85,7 +85,7 @@ class SixAxisForceSensor:
 
     def open_port(self):
         try:
-            self.ser = serial.Serial(self.port, BAUDRATE_FORCE, timeout=0.05)
+            self.ser = serial.Serial(self.port, DATA_BAUDRATE_FORCE, timeout=0.05)
             time.sleep(0.1)
             self.ser.reset_input_buffer()
         except:

@@ -4,8 +4,7 @@ import os
 import csv
 import numpy as np
 
-# 定义CSV表头（严格匹配要求的格式）
-CSV_HEADER = [
+TABLE_CSV_HEADER = [  # CSV 文件表头（84通道 + 时间戳 + 力/角度/标定数据）
     "timestamp", "rel_ms",
     # ch1 ~ ch84
     "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7",
@@ -54,7 +53,7 @@ def init_csv_file(file_path: str) -> tuple[csv.writer, object]:
     """
     csv_file_obj = open(file_path, "w", encoding="utf-8", newline="")
     csv_writer = csv.writer(csv_file_obj)
-    csv_writer.writerow(CSV_HEADER)
+    csv_writer.writerow(TABLE_CSV_HEADER)
     print(f"📂 CSV文件已初始化：{file_path}")
     return csv_writer, csv_file_obj
 

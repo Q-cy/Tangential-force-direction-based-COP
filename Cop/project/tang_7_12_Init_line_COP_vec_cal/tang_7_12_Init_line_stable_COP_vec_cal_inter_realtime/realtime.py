@@ -9,11 +9,9 @@ import COP as COP
 
 pg.setConfigOptions(antialias=True, background='w', foreground='k')
 
-PLOT_INTERVAL_MS = 10
-ERROR_PLOT_LEN = 100
-MAG_PLOT_LEN = 100
-
-HAS_CAL = True
+PLOT_TIMER_INTERVAL_MS = 10    # 绘图定时器刷新间隔(毫秒)
+PLOT_ERR_HISTORY_LEN = 100     # 角度误差历史缓冲区长度
+PLOT_MAG_HISTORY_LEN = 100     # 幅值历史缓冲区长度
 
 def _yrange(data, pad=0.1):
     if len(data) < 2: return -1, 1
@@ -127,29 +125,43 @@ class RealTimePlot:
         self.build_layout()
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_all)
-        self.timer.start(PLOT_INTERVAL_MS)
+        self.timer.start(PLOT_TIMER_INTERVAL_MS)
 
     def init_defaults(self):
-        self.adc_angle = 0.0; self.adc_mag = 0.0
-        self.force_angle = 0.0; self.force_mag = 0.0
-        self.diff_frame = np.zeros((12, 7))
-        self.cop_x = 0.0; self.cop_y = 0.0
-        self.base_cop_x = 0.0; self.base_cop_y = 0.0
-        self.delta_cop_x = 0.0; self.delta_cop_y = 0.0
-        self.raw_fx = 0.0; self.raw_fy = 0.0; self.raw_fz = 0.0
-        self.total_pressure = 0.0
-        self.fx_cal = None; self.fy_cal = None
-        self.cal_angle = None; self.cal_mag = None
+        self._pzt_angle_deg = 0.0           # PZT方向角度(度)
+        self._pzt_mag_val = 0.0             # PZT幅值
+        self._force_angle_deg = 0.0         # 六维力方向角度(度)
+        self._force_mag_val = 0.0           # 六维力幅值
+        self._press_table_arr = np.zeros((12, 7))  # 压力表数据(12×7)
+        self._cop_curr_x = 0.0              # 当前CoP X
+        self._cop_curr_y = 0.0              # 当前CoP Y
+        self._cop_base_x = 0.0              # 初始CoP X
+        self._cop_base_y = 0.0              # 初始CoP Y
+        self._cop_delta_x = 0.0             # CoP偏移X
+        self._cop_delta_y = 0.0             # CoP偏移Y
+        self._force_fx_val = 0.0            # 力传感器Fx
+        self._force_fy_val = 0.0            # 力传感器Fy
+        self._force_fz_val = 0.0            # 力传感器Fz
+        self._total_press_val = 0.0         # 总压力值
+        self._cal_fx_val = None             # 标定力Fx
+        self._cal_fy_val = None             # 标定力Fy
+        self._cal_angle_deg = None          # 标定力角度(度)
+        self._cal_mag_val = None            # 标定力幅值
 
     def init_history(self):
-        L = MAG_PLOT_LEN; eL = ERROR_PLOT_LEN
-        self.angle_error_history = deque(maxlen=eL)
-        self.pzt_fz_history = deque(maxlen=L)
-        self.adc_dx_history = deque(maxlen=L); self.adc_dy_history = deque(maxlen=L)
-        self.force_fz_history = deque(maxlen=L)
-        self.force_fx_history = deque(maxlen=L); self.force_fy_history = deque(maxlen=L)
-        self.adc_mag_history = deque(maxlen=L); self.raw_force_mag_history = deque(maxlen=L)
-        self.force_fx_cal_history = deque(maxlen=L); self.force_fy_cal_history = deque(maxlen=L)
+        hist_len = PLOT_MAG_HISTORY_LEN
+        err_len = PLOT_ERR_HISTORY_LEN
+        self.angle_error_history = deque(maxlen=err_len)
+        self.pzt_fz_history = deque(maxlen=hist_len)
+        self.adc_dx_history = deque(maxlen=hist_len)
+        self.adc_dy_history = deque(maxlen=hist_len)
+        self.force_fz_history = deque(maxlen=hist_len)
+        self.force_fx_history = deque(maxlen=hist_len)
+        self.force_fy_history = deque(maxlen=hist_len)
+        self.adc_mag_history = deque(maxlen=hist_len)
+        self.raw_force_mag_history = deque(maxlen=hist_len)
+        self.force_fx_cal_history = deque(maxlen=hist_len)
+        self.force_fy_cal_history = deque(maxlen=hist_len)
 
     # ===== 手工箭头工具 =====
     def _make_arrow_parts(self, plot):
@@ -293,169 +305,161 @@ class RealTimePlot:
 
         self.win.show()
 
-    @staticmethod
-    def _hot_color(t):
-        """t: 0→1, 返回 (R,G,B) 白→红"""
-        t = max(0, min(1, t))
-        if t < 0.15:
-            return (255, 255, int(255 * (1 - t / 0.15)))
-        elif t < 0.35:
-            s = (t - 0.15) / 0.2
-            return (255, int(255 * (1 - s)), 0)
-        elif t < 0.65:
-            s = (t - 0.35) / 0.3
-            return (255, int(55 * (1 - s)), 0)
-        else:
-            s = (t - 0.65) / 0.35
-            return (int(255 * (1 - s * 0.7)), 0, 0)
-
-    @staticmethod
-    def _hot_lut():
-        """白→黄→橙→红→深红 (0=白)"""
-        lut = np.zeros((256, 4), dtype=np.uint8)
-        for i in range(256):
-            t = i / 255.0
-            if t < 0.15:  # white→yellow
-                lut[i, 0] = 255; lut[i, 1] = 255; lut[i, 2] = 255 - int(255 * t / 0.15)
-            elif t < 0.35:  # yellow→orange
-                s = (t - 0.15) / 0.2
-                lut[i, 0] = 255; lut[i, 1] = 255 - int(200 * s); lut[i, 2] = 0
-            elif t < 0.65:  # orange→red
-                s = (t - 0.35) / 0.3
-                lut[i, 0] = 255; lut[i, 1] = 55 - int(55 * s); lut[i, 2] = 0
-            else:  # red→dark red
-                s = (t - 0.65) / 0.35
-                lut[i, 0] = 255 - int(180 * s); lut[i, 1] = 0; lut[i, 2] = 0
-            lut[i, 3] = 255
-        return lut
-
     # ===== 数据接口 =====
-    def set_data(self, adc_angle, adc_mag, force_angle, force_mag, diff_frame, total_pressure_sum, force_total_mag,
-                 cop_x, cop_y, base_cop_x, base_cop_y, delta_cop_x, delta_cop_y, raw_fx, raw_fy, raw_fz,
-                 fx_cal=None, fy_cal=None, cal_angle=None, cal_mag=None):
+    def set_data(self, pzt_angle_deg, pzt_mag_val, force_angle_deg, force_mag_val,
+                 press_table_arr, total_press_val, force_total_mag,
+                 cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
+                 force_fx_val, force_fy_val, force_fz_val,
+                 cal_fx_val=None, cal_fy_val=None, cal_angle_deg=None, cal_mag_val=None):
         with self.lock:
-            self.adc_angle = adc_angle; self.adc_mag = adc_mag
-            self.force_angle = force_angle; self.force_mag = force_mag
-            self.diff_frame = diff_frame.reshape(self.rows, self.cols)
-            self.cop_x = cop_x; self.cop_y = cop_y
-            self.base_cop_x = base_cop_x; self.base_cop_y = base_cop_y
-            self.delta_cop_x = delta_cop_x; self.delta_cop_y = delta_cop_y
-            self.raw_fx = raw_fx; self.raw_fy = raw_fy; self.raw_fz = raw_fz
-            self.total_pressure = total_pressure_sum
-            self.fx_cal = fx_cal; self.fy_cal = fy_cal
-            self.cal_angle = cal_angle; self.cal_mag = cal_mag
+            self._pzt_angle_deg = pzt_angle_deg
+            self._pzt_mag_val = pzt_mag_val
+            self._force_angle_deg = force_angle_deg
+            self._force_mag_val = force_mag_val
+            self._press_table_arr = press_table_arr.reshape(self.rows, self.cols)
+            self._cop_curr_x = cop_curr_x
+            self._cop_curr_y = cop_curr_y
+            self._cop_base_x = cop_base_x
+            self._cop_base_y = cop_base_y
+            self._cop_delta_x = cop_delta_x
+            self._cop_delta_y = cop_delta_y
+            self._force_fx_val = force_fx_val
+            self._force_fy_val = force_fy_val
+            self._force_fz_val = force_fz_val
+            self._total_press_val = total_press_val
+            self._cal_fx_val = cal_fx_val
+            self._cal_fy_val = cal_fy_val
+            self._cal_angle_deg = cal_angle_deg
+            self._cal_mag_val = cal_mag_val
 
-            err = min(abs(adc_angle - force_angle), 360 - abs(adc_angle - force_angle))
-            self.angle_error_history.append(err)
-            self.adc_mag_history.append(adc_mag); self.raw_force_mag_history.append(force_total_mag)
-            self.pzt_fz_history.append(total_pressure_sum)
-            self.adc_dx_history.append(delta_cop_x); self.adc_dy_history.append(delta_cop_y)
-            self.force_fz_history.append(raw_fz)
-            self.force_fx_history.append(raw_fx); self.force_fy_history.append(raw_fy)
-            if fx_cal is not None:
-                self.force_fx_cal_history.append(fx_cal)
-                self.force_fy_cal_history.append(fy_cal)
+            angle_err = min(abs(pzt_angle_deg - force_angle_deg),
+                           360 - abs(pzt_angle_deg - force_angle_deg))
+            self.angle_error_history.append(angle_err)
+            self.adc_mag_history.append(pzt_mag_val)
+            self.raw_force_mag_history.append(force_total_mag)
+            self.pzt_fz_history.append(total_press_val)
+            self.adc_dx_history.append(cop_delta_x)
+            self.adc_dy_history.append(cop_delta_y)
+            self.force_fz_history.append(force_fz_val)
+            self.force_fx_history.append(force_fx_val)
+            self.force_fy_history.append(force_fy_val)
+            if cal_fx_val is not None:
+                self.force_fx_cal_history.append(cal_fx_val)
+                self.force_fy_cal_history.append(cal_fy_val)
 
-    def append_full_data(self, current_ms,
-                          adc_angle, adc_mag, total_pressure, dx_f, dy_f,
-                          force_angle, force_mag, fz, fx, fy,
-                          cal_angle=None, cal_mag=None, fx_cal=None, fy_cal=None):
+    def append_full_data(self, rel_time_ms,
+                          pzt_angle_deg, pzt_mag_val, total_press_val,
+                          cop_delta_x_filt, cop_delta_y_filt,
+                          force_angle_deg, force_mag_val,
+                          force_fz_filt, force_fx_filt, force_fy_filt,
+                          cal_angle_deg=None, cal_mag_val=None, cal_fx_val=None, cal_fy_val=None):
         with self.lock:
-            self.full_time_list.append(current_ms)
-            self.full_adc_angle_list.append(adc_angle); self.full_adc_mag_list.append(adc_mag)
-            self.full_total_pressure_list.append(total_pressure)
-            self.full_adc_dx_list.append(dx_f); self.full_adc_dy_list.append(dy_f)
-            self.full_force_angle_list.append(force_angle); self.full_force_mag_list.append(force_mag)
-            self.full_fz_list.append(fz); self.full_fx_list.append(fx); self.full_fy_list.append(fy)
-            if cal_mag is not None:
-                self.full_cal_angle_list.append(cal_angle); self.full_cal_mag_list.append(cal_mag)
-                self.full_fx_cal_list.append(fx_cal if fx_cal is not None else float('nan'))
-                self.full_fy_cal_list.append(fy_cal if fy_cal is not None else float('nan'))
+            self.full_time_list.append(rel_time_ms)
+            self.full_adc_angle_list.append(pzt_angle_deg)
+            self.full_adc_mag_list.append(pzt_mag_val)
+            self.full_total_pressure_list.append(total_press_val)
+            self.full_adc_dx_list.append(cop_delta_x_filt)
+            self.full_adc_dy_list.append(cop_delta_y_filt)
+            self.full_force_angle_list.append(force_angle_deg)
+            self.full_force_mag_list.append(force_mag_val)
+            self.full_fz_list.append(force_fz_filt)
+            self.full_fx_list.append(force_fx_filt)
+            self.full_fy_list.append(force_fy_filt)
+            if cal_mag_val is not None:
+                self.full_cal_angle_list.append(cal_angle_deg)
+                self.full_cal_mag_list.append(cal_mag_val)
+                self.full_fx_cal_list.append(cal_fx_val if cal_fx_val is not None else float('nan'))
+                self.full_fy_cal_list.append(cal_fy_val if cal_fy_val is not None else float('nan'))
 
     # ===== 更新 =====
     def update_all(self):
         t0 = time.perf_counter()
         with self.lock:
-            aa, am = self.adc_angle, self.adc_mag
-            fa, fm = self.force_angle, self.force_mag
-            ca, cm = self.cal_angle, self.cal_mag
-            pz_h = list(self.pzt_fz_history)
-            dx_h, dy_h = list(self.adc_dx_history), list(self.adc_dy_history)
-            fz_h = list(self.force_fz_history)
-            fx_h, fy_h = list(self.force_fx_history), list(self.force_fy_history)
-            fc_h = list(self.force_fx_cal_history)
-            fcy_h = list(self.force_fy_cal_history)
-            err_h = list(self.angle_error_history)
-            table = self.diff_frame.copy()
-            cx_p, cy_p = self.cop_x, self.cop_y
-            bx_p, by_p = self.base_cop_x, self.base_cop_y
-            ddx, ddy = self.delta_cop_x, self.delta_cop_y
-            fx_c, fy_c = self.fx_cal, self.fy_cal
-            with COP.grad_table_lock:
-                grad = COP.grad_table_data.copy()
+            pzt_angle_deg = self._pzt_angle_deg
+            pzt_mag_val = self._pzt_mag_val
+            force_angle_deg = self._force_angle_deg
+            force_mag_val = self._force_mag_val
+            cal_angle_deg = self._cal_angle_deg
+            cal_mag_val = self._cal_mag_val
+            pzt_fz_hist = list(self.pzt_fz_history)
+            cop_dx_hist = list(self.adc_dx_history); cop_dy_hist = list(self.adc_dy_history)
+            force_fz_hist = list(self.force_fz_history)
+            force_fx_hist = list(self.force_fx_history); force_fy_hist = list(self.force_fy_history)
+            cal_fx_hist = list(self.force_fx_cal_history)
+            cal_fy_hist = list(self.force_fy_cal_history)
+            err_hist = list(self.angle_error_history)
+            press_table_arr = self._press_table_arr.copy()
+            cop_curr_x = self._cop_curr_x; cop_curr_y = self._cop_curr_y
+            cop_base_x = self._cop_base_x; cop_base_y = self._cop_base_y
+            cop_delta_x = self._cop_delta_x; cop_delta_y = self._cop_delta_y
+            cal_fx_val = self._cal_fx_val; cal_fy_val = self._cal_fy_val
+            with COP.g_cop_grad_table_lock:
+                grad_arr = COP.g_cop_grad_table_arr.copy()
 
-        # Direction: PZT=red + Force=blue, tail at origin
-        self._update_arrow(self._dir_pzt, aa, 0.45, 'r')
-        self._update_arrow(self._dir_frc, fa, 0.40, 'b')
+        # Direction: PZT=red + Force=blue
+        self._update_arrow(self._dir_pzt, pzt_angle_deg, 0.45, 'r')
+        self._update_arrow(self._dir_frc, force_angle_deg, 0.40, 'b')
 
-        # Magnitude: proportional length（最小 0.01，保持初始可见）
-        la = max(min((am / 5.0) * 0.65, 0.65), 0.01)
-        self._update_arrow(self._mag_pzt, aa, la, 'r')
-        lf = max(min((abs(fm) / 20.0) * 0.65, 0.65), 0.01)
-        self._update_arrow(self._mag_frc, fa, lf, 'b')
+        # Magnitude: proportional length
+        pzt_mag_len = max(min((pzt_mag_val / 5.0) * 0.65, 0.65), 0.01)
+        self._update_arrow(self._mag_pzt, pzt_angle_deg, pzt_mag_len, 'r')
+        force_mag_len = max(min((abs(force_mag_val) / 20.0) * 0.65, 0.65), 0.01)
+        self._update_arrow(self._mag_frc, force_angle_deg, force_mag_len, 'b')
 
         # Time-series
-        self._u1(self._c_pzt_fz, self.p_pzt_fz, pz_h, self._t_pzt_fz, "PZT_Fz")
-        self._u1(self._c_pzt_fx, self.p_pzt_fx, dx_h, self._t_pzt_fx, "PZT_Fx")
-        self._u1(self._c_pzt_fy, self.p_pzt_fy, dy_h, self._t_pzt_fy, "PZT_Fy")
-        self._u1(self._c_frc_fz, self.p_frc_fz, fz_h, self._t_frc_fz, "Fz",
-                 pzt_val=pz_h[-1] if pz_h else 0, pzt_label="PZT_Fz", txt_r=self._t_frc_fz_r)
-        self._u2(self._c_frc_fx, self._c_frc_fx_cal, self.p_frc_fx, fx_h, fc_h, self._t_frc_fx, "Fx",
-                 txt_r=self._t_frc_fx_r)
-        self._u2(self._c_frc_fy, self._c_frc_fy_cal, self.p_frc_fy, fy_h, fcy_h, self._t_frc_fy, "Fy",
-                 txt_r=self._t_frc_fy_r)
-        if err_h:
-            xs = list(range(len(err_h)))
-            self._c_err.setData(xs, err_h)
-            self.p_err.setXRange(0, max(len(xs) - 1, 1))
-            self._t_err.setText(f'{err_h[-1]:.1f}°')
-            hi = self.p_err.viewRange()[1][1]
-            self._t_err.setPos(max(len(xs) - 1, 1), hi)
+        self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_Fz")
+        self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_Fx")
+        self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_Fy")
+        self._u1(self._c_frc_fz, self.p_frc_fz, force_fz_hist, self._t_frc_fz, "Fz",
+                 pzt_val=pzt_fz_hist[-1] if pzt_fz_hist else 0, pzt_label="Cal_Fz", txt_r=self._t_frc_fz_r)
+        self._u2(self._c_frc_fx, self._c_frc_fx_cal, self.p_frc_fx, force_fx_hist, cal_fx_hist,
+                 self._t_frc_fx, "Fx", txt_r=self._t_frc_fx_r)
+        self._u2(self._c_frc_fy, self._c_frc_fy_cal, self.p_frc_fy, force_fy_hist, cal_fy_hist,
+                 self._t_frc_fy, "Fy", txt_r=self._t_frc_fy_r)
+        if err_hist:
+            x_vals = list(range(len(err_hist)))
+            self._c_err.setData(x_vals, err_hist)
+            self.p_err.setXRange(0, max(len(x_vals) - 1, 1))
+            self._t_err.setText(f'{err_hist[-1]:.1f}°')
+            y_hi = self.p_err.viewRange()[1][1]
+            self._t_err.setPos(max(len(x_vals) - 1, 1), y_hi)
 
-        # Pressure table: 同 matplotlib table，vmax = max(每帧最大值, 下限)
-        vmax = max(np.max(table), self._heat_vmax)
-        self._cell_grid.set_data(table, vmax)
-        for r in range(12):
-            for c in range(7):
-                v = table[r, c]
-                self._cell_txts[r][c].setText(f"{v:.0f}" if v > 0 else "")
+        # Pressure table
+        cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
+        self._cell_grid.set_data(press_table_arr, cell_vmax)
+        for row_idx in range(12):
+            for col_idx in range(7):
+                cell_val = press_table_arr[row_idx, col_idx]
+                self._cell_txts[row_idx][col_idx].setText(f"{cell_val:.0f}" if cell_val > 0 else "")
         # CoP dots + arrow
-        spots = [{'pos': (cx_p, cy_p), 'brush': 'g', 'size': 12}]
-        if not np.isnan(bx_p) and not np.isnan(by_p):
-            spots.append({'pos': (bx_p, by_p), 'brush': 'b', 'symbol': 'x', 'size': 15})
+        spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+        if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
+            spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
         self._cop_dots.setData(spots=spots)
-        if not np.isnan(bx_p) and not np.isnan(by_p) and np.hypot(ddx, ddy) > 0.05:
+        if not np.isnan(cop_base_x) and not np.isnan(cop_base_y) and np.hypot(cop_delta_x, cop_delta_y) > 0.05:
             self._update_arrow((self._cop_arr, self._cop_hL, self._cop_hR),
-                               np.degrees(np.arctan2(-ddy, ddx)) if abs(ddx) + abs(ddy) > 1e-6 else 0,
-                               np.hypot(ddx, ddy), 'r', (bx_p, by_p))
+                               np.degrees(np.arctan2(-cop_delta_y, cop_delta_x)) if abs(cop_delta_x) + abs(cop_delta_y) > 1e-6 else 0,
+                               np.hypot(cop_delta_x, cop_delta_y), 'r', (cop_base_x, cop_base_y))
         else:
             self._cop_arr.setData([], [])
             self._cop_hL.setData([], [])
             self._cop_hR.setData([], [])
 
         # Gradient arrows
-        for i, (ln, dot) in enumerate(zip(self._g_lines, self._g_heads)):
-            r, c = divmod(i, 7)
-            gx, gy = grad[r, c, 0], grad[r, c, 1]
-            m = np.hypot(gx, gy)
-            if m > 1.0:
-                dx = -gx / m * 0.3; dy = gy / m * 0.3  # 反方向
-                tip_x = c + dx; tip_y = r + dy
-                ln.setData([c, tip_x], [r, tip_y])
-                dot.setData(x=[tip_x], y=[tip_y], brush='k', size=4)
+        for grad_idx, (grad_ln, grad_dot) in enumerate(zip(self._g_lines, self._g_heads)):
+            grad_row, grad_col = divmod(grad_idx, 7)
+            grad_x, grad_y = grad_arr[grad_row, grad_col, 0], grad_arr[grad_row, grad_col, 1]
+            grad_mag = np.hypot(grad_x, grad_y)
+            if grad_mag > 1.0:
+                arrow_dx = -grad_x / grad_mag * 0.3  # 反方向
+                arrow_dy = grad_y / grad_mag * 0.3
+                tip_x = grad_col + arrow_dx
+                tip_y = grad_row + arrow_dy
+                grad_ln.setData([grad_col, tip_x], [grad_row, tip_y])
+                grad_dot.setData(x=[tip_x], y=[tip_y], brush='k', size=4)
             else:
-                ln.setData([], [])
-                dot.setData(x=[], y=[])
+                grad_ln.setData([], [])
+                grad_dot.setData(x=[], y=[])
 
         # FPS
     def _u1(self, curve, plot, data, txt, label, pzt_val=None, pzt_label=None, txt_r=None):
