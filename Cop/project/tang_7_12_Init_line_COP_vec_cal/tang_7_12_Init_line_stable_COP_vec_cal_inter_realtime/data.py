@@ -7,12 +7,14 @@ import serial.tools.list_ports
 import time
 import struct
 import csv
+import os
 from collections import deque
 import threading
 import numpy as np
 
 DATA_BAUDRATE_PRESS = 921600  # 压力传感器串口波特率
 DATA_BAUDRATE_FORCE = 460860  # 六维力传感器串口波特率
+DATA_DEBUG_DUMP_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
 
 # ===================== 压力传感器 =====================
 class PressureSensor:                              # 为什么定义成类而不是函数？1.包含很多函数，2.方便管理状态，有很多global变量
@@ -20,6 +22,7 @@ class PressureSensor:                              # 为什么定义成类而不
         self.ser = None                            # self.变量是默认global
         self.port = None
         self.last = None
+        self._dump_cnt = 0                         # hex dump 计数器
         self.auto_find_port()
 
     def auto_find_port(self):                      #类里的函数，第一个参数必须是self，调用的时候代表对象自己
@@ -49,28 +52,89 @@ class PressureSensor:                              # 为什么定义成类而不
         self.auto_find_port()
 
     def read_data(self):
-        """读取一帧原始数据（清空缓存）"""
+        """读取一帧原始数据：write 后循环读满一帧，丢弃多余数据"""
         if not self.ser or not self.ser.is_open:
             return None
         try:
             self.ser.reset_input_buffer()
             cmd = [0x55,0xAA,9,0,0x34,0,0xFB,0,0x1C,0,0,0xA8,0,0x35]
             self.ser.write(bytearray(cmd))
-            time.sleep(0.008)
-            resp = self.ser.read(256)
+            # 循环读取直到收满一帧（182 字节），超时 50ms
+            resp = b''
+            t0 = time.perf_counter()
+            while len(resp) < 182 and time.perf_counter() - t0 < 0.05:
+                chunk = self.ser.read(256)
+                if chunk:
+                    resp += chunk
+
+            if not resp:
+                return None
             idx = resp.find(b'\xaa\x55')
             if idx == -1 or len(resp[idx:]) < 182:
                 return None
+
+            self._last_resp = resp
+            self._last_idx = idx
+
             return resp[idx+14:idx+14+168]
         except Exception:
             return None
 
+    def dump_last_raw(self, decoded_values=None):
+        """将最近一帧的原始 hex 写入文件（供 decode 检测到异常时调用）"""
+        resp = getattr(self, '_last_resp', None)
+        if resp is None:
+            return None
+
+        self._dump_cnt += 1
+        fname = os.path.join(DATA_DEBUG_DUMP_DIR,
+                             f"_hex_dump_{self._dump_cnt:03d}_{time.strftime('%H%M%S')}.txt")
+        with open(fname, 'w') as f:
+            f.write(f"# dump #{self._dump_cnt}  time={time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            all_pos = getattr(self, '_last_all_pos', [])
+            f.write(f"# find() idx={self._last_idx}  all_pos={all_pos}  len(resp)={len(resp)}\n")
+            f.write(f"# used bytes: resp[{self._last_idx}+14 : {self._last_idx}+14+168]\n\n")
+
+            # 全量 hex dump，每行 16 字节
+            for i in range(0, len(resp), 16):
+                chunk = resp[i:i+16]
+                hex_str = ' '.join(f'{b:02X}' for b in chunk)
+                ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+                f.write(f"  {i:04X}: {hex_str:<48s} {ascii_str}\n")
+
+            f.write(f"\n# data-only hex (168 bytes from idx+14):\n")
+            data_bytes = resp[self._last_idx+14:self._last_idx+14+168]
+            f.write(' '.join(f'{b:02X}' for b in data_bytes) + '\n')
+
+            # 解码预览
+            if decoded_values is not None:
+                f.write(f"\n# decoded 84ch, max={max(decoded_values)}, min={min(decoded_values)}\n")
+                spike_idx = [i for i, v in enumerate(decoded_values) if v > 20000]
+                if spike_idx:
+                    f.write(f"# SPIKE channels: {[(i, decoded_values[i]) for i in spike_idx]}\n")
+                for row in range(12):
+                    chs = decoded_values[row*7:(row+1)*7]
+                    f.write('  ' + ' '.join(f'{v:6d}' for v in chs) + '\n')
+
+        return fname
+
     def decode(self, raw):
-        """解码为84通道数组"""
+        """解码为84通道数组，检测到跳变 >20000 时自动保存 hex dump"""
         arr = [struct.unpack("<H", raw[i:i+2])[0] for i in range(0, 168, 2)]
         out = []
         for i in range(12):
             out.extend(arr[i*7:(i+1)*7])
+
+        # 逐通道跳变检测
+        if self.last is not None and len(self.last) == 84:
+            spike = False
+            for i in range(84):
+                if out[i] - self.last[i] > 20000:
+                    out[i] = self.last[i]
+                    spike = True
+            if spike:
+                self.dump_last_raw(decoded_values=out)
+
         self.last = out.copy()
         return out
 
