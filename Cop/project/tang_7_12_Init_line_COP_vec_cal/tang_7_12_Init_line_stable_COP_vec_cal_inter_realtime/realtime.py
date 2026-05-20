@@ -202,7 +202,7 @@ class RealTimePlot:
             p.setTitle(title, size='11pt', bold=True)
 
         # --- 左列 (col 0-1): PZT=红, Force=蓝 ---
-        for r, (pzt_n, frc_n) in enumerate([("PZT_Fz", "Force_Fz"), ("PZT_Fx", "Force_Fx"), ("PZT_Fy", "Force_Fy")]):
+        for r, (pzt_n, frc_n) in enumerate([("PZT_z", "Force_Fz"), ("PZT_x", "Force_Fx"), ("PZT_y", "Force_Fy")]):
             p = self.win.addPlot(row=r, col=0, title=pzt_n)
             p.showGrid(x=True, y=True, alpha=0.3)
             p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
@@ -211,7 +211,7 @@ class RealTimePlot:
             pc = 'r'
             c = p.plot(pen=pg.mkPen(pc, width=3))
             setattr(self, f"_c_pzt_{['fz','fx','fy'][r]}", c)
-            t = pg.TextItem("", anchor=(0, 1))
+            t = pg.TextItem("", anchor=(1, 1))
             p.addItem(t)
             setattr(self, f"_t_pzt_{['fz','fx','fy'][r]}", t)
 
@@ -428,9 +428,9 @@ class RealTimePlot:
         self._mag_txt_frc.setPos(0.35, 0.62)
 
         # Time-series
-        self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_Fz", fs=fs)
-        self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_Fx", fs=fs)
-        self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_Fy", fs=fs)
+        self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_z", fs=fs)
+        self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_x", fs=fs)
+        self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_y", fs=fs)
         self._u1(self._c_frc_fz, self.p_frc_fz, force_fz_hist, self._t_frc_fz, "Fz",
                  color='blue', pzt_val=pzt_fz_hist[-1] if pzt_fz_hist else 0, pzt_label="Cal_Fz", txt_r=self._t_frc_fz_r, fs=fs)
         self._u2(self._c_frc_fx, self._c_frc_fx_cal, self.p_frc_fx, force_fx_hist, cal_fx_hist,

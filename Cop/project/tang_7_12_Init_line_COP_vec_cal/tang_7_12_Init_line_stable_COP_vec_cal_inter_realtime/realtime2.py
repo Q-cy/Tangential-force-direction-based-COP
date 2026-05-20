@@ -180,31 +180,31 @@ class RealTimePlot:
             p.setTitle(title, size='11pt', bold=True)
 
         # --- 左列 (col 0-1): PZT=红, Force=蓝 ---
-        # row 0: PZT_Fz 跨两列（Force_Fz 已移除）
-        p = self.win.addPlot(row=0, col=0, colspan=2, title="PZT_Fz")
+        # row 0: PZT_z 跨两列
+        p = self.win.addPlot(row=0, col=0, colspan=2, title="PZT_z")
         p.showGrid(x=True, y=True, alpha=0.3)
         p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
-        _style_plot(p, "PZT_Fz")
+        _style_plot(p, "PZT_z")
         self.p_pzt_fz = p
         self._c_pzt_fz = p.plot(pen=pg.mkPen('r', width=3))
         self._t_pzt_fz = pg.TextItem("", color='r', anchor=(1, 1))
         p.addItem(self._t_pzt_fz)
 
-        # row 1: PZT_Fx 跨两列
-        p = self.win.addPlot(row=1, col=0, colspan=2, title="PZT_Fx")
+        # row 1: PZT_x 跨两列
+        p = self.win.addPlot(row=1, col=0, colspan=2, title="PZT_x")
         p.showGrid(x=True, y=True, alpha=0.3)
         p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
-        _style_plot(p, "PZT_Fx")
+        _style_plot(p, "PZT_x")
         self.p_pzt_fx = p
         self._c_pzt_fx = p.plot(pen=pg.mkPen('r', width=3))
         self._t_pzt_fx = pg.TextItem("", color='r', anchor=(1, 1))
         p.addItem(self._t_pzt_fx)
 
-        # row 2: PZT_Fy 跨两列
-        p = self.win.addPlot(row=2, col=0, colspan=2, title="PZT_Fy")
+        # row 2: PZT_y 跨两列
+        p = self.win.addPlot(row=2, col=0, colspan=2, title="PZT_y")
         p.showGrid(x=True, y=True, alpha=0.3)
         p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
-        _style_plot(p, "PZT_Fy")
+        _style_plot(p, "PZT_y")
         self.p_pzt_fy = p
         self._c_pzt_fy = p.plot(pen=pg.mkPen('r', width=3))
         self._t_pzt_fy = pg.TextItem("", color='r', anchor=(1, 1))
@@ -337,9 +337,9 @@ class RealTimePlot:
         self._mag_txt_pzt.setPos(0.35, 0.75)
 
         # Time-series
-        self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_Fz", fs=fs)
-        self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_Fx", fs=fs)
-        self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_Fy", fs=fs)
+        self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_z", fs=fs)
+        self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_x", fs=fs)
+        self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_y", fs=fs)
 
         # Pressure table + CoP + Gradient
         if COP.g_cop_contact_init_flag:
