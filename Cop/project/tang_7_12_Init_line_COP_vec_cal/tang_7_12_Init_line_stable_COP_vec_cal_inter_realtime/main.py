@@ -126,14 +126,7 @@ def data_loop():
 
         # ---- 采集压力数据 ----
         press_item = buf_press.get_latest() if has_press else None
-        force_item = None
-
-        if press_item is not None and has_force:
-            force_item = buf_force.find_closest(press_item["t"])
-            if force_item is not None and abs(press_item["t"] - force_item["t"]) > MAIN_MAX_TIME_DIFF_S:
-                force_item = None
-        elif has_force:
-            force_item = buf_force.get_latest()
+        force_item = buf_force.get_latest() if has_force else None
 
         if press_item is None and force_item is None:
             time.sleep(0.001)

@@ -13,7 +13,7 @@ import threading
 import numpy as np
 
 DATA_BAUDRATE_PRESS = 921600  # 压力传感器串口波特率
-DATA_BAUDRATE_FORCE = 460860  # 六维力传感器串口波特率
+DATA_BAUDRATE_FORCE = 460800  # 六维力传感器串口波特率
 DATA_DEBUG_DUMP_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
 
 # ===================== 压力传感器 =====================
@@ -21,7 +21,6 @@ class PressureSensor:                              # 为什么定义成类而不
     def __init__(self):
         self.ser = None                            # self.变量是默认global
         self.port = None
-        self.last = None
         self._dump_cnt = 0                         # hex dump 计数器
         self.auto_find_port()
 
@@ -51,6 +50,19 @@ class PressureSensor:                              # 为什么定义成类而不
         time.sleep(0.2)
         self.auto_find_port()
 
+    @staticmethod
+    def crc8_itu(data: bytes) -> int:
+        """CRC-8-ITU 校验（多项式 0x07，初始值 0x00）"""
+        crc = 0x00
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x80:
+                    crc = ((crc << 1) ^ 0x07) & 0xFF
+                else:
+                    crc = (crc << 1) & 0xFF
+        return crc ^ 0x55
+
     def read_data(self):
         """读取一帧原始数据：write 后循环读满一帧，丢弃多余数据"""
         if not self.ser or not self.ser.is_open:
@@ -59,10 +71,10 @@ class PressureSensor:                              # 为什么定义成类而不
             self.ser.reset_input_buffer()
             cmd = [0x55,0xAA,9,0,0x34,0,0xFB,0,0x1C,0,0,0xA8,0,0x35]
             self.ser.write(bytearray(cmd))
-            # 循环读取直到收满一帧（182 字节），超时 50ms
+            # 循环读取直到收满一帧（183 字节），超时 50ms
             resp = b''
             t0 = time.perf_counter()
-            while len(resp) < 182 and time.perf_counter() - t0 < 0.05:
+            while len(resp) < 183 and time.perf_counter() - t0 < 0.05:
                 chunk = self.ser.read(256)
                 if chunk:
                     resp += chunk
@@ -70,13 +82,23 @@ class PressureSensor:                              # 为什么定义成类而不
             if not resp:
                 return None
             idx = resp.find(b'\xaa\x55')
-            if idx == -1 or len(resp[idx:]) < 182:
+            if idx == -1 or len(resp[idx:]) < 183:
+                return None
+
+            frame = resp[idx:idx+183]
+
+            # 状态字节检查：byte[13] == 0 表示成功
+            if frame[13] != 0:
+                return None
+
+            # CRC-8-ITU 校验：byte[0:182] 的 CRC 与 byte[182] 比对
+            if self.crc8_itu(frame[:182]) != frame[182]:
                 return None
 
             self._last_resp = resp
             self._last_idx = idx
 
-            return resp[idx+14:idx+14+168]
+            return frame[14:182]   # 168 字节数据（14字节帧头之后，CRC字节之前）
         except Exception:
             return None
 
@@ -119,18 +141,11 @@ class PressureSensor:                              # 为什么定义成类而不
         return fname
 
     def decode(self, raw):
-        """解码为84通道数组，检测到跳变 >20000 时自动保存 hex dump"""
+        """解码为84通道数组"""
         arr = [struct.unpack("<H", raw[i:i+2])[0] for i in range(0, 168, 2)]
         out = []
         for i in range(12):
             out.extend(arr[i*7:(i+1)*7])
-
-        # 逐通道跳变检测
-        if self.last is not None and len(self.last) == 84:
-            for i in range(84):
-                if out[i] - self.last[i] > 20000:
-                    out[i] = self.last[i]
-        self.last = out.copy()
         return out
 
 # ===================== 六维力传感器 =====================
@@ -167,7 +182,7 @@ class SixAxisForceSensor:
             self.ser.write(b'\x49\xAA\x0D\x0A')
             time.sleep(0.008)
             resp = self.ser.read(28)
-            if len(resp) != 28 or resp[:2] != b'\x49\xAA':
+            if len(resp) != 28 or resp[:2] != b'\x49\xAA' or resp[-2:] != b'\x0D\x0A':
                 return None
             Fx = struct.unpack('<f', resp[2:6])[0]
             Fy = struct.unpack('<f', resp[6:10])[0]

@@ -209,9 +209,9 @@ class RealTimePlot:
             _style_plot(p, pzt_n)
             setattr(self, f"p_pzt_{['fz','fx','fy'][r]}", p)
             pc = 'r'
-            c = p.plot(pen=pg.mkPen(pc, width=2))
+            c = p.plot(pen=pg.mkPen(pc, width=3))
             setattr(self, f"_c_pzt_{['fz','fx','fy'][r]}", c)
-            t = pg.TextItem("", color=pc, anchor=(1, 1))
+            t = pg.TextItem("", anchor=(0, 1))
             p.addItem(t)
             setattr(self, f"_t_pzt_{['fz','fx','fy'][r]}", t)
 
@@ -220,17 +220,17 @@ class RealTimePlot:
             p2.getAxis('left').setWidth(45); p2.getAxis('bottom').setHeight(28)
             _style_plot(p2, frc_n)
             setattr(self, f"p_frc_{['fz','fx','fy'][r]}", p2)
-            c2 = p2.plot(pen=pg.mkPen('b', width=2))
+            c2 = p2.plot(pen=pg.mkPen('b', width=3))
             setattr(self, f"_c_frc_{['fz','fx','fy'][r]}", c2)
-            t2 = pg.TextItem("", color='b', anchor=(1, 1))
+            t2 = pg.TextItem("", anchor=(1, 1))
             p2.addItem(t2)
             setattr(self, f"_t_frc_{['fz','fx','fy'][r]}", t2)
             # 红色文字：Fz=PZT_Fz, Fx/Fy=Cal
-            t2r = pg.TextItem("", color='r', anchor=(1, 0))
+            t2r = pg.TextItem("", anchor=(1, 1))
             p2.addItem(t2r)
             setattr(self, f"_t_frc_{['fz','fx','fy'][r]}_r", t2r)
             if r > 0:  # Fx/Fy have cal line
-                c2c = p2.plot(pen=pg.mkPen('r', width=2, style=QtCore.Qt.DashLine))
+                c2c = p2.plot(pen=pg.mkPen('r', width=3, style=QtCore.Qt.DashLine))
                 setattr(self, f"_c_frc_{['fx','fy'][r-1]}_cal", c2c)
 
         # Angle Error
@@ -239,8 +239,8 @@ class RealTimePlot:
         self.p_err.setYRange(0, 180)
         self.p_err.getAxis('left').setWidth(45); self.p_err.getAxis('bottom').setHeight(28)
         _style_plot(self.p_err, "Angle Error")
-        self._c_err = self.p_err.plot(pen=pg.mkPen('g', width=2))
-        self._t_err = pg.TextItem("", color='g', anchor=(1, 1))
+        self._c_err = self.p_err.plot(pen=pg.mkPen('g', width=3))
+        self._t_err = pg.TextItem("", anchor=(0, 1))
         self.p_err.addItem(self._t_err)
 
         # --- 右列上方: Direction + Magnitude (col 2-3) ---
@@ -251,6 +251,10 @@ class RealTimePlot:
         self._dir_frc = self._make_arrow_parts(self.p_dir)
         self._update_arrow(self._dir_pzt, 0, 0.45, 'r')
         self._update_arrow(self._dir_frc, 0, 0.40, 'b')
+        self._dir_txt_pzt = pg.TextItem("", anchor=(0, 1))
+        self.p_dir.addItem(self._dir_txt_pzt)
+        self._dir_txt_frc = pg.TextItem("", anchor=(0, 1))
+        self.p_dir.addItem(self._dir_txt_frc)
 
         self.p_mag = self.win.addPlot(row=0, col=3, title="Magnitude")
         self.p_mag.hideAxis('left'); self.p_mag.hideAxis('bottom')
@@ -259,6 +263,10 @@ class RealTimePlot:
         self._mag_frc = self._make_arrow_parts(self.p_mag)
         self._update_arrow(self._mag_pzt, 0, 0.10, 'r')
         self._update_arrow(self._mag_frc, 0, 0.10, 'b')
+        self._mag_txt_pzt = pg.TextItem("", anchor=(0, 1))
+        self.p_mag.addItem(self._mag_txt_pzt)
+        self._mag_txt_frc = pg.TextItem("", anchor=(0, 1))
+        self.p_mag.addItem(self._mag_txt_frc)
 
         # --- 右列下方: Pressure Table + Gradient (row 1-3, col 2-3) ---
         self.p_table = self.win.addPlot(row=1, col=2, rowspan=3, title="Pressure Table")
@@ -401,32 +409,40 @@ class RealTimePlot:
         _fm = force_mag_val if COP.g_cop_contact_init_flag else 0.0
 
         # Direction: PZT=red + Force=blue
+        fs = self._font_size(12)
         self._update_arrow(self._dir_pzt, pzt_angle_deg, 0.45, 'r')
         self._update_arrow(self._dir_frc, _fa, 0.40, 'b')
+        self._dir_txt_pzt.setHtml(self._html(f'PZT_Angle: {pzt_angle_deg:.1f}°', 'red', fs))
+        self._dir_txt_pzt.setPos(0.75, 1.15)
+        self._dir_txt_frc.setHtml(self._html(f'Force_Angle: {_fa:.1f}°', 'blue', fs))
+        self._dir_txt_frc.setPos(0.75, 0.95)
 
         # Magnitude: proportional length
         pzt_mag_len = max(min((pzt_mag_val / 5.0) * 0.65, 0.65), 0.01)
         self._update_arrow(self._mag_pzt, pzt_angle_deg, pzt_mag_len, 'r')
         force_mag_len = max(min((abs(_fm) / 20.0) * 0.65, 0.65), 0.01)
         self._update_arrow(self._mag_frc, _fa, force_mag_len, 'b')
+        self._mag_txt_pzt.setHtml(self._html(f'PZT_Mag: {pzt_mag_val:.1f}', 'red', fs))
+        self._mag_txt_pzt.setPos(0.35, 0.75)
+        self._mag_txt_frc.setHtml(self._html(f'Force_Mag: {abs(_fm):.1f}', 'blue', fs))
+        self._mag_txt_frc.setPos(0.35, 0.62)
 
         # Time-series
-        self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_Fz")
-        self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_Fx")
-        self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_Fy")
+        self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_Fz", fs=fs)
+        self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_Fx", fs=fs)
+        self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_Fy", fs=fs)
         self._u1(self._c_frc_fz, self.p_frc_fz, force_fz_hist, self._t_frc_fz, "Fz",
-                 pzt_val=pzt_fz_hist[-1] if pzt_fz_hist else 0, pzt_label="Cal_Fz", txt_r=self._t_frc_fz_r)
+                 color='blue', pzt_val=pzt_fz_hist[-1] if pzt_fz_hist else 0, pzt_label="Cal_Fz", txt_r=self._t_frc_fz_r, fs=fs)
         self._u2(self._c_frc_fx, self._c_frc_fx_cal, self.p_frc_fx, force_fx_hist, cal_fx_hist,
-                 self._t_frc_fx, "Fx", txt_r=self._t_frc_fx_r)
+                 self._t_frc_fx, "Fx", txt_r=self._t_frc_fx_r, fs=fs)
         self._u2(self._c_frc_fy, self._c_frc_fy_cal, self.p_frc_fy, force_fy_hist, cal_fy_hist,
-                 self._t_frc_fy, "Fy", txt_r=self._t_frc_fy_r)
+                 self._t_frc_fy, "Fy", txt_r=self._t_frc_fy_r, fs=fs)
         if err_hist:
             x_vals = list(range(len(err_hist)))
             self._c_err.setData(x_vals, err_hist)
             self.p_err.setXRange(0, max(len(x_vals) - 1, 1))
-            self._t_err.setText(f'{err_hist[-1]:.1f}°')
-            y_hi = self.p_err.viewRange()[1][1]
-            self._t_err.setPos(max(len(x_vals) - 1, 1), y_hi)
+            self._t_err.setHtml(self._html(f'Error: {err_hist[-1]:.1f}°', 'green', fs))
+            self._t_err.setPos(int(max(len(x_vals) - 1, 1) * 0.85), 180 - 180 * 0.12)
 
         # Pressure table + CoP + Gradient：仅在初始 CoP 确定后显示
         if COP.g_cop_contact_init_flag:
@@ -480,23 +496,33 @@ class RealTimePlot:
                 grad_dot.setData(x=[], y=[])
 
         # FPS
-    def _u1(self, curve, plot, data, txt, label, pzt_val=None, pzt_label=None, txt_r=None):
+    @staticmethod
+    def _html(text, color, size=16):
+        return f'<span style="color:{color};font-size:{size}pt;font-weight:bold">{text}</span>'
+
+    def _font_size(self, base=16):
+        """根据窗口宽度动态计算字号"""
+        w = self.win.width()
+        return max(int(base * w / 1900), 7)
+
+    def _u1(self, curve, plot, data, txt, label, color='red', pzt_val=None, pzt_label=None, txt_r=None, fs=16):
         if data:
             xs = list(range(len(data)))
             curve.setData(xs, data)
             plot.setXRange(0, max(len(xs) - 1, 1))
             lo, hi = _yrange(data)
-            plot.setYRange(lo, hi)
+            plot.setYRange(lo, hi, padding=0)
+            span = hi - lo if hi != lo else 1
             if txt_r and pzt_val is not None:
-                txt.setText(f'True_{label}={data[-1]:.2f}')
-                txt.setPos(max(len(xs) - 1, 1), hi - (hi - lo) * 0.05)
-                txt_r.setText(f'{pzt_label}={pzt_val:.2f}')
-                txt_r.setPos(max(len(xs) - 1, 1), hi - (hi - lo) * 0.15)
+                txt.setHtml(self._html(f'True_{label}={data[-1]:.2f}', color, fs))
+                txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
+                txt_r.setHtml(self._html(f'{pzt_label}={pzt_val:.2f}', 'red', fs))
+                txt_r.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.19)
             else:
-                txt.setText(f'{label}={data[-1]:.2f}')
-                txt.setPos(max(len(xs) - 1, 1), hi - (hi - lo) * 0.12)
+                txt.setHtml(self._html(f'{label}={data[-1]:.2f}', color, fs))
+                txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
 
-    def _u2(self, c1, c2, plot, d1, d2, txt, label, txt_r=None):
+    def _u2(self, c1, c2, plot, d1, d2, txt, label, color='blue', txt_r=None, fs=16):
         if d1:
             xs = list(range(len(d1)))
             c1.setData(xs, d1)
@@ -504,13 +530,14 @@ class RealTimePlot:
             if len(d2) == len(d1):
                 c2.setData(xs, d2); all_y.extend(d2)
             plot.setXRange(0, max(len(xs) - 1, 1))
-            lo, hi = _yrange(all_y); plot.setYRange(lo, hi)
+            lo, hi = _yrange(all_y); plot.setYRange(lo, hi, padding=0)
+            span = hi - lo if hi != lo else 1
             val = d2[-1] if len(d2) == len(d1) else 0
-            txt.setText(f'True_{label}={d1[-1]:.2f}')
-            txt.setPos(max(len(xs) - 1, 1), hi - (hi - lo) * 0.05)
+            txt.setHtml(self._html(f'True_{label}={d1[-1]:.2f}', color, fs))
+            txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
             if txt_r:
-                txt_r.setText(f'Cal_{label}={val:.2f}')
-                txt_r.setPos(max(len(xs) - 1, 1), hi - (hi - lo) * 0.15)
+                txt_r.setHtml(self._html(f'Cal_{label}={val:.2f}', 'red', fs))
+                txt_r.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.19)
 
     # ===== 全程静态图 (matplotlib Agg) =====
     def plot_full_magnitude_curve(self, save_dir):
