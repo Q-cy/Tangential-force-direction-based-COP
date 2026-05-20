@@ -205,7 +205,7 @@ class RealTimePlot:
         for r, (pzt_n, frc_n) in enumerate([("PZT_z", "Force_Fz"), ("PZT_x", "Force_Fx"), ("PZT_y", "Force_Fy")]):
             p = self.win.addPlot(row=r, col=0, title=pzt_n)
             p.showGrid(x=True, y=True, alpha=0.3)
-            p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
+            p.getAxis('bottom').setHeight(28)
             _style_plot(p, pzt_n)
             setattr(self, f"p_pzt_{['fz','fx','fy'][r]}", p)
             pc = 'r'
@@ -217,7 +217,7 @@ class RealTimePlot:
 
             p2 = self.win.addPlot(row=r, col=1, title=frc_n)
             p2.showGrid(x=True, y=True, alpha=0.3)
-            p2.getAxis('left').setWidth(45); p2.getAxis('bottom').setHeight(28)
+            p2.getAxis('bottom').setHeight(28)
             _style_plot(p2, frc_n)
             setattr(self, f"p_frc_{['fz','fx','fy'][r]}", p2)
             c2 = p2.plot(pen=pg.mkPen('b', width=3))
@@ -237,7 +237,7 @@ class RealTimePlot:
         self.p_err = self.win.addPlot(row=3, col=0, colspan=2, title="Angle Error")
         self.p_err.showGrid(x=True, y=True, alpha=0.3)
         self.p_err.setYRange(0, 180)
-        self.p_err.getAxis('left').setWidth(45); self.p_err.getAxis('bottom').setHeight(28)
+        self.p_err.getAxis('bottom').setHeight(28)
         _style_plot(self.p_err, "Angle Error")
         self._c_err = self.p_err.plot(pen=pg.mkPen('g', width=3))
         self._t_err = pg.TextItem("", anchor=(0, 1))
@@ -311,6 +311,12 @@ class RealTimePlot:
             self._g_heads.append(dot)
 
 
+        # 强制左两列等宽
+        half_w = self.win.width() // 2 // 2
+        for r in range(3):
+            getattr(self, f"p_pzt_{['fz','fx','fy'][r]}").setPreferredWidth(half_w)
+            getattr(self, f"p_frc_{['fz','fx','fy'][r]}").setPreferredWidth(half_w)
+        self.p_err.setPreferredWidth(self.win.width() // 2)
         self.win.show()
 
     # ===== 数据接口 =====
