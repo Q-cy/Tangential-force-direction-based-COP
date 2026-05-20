@@ -10,10 +10,7 @@ import COP as COP
 pg.setConfigOptions(antialias=True, background='w', foreground='k')
 
 PLOT_TIMER_INTERVAL_MS = 10    # 绘图定时器刷新间隔(毫秒)
-PLOT_ERR_HISTORY_LEN = 100     # 角度误差历史缓冲区长度
 PLOT_MAG_HISTORY_LEN = 100     # 幅值历史缓冲区长度
-
-REALTIME2_SHOW_MODE = "PZT"  # 显示模式: "BOTH"=全部, "PZT"=仅压阻, "FORCE"=仅六维力
 
 def _yrange(data, pad=0.1):
     if len(data) < 2: return -1, 1
@@ -117,10 +114,6 @@ class RealTimePlot:
         self.full_adc_angle_list, self.full_adc_mag_list = [], []
         self.full_total_pressure_list = []
         self.full_adc_dx_list, self.full_adc_dy_list = [], []
-        self.full_force_angle_list, self.full_force_mag_list = [], []
-        self.full_fz_list, self.full_fx_list, self.full_fy_list = [], [], []
-        self.full_cal_angle_list, self.full_cal_mag_list = [], []
-        self.full_fx_cal_list, self.full_fy_cal_list = [], []
 
         self.init_defaults()
         self.init_history()
@@ -132,8 +125,6 @@ class RealTimePlot:
     def init_defaults(self):
         self._pzt_angle_deg = 0.0           # PZT方向角度(度)
         self._pzt_mag_val = 0.0             # PZT幅值
-        self._force_angle_deg = 0.0         # 六维力方向角度(度)
-        self._force_mag_val = 0.0           # 六维力幅值
         self._press_table_arr = np.zeros((12, 7))  # 压力表数据(12×7)
         self._cop_curr_x = 0.0              # 当前CoP X
         self._cop_curr_y = 0.0              # 当前CoP Y
@@ -141,29 +132,14 @@ class RealTimePlot:
         self._cop_base_y = 0.0              # 初始CoP Y
         self._cop_delta_x = 0.0             # CoP偏移X
         self._cop_delta_y = 0.0             # CoP偏移Y
-        self._force_fx_val = 0.0            # 力传感器Fx
-        self._force_fy_val = 0.0            # 力传感器Fy
-        self._force_fz_val = 0.0            # 力传感器Fz
         self._total_press_val = 0.0         # 总压力值
-        self._cal_fx_val = None             # 标定力Fx
-        self._cal_fy_val = None             # 标定力Fy
-        self._cal_angle_deg = None          # 标定力角度(度)
-        self._cal_mag_val = None            # 标定力幅值
 
     def init_history(self):
         hist_len = PLOT_MAG_HISTORY_LEN
-        err_len = PLOT_ERR_HISTORY_LEN
-        self.angle_error_history = deque(maxlen=err_len)
         self.pzt_fz_history = deque(maxlen=hist_len)
         self.adc_dx_history = deque(maxlen=hist_len)
         self.adc_dy_history = deque(maxlen=hist_len)
-        self.force_fz_history = deque(maxlen=hist_len)
-        self.force_fx_history = deque(maxlen=hist_len)
-        self.force_fy_history = deque(maxlen=hist_len)
         self.adc_mag_history = deque(maxlen=hist_len)
-        self.raw_force_mag_history = deque(maxlen=hist_len)
-        self.force_fx_cal_history = deque(maxlen=hist_len)
-        self.force_fy_cal_history = deque(maxlen=hist_len)
 
     # ===== 手工箭头工具 =====
     def _make_arrow_parts(self, plot):
@@ -210,7 +186,7 @@ class RealTimePlot:
         p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
         _style_plot(p, "PZT_Fz")
         self.p_pzt_fz = p
-        self._c_pzt_fz = p.plot(pen=pg.mkPen('r', width=2))
+        self._c_pzt_fz = p.plot(pen=pg.mkPen('r', width=3))
         self._t_pzt_fz = pg.TextItem("", color='r', anchor=(1, 1))
         p.addItem(self._t_pzt_fz)
 
@@ -220,7 +196,7 @@ class RealTimePlot:
         p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
         _style_plot(p, "PZT_Fx")
         self.p_pzt_fx = p
-        self._c_pzt_fx = p.plot(pen=pg.mkPen('r', width=2))
+        self._c_pzt_fx = p.plot(pen=pg.mkPen('r', width=3))
         self._t_pzt_fx = pg.TextItem("", color='r', anchor=(1, 1))
         p.addItem(self._t_pzt_fx)
 
@@ -230,7 +206,7 @@ class RealTimePlot:
         p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
         _style_plot(p, "PZT_Fy")
         self.p_pzt_fy = p
-        self._c_pzt_fy = p.plot(pen=pg.mkPen('r', width=2))
+        self._c_pzt_fy = p.plot(pen=pg.mkPen('r', width=3))
         self._t_pzt_fy = pg.TextItem("", color='r', anchor=(1, 1))
         p.addItem(self._t_pzt_fy)
 
@@ -240,12 +216,16 @@ class RealTimePlot:
         self.p_dir.setXRange(-1.2, 1.2); self.p_dir.setYRange(-1.2, 1.2); self.p_dir.setAspectLocked()
         self._dir_pzt = self._make_arrow_parts(self.p_dir)
         self._update_arrow(self._dir_pzt, 0, 0.45, 'r')
+        self._dir_txt_pzt = pg.TextItem("", anchor=(0, 1))
+        self.p_dir.addItem(self._dir_txt_pzt)
 
         self.p_mag = self.win.addPlot(row=0, col=3, title="Magnitude")
         self.p_mag.hideAxis('left'); self.p_mag.hideAxis('bottom')
         self.p_mag.setXRange(-0.8, 0.8); self.p_mag.setYRange(-0.8, 0.8); self.p_mag.setAspectLocked()
         self._mag_pzt = self._make_arrow_parts(self.p_mag)
         self._update_arrow(self._mag_pzt, 0, 0.10, 'r')
+        self._mag_txt_pzt = pg.TextItem("", anchor=(0, 1))
+        self.p_mag.addItem(self._mag_txt_pzt)
 
         # --- 右列下方: Pressure Table + Gradient (row 1-3, col 2-3) ---
         self.p_table = self.win.addPlot(row=1, col=2, rowspan=3, title="Pressure Table")
@@ -301,8 +281,6 @@ class RealTimePlot:
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
             self._pzt_mag_val = pzt_mag_val
-            self._force_angle_deg = force_angle_deg
-            self._force_mag_val = force_mag_val
             self._press_table_arr = press_table_arr.reshape(self.rows, self.cols)
             self._cop_curr_x = cop_curr_x
             self._cop_curr_y = cop_curr_y
@@ -310,29 +288,12 @@ class RealTimePlot:
             self._cop_base_y = cop_base_y
             self._cop_delta_x = cop_delta_x
             self._cop_delta_y = cop_delta_y
-            self._force_fx_val = force_fx_val
-            self._force_fy_val = force_fy_val
-            self._force_fz_val = force_fz_val
             self._total_press_val = total_press_val
-            self._cal_fx_val = cal_fx_val
-            self._cal_fy_val = cal_fy_val
-            self._cal_angle_deg = cal_angle_deg
-            self._cal_mag_val = cal_mag_val
 
-            angle_err = min(abs(pzt_angle_deg - force_angle_deg),
-                           360 - abs(pzt_angle_deg - force_angle_deg))
-            self.angle_error_history.append(angle_err)
             self.adc_mag_history.append(pzt_mag_val)
-            self.raw_force_mag_history.append(force_total_mag)
             self.pzt_fz_history.append(total_press_val)
             self.adc_dx_history.append(cop_delta_x)
             self.adc_dy_history.append(cop_delta_y)
-            self.force_fz_history.append(force_fz_val)
-            self.force_fx_history.append(force_fx_val)
-            self.force_fy_history.append(force_fy_val)
-            if cal_fx_val is not None:
-                self.force_fx_cal_history.append(cal_fx_val)
-                self.force_fy_cal_history.append(cal_fy_val)
 
     def append_full_data(self, rel_time_ms,
                           pzt_angle_deg, pzt_mag_val, total_press_val,
@@ -347,16 +308,6 @@ class RealTimePlot:
             self.full_total_pressure_list.append(total_press_val)
             self.full_adc_dx_list.append(cop_delta_x_filt)
             self.full_adc_dy_list.append(cop_delta_y_filt)
-            self.full_force_angle_list.append(force_angle_deg)
-            self.full_force_mag_list.append(force_mag_val)
-            self.full_fz_list.append(force_fz_filt)
-            self.full_fx_list.append(force_fx_filt)
-            self.full_fy_list.append(force_fy_filt)
-            if cal_mag_val is not None:
-                self.full_cal_angle_list.append(cal_angle_deg)
-                self.full_cal_mag_list.append(cal_mag_val)
-                self.full_fx_cal_list.append(cal_fx_val if cal_fx_val is not None else float('nan'))
-                self.full_fy_cal_list.append(cal_fy_val if cal_fy_val is not None else float('nan'))
 
     # ===== 更新 =====
     def update_all(self):
@@ -374,16 +325,21 @@ class RealTimePlot:
                 grad_arr = COP.g_cop_grad_table_arr.copy()
 
         # Direction: PZT=red
+        fs = self._font_size(12)
         self._update_arrow(self._dir_pzt, pzt_angle_deg, 0.45, 'r')
+        self._dir_txt_pzt.setHtml(self._html(f'PZT_Angle: {pzt_angle_deg:.1f}°', 'red', fs))
+        self._dir_txt_pzt.setPos(0.75, 1.15)
 
         # Magnitude
         pzt_mag_len = max(min((pzt_mag_val / 5.0) * 0.65, 0.65), 0.01)
         self._update_arrow(self._mag_pzt, pzt_angle_deg, pzt_mag_len, 'r')
+        self._mag_txt_pzt.setHtml(self._html(f'PZT_Mag: {pzt_mag_val:.1f}', 'red', fs))
+        self._mag_txt_pzt.setPos(0.35, 0.75)
 
         # Time-series
-        self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_Fz")
-        self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_Fx")
-        self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_Fy")
+        self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_Fz", fs=fs)
+        self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_Fx", fs=fs)
+        self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_Fy", fs=fs)
 
         # Pressure table + CoP + Gradient
         if COP.g_cop_contact_init_flag:
@@ -436,72 +392,40 @@ class RealTimePlot:
                 grad_dot.setData(x=[], y=[])
 
         # FPS
-    def _u1(self, curve, plot, data, txt, label, pzt_val=None, pzt_label=None, txt_r=None):
+    @staticmethod
+    def _html(text, color, size=16):
+        return f'<span style="color:{color};font-size:{size}pt;font-weight:bold">{text}</span>'
+
+    def _font_size(self, base=16):
+        w = self.win.width()
+        return max(int(base * w / 1900), 7)
+
+    def _u1(self, curve, plot, data, txt, label, color='red', fs=16):
         if data:
             xs = list(range(len(data)))
             curve.setData(xs, data)
             plot.setXRange(0, max(len(xs) - 1, 1))
             lo, hi = _yrange(data)
-            plot.setYRange(lo, hi)
-            if txt_r and pzt_val is not None:
-                txt.setText(f'True_{label}={data[-1]:.2f}')
-                txt.setPos(max(len(xs) - 1, 1), hi - (hi - lo) * 0.05)
-                txt_r.setText(f'{pzt_label}={pzt_val:.2f}')
-                txt_r.setPos(max(len(xs) - 1, 1), hi - (hi - lo) * 0.15)
-            else:
-                txt.setText(f'{label}={data[-1]:.2f}')
-                txt.setPos(max(len(xs) - 1, 1), hi - (hi - lo) * 0.12)
-
-    def _u2(self, c1, c2, plot, d1, d2, txt, label, txt_r=None):
-        if d1:
-            xs = list(range(len(d1)))
-            c1.setData(xs, d1)
-            all_y = list(d1)
-            if len(d2) == len(d1):
-                c2.setData(xs, d2); all_y.extend(d2)
-            plot.setXRange(0, max(len(xs) - 1, 1))
-            lo, hi = _yrange(all_y); plot.setYRange(lo, hi)
-            val = d2[-1] if len(d2) == len(d1) else 0
-            txt.setText(f'True_{label}={d1[-1]:.2f}')
-            txt.setPos(max(len(xs) - 1, 1), hi - (hi - lo) * 0.05)
-            if txt_r:
-                txt_r.setText(f'Cal_{label}={val:.2f}')
-                txt_r.setPos(max(len(xs) - 1, 1), hi - (hi - lo) * 0.15)
+            plot.setYRange(lo, hi, padding=0)
+            span = hi - lo if hi != lo else 1
+            txt.setHtml(self._html(f'{label}={data[-1]:.2f}', color, fs))
+            txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
 
     # ===== 全程静态图 (matplotlib Agg) =====
     def plot_full_magnitude_curve(self, save_dir):
         import os; import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
         if len(self.full_time_list) == 0: print("⚠️ 无数据"); return
-        has_cal = len(self.full_cal_mag_list) == len(self.full_time_list)
         t = self.full_time_list
-        fig, axes = plt.subplots(5, 2, figsize=(18, 24))
-        (aL1, aR1), (aL2, aR2), (aL3, aR3), (aL4, aR4), (aL5, aR5) = axes
+        fig, axes = plt.subplots(5, 1, figsize=(14, 18))
+        a1, a2, a3, a4, a5 = axes
         def _p(ax, d, c, lbl):
             if d and len(d) == len(t): ax.plot(t, d, c, linewidth=1.0, label=lbl)
-        _p(aL1, self.full_adc_angle_list, 'b-', 'PZT Angle'); aL1.set_title("PZT Angle"); aL1.grid(True, alpha=0.3)
-        _p(aL2, self.full_adc_mag_list, 'b-', 'PZT Mag'); aL2.set_title("PZT Mag"); aL2.grid(True, alpha=0.3)
-        _p(aL3, self.full_total_pressure_list, 'b-', 'PZT Fz'); aL3.set_title("PZT Fz"); aL3.grid(True, alpha=0.3)
-        _p(aL4, self.full_adc_dx_list, 'b-', 'PZT Fx'); aL4.set_title("PZT Fx"); aL4.grid(True, alpha=0.3)
-        _p(aL5, self.full_adc_dy_list, 'c-', 'PZT Fy'); aL5.set_title("PZT Fy"); aL5.grid(True, alpha=0.3)
-        _p(aR1, self.full_force_angle_list, 'r-', 'Measured')
-        if has_cal: _p(aR1, self.full_cal_angle_list, 'g--', 'Calibrated')
-        aR1.set_title("Angle: Meas vs Cal"); aR1.grid(True, alpha=0.3)
-        if has_cal: aR1.legend(fontsize=8)
-        _p(aR2, self.full_force_mag_list, 'r-', 'Measured')
-        if has_cal: _p(aR2, self.full_cal_mag_list, 'g--', 'Calibrated')
-        aR2.set_title("Mag: Meas vs Cal"); aR2.grid(True, alpha=0.3)
-        if has_cal: aR2.legend(fontsize=8)
-        _p(aR3, self.full_fz_list, 'r-', 'Fz'); aR3.set_title("Fz: Measured"); aR3.grid(True, alpha=0.3)
-        _p(aR4, self.full_fx_list, 'r-', 'Measured')
-        if has_cal: _p(aR4, self.full_fx_cal_list, 'g--', 'Calibrated')
-        aR4.set_title("Fx: Meas vs Cal"); aR4.grid(True, alpha=0.3)
-        if has_cal: aR4.legend(fontsize=8)
-        _p(aR5, self.full_fy_list, 'm-', 'Measured')
-        if has_cal: _p(aR5, self.full_fy_cal_list, 'c--', 'Calibrated')
-        aR5.set_title("Fy: Meas vs Cal"); aR5.grid(True, alpha=0.3)
-        if has_cal: aR5.legend(fontsize=8)
-        for row in axes:
-            for ax in row: ax.set_xlabel("Time (ms)", fontsize=9)
+        _p(a1, self.full_adc_angle_list, 'b-', 'PZT Angle'); a1.set_title("PZT Angle"); a1.grid(True, alpha=0.3)
+        _p(a2, self.full_adc_mag_list, 'b-', 'PZT Mag'); a2.set_title("PZT Mag"); a2.grid(True, alpha=0.3)
+        _p(a3, self.full_total_pressure_list, 'b-', 'PZT Fz'); a3.set_title("PZT Fz"); a3.grid(True, alpha=0.3)
+        _p(a4, self.full_adc_dx_list, 'b-', 'PZT Fx'); a4.set_title("PZT Fx"); a4.grid(True, alpha=0.3)
+        _p(a5, self.full_adc_dy_list, 'c-', 'PZT Fy'); a5.set_title("PZT Fy"); a5.grid(True, alpha=0.3)
+        for ax in axes: ax.set_xlabel("Time (ms)", fontsize=9)
         plt.tight_layout()
         idx = 1
         while os.path.exists(os.path.join(save_dir, f"full_analysis_cop_{idx}.png")): idx += 1
