@@ -9,7 +9,7 @@ import threading
 
 
 # ===================== 算法参数（仅与CoP计算相关）=====================
-COP_STABILITY_FRAME_CNT = 10            # 初始稳定所需连续帧数
+COP_STABILITY_FRAME_CNT = 20            # 初始稳定所需连续帧数
 COP_PRESSURE_LOW_THRESH = 500          # 低压判定阈值（ADC原始值之和）
 COP_SENSOR_ROW_CNT = 12                # 传感器阵列行数
 COP_SENSOR_COL_CNT = 7                 # 传感器阵列列数
@@ -31,8 +31,6 @@ g_cop_contact_init_flag = False        # 初始接触点是否已稳定确定
 
 g_cop_init_x_buf = deque(maxlen=COP_STABILITY_FRAME_CNT)  # 候选初始CoP X序列缓冲
 g_cop_init_y_buf = deque(maxlen=COP_STABILITY_FRAME_CNT)  # 候选初始CoP Y序列缓冲
-
-g_cop_press_low_cnt = 0                # 连续低压帧计数器
 
 # 二次静置精修状态
 g_cop_post_init_frame_cnt = 0          # 精修阶段已监测帧数
@@ -69,7 +67,6 @@ def reset_cop_state():
     """
     # global 声明要修改全局变量
     global g_cop_filtered_dir, g_cop_contact_init_x, g_cop_contact_init_y, g_cop_contact_init_flag
-    global g_cop_press_low_cnt
     global g_cop_init_x_buf, g_cop_init_y_buf, g_cop_grad_table_arr
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
@@ -78,7 +75,6 @@ def reset_cop_state():
     g_cop_contact_init_x = None
     g_cop_contact_init_y = None
     g_cop_contact_init_flag = False
-    g_cop_press_low_cnt = 0
     g_cop_init_x_buf.clear()
     g_cop_init_y_buf.clear()
     g_cop_post_init_frame_cnt = 0
@@ -98,7 +94,6 @@ def compute_pressure_direction(baseline_subtracted_frame):
     """
     global g_cop_filtered_dir, g_cop_grad_table_arr
     global g_cop_contact_init_x, g_cop_contact_init_y, g_cop_contact_init_flag
-    global g_cop_press_low_cnt
     global g_cop_init_x_buf, g_cop_init_y_buf
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
@@ -122,28 +117,15 @@ def compute_pressure_direction(baseline_subtracted_frame):
     with g_cop_grad_table_lock:
         g_cop_grad_table_arr[:] = grad_arr[:]
 
-    # 总压力判断
+    # 总压力判断：低压立即重置
     total_press_val = np.sum(frame_2d_arr)
     if total_press_val < COP_PRESSURE_LOW_THRESH:
-        g_cop_press_low_cnt += 1
-    else:
-        g_cop_press_low_cnt = 0
-
-    # 连续低压 → 重置
-    if g_cop_press_low_cnt >= COP_STABILITY_FRAME_CNT:
-        reset_cop_state()
-        # 返回默认值，表示无有效CoP或已重置
-        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0  # 10个值
+        if g_cop_contact_init_flag:
+            reset_cop_state()
+        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0
 
     if total_press_val == 0:
-        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0  # 10个值
-
-    # 已建立初始接触但当前压力过低 → 跳过噪声CoP计算，返回零偏移
-    if g_cop_contact_init_flag and total_press_val < COP_PRESSURE_LOW_THRESH:
-        return (g_cop_contact_init_x, g_cop_contact_init_y,
-                0, sensor_rows-1, 0, sensor_cols-1,
-                0.0, 0.0,
-                g_cop_contact_init_x, g_cop_contact_init_y)
+        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0
 
     # 计算CoP中心
     grid_x_arr = np.tile(np.arange(sensor_cols), (sensor_rows, 1))

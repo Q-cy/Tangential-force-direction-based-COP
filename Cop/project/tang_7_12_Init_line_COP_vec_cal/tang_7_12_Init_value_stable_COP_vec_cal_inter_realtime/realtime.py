@@ -309,6 +309,13 @@ class RealTimePlot:
             dot = pg.ScatterPlotItem()
             self.p_grad.addItem(dot)
             self._g_heads.append(dot)
+        self._g_txts = []
+        for _ in range(84):
+            t = pg.TextItem("", color='k', anchor=(0.5, 0.5))
+            self.p_grad.addItem(t)
+            self._g_txts.append(t)
+        self._grad_cop_dots = pg.ScatterPlotItem()
+        self.p_grad.addItem(self._grad_cop_dots)
 
 
         # 强制左两列等宽
@@ -473,6 +480,10 @@ class RealTimePlot:
                 self._cop_hR.setData([], [])
 
             # Gradient arrows
+            grad_spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+            if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
+                grad_spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+            self._grad_cop_dots.setData(spots=grad_spots)
             for grad_idx, (grad_ln, grad_dot) in enumerate(zip(self._g_lines, self._g_heads)):
                 grad_row, grad_col = divmod(grad_idx, 7)
                 grad_x, grad_y = grad_arr[grad_row, grad_col, 0], grad_arr[grad_row, grad_col, 1]
@@ -484,9 +495,12 @@ class RealTimePlot:
                     tip_y = grad_row + arrow_dy
                     grad_ln.setData([grad_col, tip_x], [grad_row, tip_y])
                     grad_dot.setData(x=[tip_x], y=[tip_y], brush='k', size=4)
+                    self._g_txts[grad_idx].setText(f"{grad_mag:.0f}")
+                    self._g_txts[grad_idx].setPos(grad_col, grad_row)
                 else:
                     grad_ln.setData([], [])
                     grad_dot.setData(x=[], y=[])
+                    self._g_txts[grad_idx].setText("")
         else:
             # CoP 未确定：清空两张表
             self._cell_grid.set_data(np.zeros((12, 7)), 1.0)
@@ -500,6 +514,9 @@ class RealTimePlot:
             for grad_ln, grad_dot in zip(self._g_lines, self._g_heads):
                 grad_ln.setData([], [])
                 grad_dot.setData(x=[], y=[])
+            for t in self._g_txts:
+                t.setText("")
+            self._grad_cop_dots.setData(spots=[])
 
         # FPS
     @staticmethod
