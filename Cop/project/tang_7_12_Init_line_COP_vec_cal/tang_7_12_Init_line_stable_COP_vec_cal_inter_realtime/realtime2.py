@@ -13,6 +13,8 @@ PLOT_TIMER_INTERVAL_MS = 10    # 绘图定时器刷新间隔(毫秒)
 PLOT_ERR_HISTORY_LEN = 100     # 角度误差历史缓冲区长度
 PLOT_MAG_HISTORY_LEN = 100     # 幅值历史缓冲区长度
 
+REALTIME2_SHOW_MODE = "PZT"  # 显示模式: "BOTH"=全部, "PZT"=仅压阻, "FORCE"=仅六维力
+
 def _yrange(data, pad=0.1):
     if len(data) < 2: return -1, 1
     mn, mx = min(data), max(data)
@@ -202,63 +204,48 @@ class RealTimePlot:
             p.setTitle(title, size='11pt', bold=True)
 
         # --- 左列 (col 0-1): PZT=红, Force=蓝 ---
-        for r, (pzt_n, frc_n) in enumerate([("PZT_Fz", "Force_Fz"), ("PZT_Fx", "Force_Fx"), ("PZT_Fy", "Force_Fy")]):
-            p = self.win.addPlot(row=r, col=0, title=pzt_n)
-            p.showGrid(x=True, y=True, alpha=0.3)
-            p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
-            _style_plot(p, pzt_n)
-            setattr(self, f"p_pzt_{['fz','fx','fy'][r]}", p)
-            pc = 'r'
-            c = p.plot(pen=pg.mkPen(pc, width=2))
-            setattr(self, f"_c_pzt_{['fz','fx','fy'][r]}", c)
-            t = pg.TextItem("", color=pc, anchor=(1, 1))
-            p.addItem(t)
-            setattr(self, f"_t_pzt_{['fz','fx','fy'][r]}", t)
+        # row 0: PZT_Fz 跨两列（Force_Fz 已移除）
+        p = self.win.addPlot(row=0, col=0, colspan=2, title="PZT_Fz")
+        p.showGrid(x=True, y=True, alpha=0.3)
+        p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
+        _style_plot(p, "PZT_Fz")
+        self.p_pzt_fz = p
+        self._c_pzt_fz = p.plot(pen=pg.mkPen('r', width=2))
+        self._t_pzt_fz = pg.TextItem("", color='r', anchor=(1, 1))
+        p.addItem(self._t_pzt_fz)
 
-            p2 = self.win.addPlot(row=r, col=1, title=frc_n)
-            p2.showGrid(x=True, y=True, alpha=0.3)
-            p2.getAxis('left').setWidth(45); p2.getAxis('bottom').setHeight(28)
-            _style_plot(p2, frc_n)
-            setattr(self, f"p_frc_{['fz','fx','fy'][r]}", p2)
-            c2 = p2.plot(pen=pg.mkPen('b', width=2))
-            setattr(self, f"_c_frc_{['fz','fx','fy'][r]}", c2)
-            t2 = pg.TextItem("", color='b', anchor=(1, 1))
-            p2.addItem(t2)
-            setattr(self, f"_t_frc_{['fz','fx','fy'][r]}", t2)
-            # 红色文字：Fz=PZT_Fz, Fx/Fy=Cal
-            t2r = pg.TextItem("", color='r', anchor=(1, 0))
-            p2.addItem(t2r)
-            setattr(self, f"_t_frc_{['fz','fx','fy'][r]}_r", t2r)
-            if r > 0:  # Fx/Fy have cal line
-                c2c = p2.plot(pen=pg.mkPen('r', width=2, style=QtCore.Qt.DashLine))
-                setattr(self, f"_c_frc_{['fx','fy'][r-1]}_cal", c2c)
+        # row 1: PZT_Fx 跨两列
+        p = self.win.addPlot(row=1, col=0, colspan=2, title="PZT_Fx")
+        p.showGrid(x=True, y=True, alpha=0.3)
+        p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
+        _style_plot(p, "PZT_Fx")
+        self.p_pzt_fx = p
+        self._c_pzt_fx = p.plot(pen=pg.mkPen('r', width=2))
+        self._t_pzt_fx = pg.TextItem("", color='r', anchor=(1, 1))
+        p.addItem(self._t_pzt_fx)
 
-        # Angle Error
-        self.p_err = self.win.addPlot(row=3, col=0, colspan=2, title="Angle Error")
-        self.p_err.showGrid(x=True, y=True, alpha=0.3)
-        self.p_err.setYRange(0, 180)
-        self.p_err.getAxis('left').setWidth(45); self.p_err.getAxis('bottom').setHeight(28)
-        _style_plot(self.p_err, "Angle Error")
-        self._c_err = self.p_err.plot(pen=pg.mkPen('g', width=2))
-        self._t_err = pg.TextItem("", color='g', anchor=(1, 1))
-        self.p_err.addItem(self._t_err)
+        # row 2: PZT_Fy 跨两列
+        p = self.win.addPlot(row=2, col=0, colspan=2, title="PZT_Fy")
+        p.showGrid(x=True, y=True, alpha=0.3)
+        p.getAxis('left').setWidth(45); p.getAxis('bottom').setHeight(28)
+        _style_plot(p, "PZT_Fy")
+        self.p_pzt_fy = p
+        self._c_pzt_fy = p.plot(pen=pg.mkPen('r', width=2))
+        self._t_pzt_fy = pg.TextItem("", color='r', anchor=(1, 1))
+        p.addItem(self._t_pzt_fy)
 
         # --- 右列上方: Direction + Magnitude (col 2-3) ---
         self.p_dir = self.win.addPlot(row=0, col=2, title="Direction")
         self.p_dir.hideAxis('left'); self.p_dir.hideAxis('bottom')
         self.p_dir.setXRange(-1.2, 1.2); self.p_dir.setYRange(-1.2, 1.2); self.p_dir.setAspectLocked()
         self._dir_pzt = self._make_arrow_parts(self.p_dir)
-        self._dir_frc = self._make_arrow_parts(self.p_dir)
         self._update_arrow(self._dir_pzt, 0, 0.45, 'r')
-        self._update_arrow(self._dir_frc, 0, 0.40, 'b')
 
         self.p_mag = self.win.addPlot(row=0, col=3, title="Magnitude")
         self.p_mag.hideAxis('left'); self.p_mag.hideAxis('bottom')
         self.p_mag.setXRange(-0.8, 0.8); self.p_mag.setYRange(-0.8, 0.8); self.p_mag.setAspectLocked()
         self._mag_pzt = self._make_arrow_parts(self.p_mag)
-        self._mag_frc = self._make_arrow_parts(self.p_mag)
         self._update_arrow(self._mag_pzt, 0, 0.10, 'r')
-        self._update_arrow(self._mag_frc, 0, 0.10, 'b')
 
         # --- 右列下方: Pressure Table + Gradient (row 1-3, col 2-3) ---
         self.p_table = self.win.addPlot(row=1, col=2, rowspan=3, title="Pressure Table")
@@ -377,58 +364,28 @@ class RealTimePlot:
         with self.lock:
             pzt_angle_deg = self._pzt_angle_deg
             pzt_mag_val = self._pzt_mag_val
-            force_angle_deg = self._force_angle_deg
-            force_mag_val = self._force_mag_val
-            cal_angle_deg = self._cal_angle_deg
-            cal_mag_val = self._cal_mag_val
             pzt_fz_hist = list(self.pzt_fz_history)
             cop_dx_hist = list(self.adc_dx_history); cop_dy_hist = list(self.adc_dy_history)
-            force_fz_hist = list(self.force_fz_history)
-            force_fx_hist = list(self.force_fx_history); force_fy_hist = list(self.force_fy_history)
-            cal_fx_hist = list(self.force_fx_cal_history)
-            cal_fy_hist = list(self.force_fy_cal_history)
-            err_hist = list(self.angle_error_history)
             press_table_arr = self._press_table_arr.copy()
             cop_curr_x = self._cop_curr_x; cop_curr_y = self._cop_curr_y
             cop_base_x = self._cop_base_x; cop_base_y = self._cop_base_y
             cop_delta_x = self._cop_delta_x; cop_delta_y = self._cop_delta_y
-            cal_fx_val = self._cal_fx_val; cal_fy_val = self._cal_fy_val
             with COP.g_cop_grad_table_lock:
                 grad_arr = COP.g_cop_grad_table_arr.copy()
 
-        # 初始 CoP 未确定时冻结蓝色箭头（与红色一致）
-        _fa = force_angle_deg if COP.g_cop_contact_init_flag else 0.0
-        _fm = force_mag_val if COP.g_cop_contact_init_flag else 0.0
-
-        # Direction: PZT=red + Force=blue
+        # Direction: PZT=red
         self._update_arrow(self._dir_pzt, pzt_angle_deg, 0.45, 'r')
-        self._update_arrow(self._dir_frc, _fa, 0.40, 'b')
 
-        # Magnitude: proportional length
+        # Magnitude
         pzt_mag_len = max(min((pzt_mag_val / 5.0) * 0.65, 0.65), 0.01)
         self._update_arrow(self._mag_pzt, pzt_angle_deg, pzt_mag_len, 'r')
-        force_mag_len = max(min((abs(_fm) / 20.0) * 0.65, 0.65), 0.01)
-        self._update_arrow(self._mag_frc, _fa, force_mag_len, 'b')
 
         # Time-series
         self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_Fz")
         self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_Fx")
         self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_Fy")
-        self._u1(self._c_frc_fz, self.p_frc_fz, force_fz_hist, self._t_frc_fz, "Fz",
-                 pzt_val=pzt_fz_hist[-1] if pzt_fz_hist else 0, pzt_label="Cal_Fz", txt_r=self._t_frc_fz_r)
-        self._u2(self._c_frc_fx, self._c_frc_fx_cal, self.p_frc_fx, force_fx_hist, cal_fx_hist,
-                 self._t_frc_fx, "Fx", txt_r=self._t_frc_fx_r)
-        self._u2(self._c_frc_fy, self._c_frc_fy_cal, self.p_frc_fy, force_fy_hist, cal_fy_hist,
-                 self._t_frc_fy, "Fy", txt_r=self._t_frc_fy_r)
-        if err_hist:
-            x_vals = list(range(len(err_hist)))
-            self._c_err.setData(x_vals, err_hist)
-            self.p_err.setXRange(0, max(len(x_vals) - 1, 1))
-            self._t_err.setText(f'{err_hist[-1]:.1f}°')
-            y_hi = self.p_err.viewRange()[1][1]
-            self._t_err.setPos(max(len(x_vals) - 1, 1), y_hi)
 
-        # Pressure table + CoP + Gradient：仅在初始 CoP 确定后显示
+        # Pressure table + CoP + Gradient
         if COP.g_cop_contact_init_flag:
             cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
             self._cell_grid.set_data(press_table_arr, cell_vmax)
@@ -466,7 +423,6 @@ class RealTimePlot:
                     grad_ln.setData([], [])
                     grad_dot.setData(x=[], y=[])
         else:
-            # CoP 未确定：清空两张表
             self._cell_grid.set_data(np.zeros((12, 7)), 1.0)
             for row_idx in range(12):
                 for col_idx in range(7):

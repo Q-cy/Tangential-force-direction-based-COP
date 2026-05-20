@@ -127,14 +127,9 @@ class PressureSensor:                              # 为什么定义成类而不
 
         # 逐通道跳变检测
         if self.last is not None and len(self.last) == 84:
-            spike = False
             for i in range(84):
                 if out[i] - self.last[i] > 20000:
                     out[i] = self.last[i]
-                    spike = True
-            if spike:
-                self.dump_last_raw(decoded_values=out)
-
         self.last = out.copy()
         return out
 

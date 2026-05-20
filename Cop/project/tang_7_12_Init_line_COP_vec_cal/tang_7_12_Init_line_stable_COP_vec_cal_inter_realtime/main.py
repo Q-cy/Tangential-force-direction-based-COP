@@ -11,12 +11,15 @@ import sys
 import angle as angle
 import COP as COP
 import data as data
-import realtime as realtime
 import table as table
 import calibrate
+import importlib
 
 # ===================== 配置 =====================
+MAIN_REALTIME_MODULE = "realtime"           # "realtime"=全显示, "realtime2"=仅压阻
 MAIN_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"  # 数据保存根目录
+
+realtime = importlib.import_module(MAIN_REALTIME_MODULE)
 MAIN_TARGET_FPS = 200                      # 目标采集帧率
 MAIN_MAX_TIME_DIFF_S = 0.015               # 压力-力传感器最大时间匹配差(秒)
 g_main_stop_flag = threading.Event()       # 全局停止信号
