@@ -7,8 +7,6 @@ import sys
 import os
 import time
 import threading
-import numpy as np
-
 # 将 data.py 所在目录加入 sys.path
 DATA_DIR = os.path.join(
     os.path.dirname(__file__),
@@ -58,24 +56,10 @@ def main():
 
             frame_cnt += 1
             adc = item["data"]
-            total_p = int(np.sum(adc))
 
-            base_sub = cop.subtract_baseline(adc)
-            res = cop.compute_pressure_direction(base_sub)
-            cop_x, cop_y = res[0], res[1]
-            dx, dy = res[6], res[7]
-            magnitude, state = res[10], int(res[11])
-            pzt_angle, _ = cop.compute_PZT_angle(dx, dy)
+            pzt_angle, magnitude, state = cop.get_pzt_angle(adc)
 
-            print(
-                f"frame={frame_cnt:04d}  "
-                f"CoP=({cop_x:.2f},{cop_y:.2f})  "
-                f"Δ=({dx:.3f},{dy:.3f})  "
-                f"|Δ|={magnitude:.3f}  "
-                f"state={state}  "
-                f"PZT={pzt_angle:.1f}°  "
-                f"total_P={total_p}"
-            )
+            print(f"frame={frame_cnt:04d}  Angle={pzt_angle:.1f}°  Mag={magnitude:.3f}  state={state}")
 
             time.sleep(0.005)
     except KeyboardInterrupt:

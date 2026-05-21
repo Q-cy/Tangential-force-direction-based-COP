@@ -185,9 +185,10 @@ def get_pzt_angle(adc_data):
     baseline_subtracted = subtract_baseline(adc_data)
     result = compute_pressure_direction(baseline_subtracted)
     dx, dy = result[6], result[7]
+    magnitude = result[10]
+    state = int(result[11])
     pzt_angle, _ = compute_PZT_angle(dx, dy)
-
-    return pzt_angle
+    return pzt_angle, magnitude, state
 
 
 # ===================== 重置基线（校准用） =====================
