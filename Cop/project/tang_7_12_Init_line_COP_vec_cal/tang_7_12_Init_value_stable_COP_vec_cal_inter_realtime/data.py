@@ -20,21 +20,16 @@ class PressureSensor:                              # 为什么定义成类而不
         self.port = None
         self.auto_find_port()
 
-    def auto_find_port(self):                      #类里的函数，第一个参数必须是self，调用的时候代表对象自己
-        """自动寻找可用串口"""
-        ports = list(serial.tools.list_ports.comports())
-        for p, _, _ in ports:
-            if p == "/dev/ttyUSB0":
-                continue
-            try:
-                self.ser = serial.Serial(p, DATA_BAUDRATE_PRESS, timeout=0.01)
-                self.port = p
-                time.sleep(0.1)
-                self.ser.reset_input_buffer()
-                return
-            except:
-                continue
-        raise Exception("未找到压力传感器")
+    def auto_find_port(self):
+        """固定使用 /dev/ttyUSB0"""
+        try:
+            self.ser = serial.Serial("/dev/ttyUSB0", DATA_BAUDRATE_PRESS, timeout=0.01)
+            self.port = "/dev/ttyUSB0"
+            time.sleep(0.1)
+            self.ser.reset_input_buffer()
+            return
+        except:
+            raise Exception("未找到压力传感器(/dev/ttyUSB0)")
 
     def reconnect(self):
         """断开重连"""
@@ -107,9 +102,25 @@ class PressureSensor:                              # 为什么定义成类而不
 class SixAxisForceSensor:
     def __init__(self):
         self.ser = None
-        self.port = "/dev/ttyUSB0"
+        self.port = None
         self.zero_data = [0.0]*6
-        self.open_port()
+        self.auto_find_port()
+
+    def auto_find_port(self):
+        """自动寻找可用串口（排除 /dev/ttyUSB0）"""
+        ports = list(serial.tools.list_ports.comports())
+        for p, _, _ in ports:
+            if p == "/dev/ttyUSB0":
+                continue
+            try:
+                self.ser = serial.Serial(p, DATA_BAUDRATE_FORCE, timeout=0.05)
+                self.port = p
+                time.sleep(0.1)
+                self.ser.reset_input_buffer()
+                return
+            except:
+                continue
+        raise Exception("未找到六维力传感器")
 
     def open_port(self):
         try:
