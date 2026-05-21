@@ -203,6 +203,7 @@ def data_loop():
             force_cal_mag=cal_mag_val,
             force_cal_angle=cal_angle_deg,
             cop_state=cop_state,
+            adc_sum=total_press_val,
         )
         csv_writer.writerow(csv_row)
 
