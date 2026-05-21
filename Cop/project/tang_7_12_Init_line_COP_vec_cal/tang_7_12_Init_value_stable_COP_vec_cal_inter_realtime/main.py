@@ -139,6 +139,7 @@ def data_loop():
             cop_curr_x, cop_curr_y = cop_res[0], cop_res[1]
             cop_delta_x, cop_delta_y = cop_res[6], cop_res[7]
             cop_base_x, cop_base_y = cop_res[8], cop_res[9]
+            cop_state = cop_res[10]
             total_press_val = np.sum(press_item["data"])
 
             buf_cop_delta_x.append(cop_delta_x)
@@ -152,6 +153,7 @@ def data_loop():
             cop_delta_x_filt = cop_delta_y_filt = 0.0
             pzt_angle_deg = pzt_mag_val = 0.0
             total_press_val = 0.0
+            cop_state = 0
 
         # ---- 计算 Force ----
         if force_item is not None:
@@ -200,6 +202,7 @@ def data_loop():
             fy_cal=cal_fy_val,
             force_cal_mag=cal_mag_val,
             force_cal_angle=cal_angle_deg,
+            cop_state=cop_state,
         )
         csv_writer.writerow(csv_row)
 
@@ -211,6 +214,7 @@ def data_loop():
             cop_delta_x_filt, cop_delta_y_filt,
             force_fx_filt, force_fy_filt, force_fz_filt,
             cal_fx_val, cal_fy_val, cal_angle_deg, cal_mag_val,
+            cop_state=cop_state,
         )
         if COP.g_cop_contact_init_flag:
             g_main_plot.append_full_data(

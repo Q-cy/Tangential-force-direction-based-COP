@@ -331,7 +331,8 @@ class RealTimePlot:
                  press_table_arr, total_press_val, force_total_mag,
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
-                 cal_fx_val=None, cal_fy_val=None, cal_angle_deg=None, cal_mag_val=None):
+                 cal_fx_val=None, cal_fy_val=None, cal_angle_deg=None, cal_mag_val=None,
+                 cop_state=0):
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
             self._pzt_mag_val = pzt_mag_val
@@ -352,6 +353,7 @@ class RealTimePlot:
             self._cal_fy_val = cal_fy_val
             self._cal_angle_deg = cal_angle_deg
             self._cal_mag_val = cal_mag_val
+            self._cop_state = cop_state
 
             angle_err = min(abs(pzt_angle_deg - force_angle_deg),
                            360 - abs(pzt_angle_deg - force_angle_deg))
@@ -414,8 +416,13 @@ class RealTimePlot:
             cop_base_x = self._cop_base_x; cop_base_y = self._cop_base_y
             cop_delta_x = self._cop_delta_x; cop_delta_y = self._cop_delta_y
             cal_fx_val = self._cal_fx_val; cal_fy_val = self._cal_fy_val
+            cop_state = self._cop_state
             with COP.g_cop_grad_table_lock:
                 grad_arr = COP.g_cop_grad_table_arr.copy()
+
+        # 状态显示
+        _state_names = {0: "未接触", 1: "粗略测量", 2: "精细测量"}
+        self.win.setWindowTitle(f"RealTime — {_state_names.get(cop_state, '?')}")
 
         # 初始 CoP 未确定时冻结蓝色箭头（与红色一致）
         _fa = force_angle_deg if COP.g_cop_contact_init_flag else 0.0

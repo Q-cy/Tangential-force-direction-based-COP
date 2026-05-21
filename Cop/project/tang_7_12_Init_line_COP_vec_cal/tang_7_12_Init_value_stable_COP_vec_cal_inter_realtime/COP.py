@@ -16,8 +16,8 @@ COP_SENSOR_COL_CNT = 7                 # 传感器阵列列数
 
 
 # ===================== 二次静置精修参数 =====================
-COP_POST_INIT_WINDOW_CNT = 100         # 初始CoP确定后精修监测帧数上限
-COP_POST_INIT_STABLE_CNT = 50          # 精修阶段需连续保持不变的帧数
+COP_POST_INIT_WINDOW_CNT = 10000000000000000         # 初始CoP确定后精修监测帧数上限
+COP_POST_INIT_STABLE_CNT = 200         # 精修阶段需连续保持不变的帧数
 COP_POST_INIT_STABLE_THRESH = 0.1      # 精修判据：CoP偏移距离阈值
 
 
@@ -122,10 +122,10 @@ def compute_pressure_direction(baseline_subtracted_frame):
     if total_press_val < COP_PRESSURE_LOW_THRESH:
         if g_cop_contact_init_flag:
             reset_cop_state()
-        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0, 0
 
     if total_press_val == 0:
-        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0, 0
 
     # 计算CoP中心
     grid_x_arr = np.tile(np.arange(sensor_cols), (sensor_rows, 1))
@@ -181,7 +181,10 @@ def compute_pressure_direction(baseline_subtracted_frame):
         cop_base_x = g_cop_contact_init_x
         cop_base_y = g_cop_contact_init_y
 
+    cop_state = 2 if g_cop_post_refined_flag else 1
+
     return (cop_curr_x, cop_curr_y,
-            0, sensor_rows-1, 0, sensor_cols-1,  # 绘图范围 (min_y, max_y, min_x, max_x)
+            0, sensor_rows-1, 0, sensor_cols-1,
             cop_delta_x, cop_delta_y,
-            cop_base_x, cop_base_y)
+            cop_base_x, cop_base_y,
+            cop_state)

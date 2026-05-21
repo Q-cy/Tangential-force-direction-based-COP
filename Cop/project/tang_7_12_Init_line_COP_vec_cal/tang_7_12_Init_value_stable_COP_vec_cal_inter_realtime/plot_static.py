@@ -90,6 +90,7 @@ _COLUMN_NAMES = [
     "delta_Force_X", "delta_Force_Y", "delta_Force_Z",
     "ADC_angle", "ADC_mag", "Force_angle", "Force_mag",
     "Fx_cal", "Fy_cal", "Force_cal_mag", "Force_cal_angle",
+    "CoP_state",
 ]
 
 _NAME_TO_IDX = {name: idx for idx, name in enumerate(_COLUMN_NAMES)}
