@@ -3,13 +3,13 @@ import threading
 from collections import deque
 
 # ===================== 算法参数=====================
-TOTAL_PRESSURE_LOW_THRESHOLD = 15000
+TOTAL_PRESSURE_LOW_THRESHOLD = 500
 COP_STABILITY_FRAMES_REQUIRED = 15
 SENSOR_ROWS = 12
 SENSOR_COLS = 7
 
 # ===================== 二次静置精修参数 =====================
-POST_INIT_WINDOW_CNT = 100000000000
+POST_INIT_WINDOW_CNT = 60000
 POST_INIT_STABLE_CNT = 200
 POST_INIT_STABLE_THRESH = 0.1
 
