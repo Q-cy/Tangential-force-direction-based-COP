@@ -16,7 +16,7 @@ import calibrate
 import importlib
 
 # ===================== 配置 =====================
-MAIN_REALTIME_MODULE = "realtime"           # "realtime"=全显示, "realtime2"=仅压阻
+MAIN_REALTIME_MODULE = "realtime2"           # "realtime"=全显示, "realtime2"=仅压阻
 MAIN_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"  # 数据保存根目录
 
 realtime = importlib.import_module(MAIN_REALTIME_MODULE)

@@ -133,6 +133,7 @@ class RealTimePlot:
         self._cop_delta_x = 0.0             # CoP偏移X
         self._cop_delta_y = 0.0             # CoP偏移Y
         self._total_press_val = 0.0         # 总压力值
+        self._cop_state = 0                 # 接触状态
 
     def init_history(self):
         hist_len = PLOT_MAG_HISTORY_LEN
@@ -277,11 +278,13 @@ class RealTimePlot:
                  press_table_arr, total_press_val, force_total_mag,
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
-                 cal_fx_val=None, cal_fy_val=None, cal_angle_deg=None, cal_mag_val=None):
+                 cal_fx_val=None, cal_fy_val=None, cal_angle_deg=None, cal_mag_val=None,
+                 cop_state=0):
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
             self._pzt_mag_val = pzt_mag_val
             self._press_table_arr = press_table_arr.reshape(self.rows, self.cols)
+            self._cop_state = cop_state
             self._cop_curr_x = cop_curr_x
             self._cop_curr_y = cop_curr_y
             self._cop_base_x = cop_base_x
@@ -321,8 +324,13 @@ class RealTimePlot:
             cop_curr_x = self._cop_curr_x; cop_curr_y = self._cop_curr_y
             cop_base_x = self._cop_base_x; cop_base_y = self._cop_base_y
             cop_delta_x = self._cop_delta_x; cop_delta_y = self._cop_delta_y
+            cop_state = self._cop_state
             with COP.g_cop_grad_table_lock:
                 grad_arr = COP.g_cop_grad_table_arr.copy()
+
+        # 状态显示
+        _state_names = {0: "未接触", 1: "粗略测量", 2: "精细测量"}
+        self.win.setWindowTitle(f"RealTime2 — {_state_names.get(cop_state, '?')}")
 
         # Direction: PZT=red
         fs = self._font_size(12)
