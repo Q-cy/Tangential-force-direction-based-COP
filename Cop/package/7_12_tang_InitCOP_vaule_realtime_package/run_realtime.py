@@ -64,12 +64,15 @@ def main():
             res = cop.compute_pressure_direction(base_sub)
             cop_x, cop_y = res[0], res[1]
             dx, dy = res[6], res[7]
-            pzt_angle = cop.get_pzt_angle(adc)
+            magnitude, state = res[10], int(res[11])
+            pzt_angle, _ = cop.compute_PZT_angle(dx, dy)
 
             print(
                 f"frame={frame_cnt:04d}  "
                 f"CoP=({cop_x:.2f},{cop_y:.2f})  "
                 f"Δ=({dx:.3f},{dy:.3f})  "
+                f"|Δ|={magnitude:.3f}  "
+                f"state={state}  "
                 f"PZT={pzt_angle:.1f}°  "
                 f"total_P={total_p}"
             )

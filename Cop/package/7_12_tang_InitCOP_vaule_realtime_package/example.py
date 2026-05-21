@@ -1,4 +1,4 @@
-import tang_7_12_InitCOP_realtime_package as cop
+import tang_7_12_InitCOP_vaule_realtime_package as cop
 import numpy as np
 
 # ===================== 示例使用 =====================

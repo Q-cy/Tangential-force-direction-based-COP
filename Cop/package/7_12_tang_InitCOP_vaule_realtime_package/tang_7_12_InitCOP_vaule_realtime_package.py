@@ -87,10 +87,10 @@ def compute_pressure_direction(baseline_subtracted_frame):
 
     if total_pressure_low_counter >= COP_STABILITY_FRAMES_REQUIRED:
         reset_cop_state()
-        return 0.0, 0.0, 0, rows-1, 0, cols-1, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0, rows-1, 0, cols-1, 0.0, 0.0, 0.0, 0.0, 0.0, 0
 
     if total_pressure == 0:
-        return 0.0, 0.0, 0, rows-1, 0, cols-1, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0, rows-1, 0, cols-1, 0.0, 0.0, 0.0, 0.0, 0.0, 0
 
     x_grid = np.tile(np.arange(cols), (rows, 1))
     y_grid = np.repeat(np.arange(rows), cols).reshape(rows, cols)
@@ -150,10 +150,19 @@ def compute_pressure_direction(baseline_subtracted_frame):
         base_x = first_contact_CoP_x
         base_y = first_contact_CoP_y
 
+    magnitude = np.hypot(delta_CoP_x, delta_CoP_y)
+    if not contact_initialized:
+        state = 0
+    elif not post_refined_flag:
+        state = 1
+    else:
+        state = 2
+
     return (cop_x, cop_y,
             0, rows-1, 0, cols-1,
             delta_CoP_x, delta_CoP_y,
-            base_x, base_y)
+            base_x, base_y,
+            magnitude, state)
 
 
 # ===================== 角度计算核心 =====================
@@ -166,7 +175,7 @@ def compute_vector_angle(x: float, y: float) -> tuple[float, float]:
     return angle, mag
 
 def compute_PZT_angle(Px: float, Py: float) -> tuple[float, float]:
-    return compute_vector_angle(Px, -Py)
+    return compute_vector_angle(Px, Py)
 
 
 # ===================== 核心入口函数 =====================
