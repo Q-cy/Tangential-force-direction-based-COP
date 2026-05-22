@@ -9,9 +9,7 @@ import threading
 
 
 # ===================== 算法参数（仅与CoP计算相关）=====================
-COP_INIT_VEL_WINDOW = 1                 # 计算速度的帧间隔
-COP_INIT_VEL_THRESH = 0.1               # 速度阈值（传感器格点/帧），低于此值视为静止
-COP_INIT_STABLE_CNT = 10                # 连续静止帧数，达到后确定初始CoP
+COP_INIT_MEDIAN_FRAMES = 20             # 初始COP取中位数的帧数
 COP_BASELINE_COLLECT_FRAMES = 20        # 基线采集帧数（用于动态阈值计算）
 COP_THRESH_K = 5                        # 阈值乘数：mean + K * std
 COP_SENSOR_ROW_CNT = 12                 # 传感器阵列行数
@@ -19,8 +17,8 @@ COP_SENSOR_COL_CNT = 7                  # 传感器阵列列数
 
 
 # ===================== 二次静置精修参数 =====================
-COP_POST_INIT_WINDOW_CNT = 10000000000000000         # 初始CoP确定后精修监测帧数上限
-COP_POST_INIT_STABLE_CNT = 200         # 精修阶段需连续保持不变的帧数
+COP_POST_INIT_WINDOW_CNT = 600000        # 初始CoP确定后精修监测帧数上限
+COP_POST_INIT_STABLE_CNT = 100          # 精修阶段需连续保持不变的帧数
 COP_POST_INIT_STABLE_THRESH = 0.1      # 精修判据：CoP偏移距离阈值
 
 
@@ -32,10 +30,8 @@ g_cop_contact_init_x = None            # 初始接触点CoP X坐标
 g_cop_contact_init_y = None            # 初始接触点CoP Y坐标
 g_cop_contact_init_flag = False        # 初始接触点是否已稳定确定
 
-g_cop_init_pos_buf = deque(maxlen=COP_INIT_VEL_WINDOW)    # 最近N帧COP位置(x,y)，用于速度计算
-g_cop_init_stable_cnt = 0              # 连续静止帧计数
-g_cop_init_cand_x = None               # 当前候选静止点X
-g_cop_init_cand_y = None               # 当前候选静止点Y
+g_cop_init_x_buf = deque(maxlen=COP_INIT_MEDIAN_FRAMES)   # 候选初始CoP X序列缓冲
+g_cop_init_y_buf = deque(maxlen=COP_INIT_MEDIAN_FRAMES)   # 候选初始CoP Y序列缓冲
 
 # 二次静置精修状态
 g_cop_post_init_frame_cnt = 0          # 精修阶段已监测帧数
@@ -75,7 +71,7 @@ def reset_cop_state():
     """
     # global 声明要修改全局变量
     global g_cop_filtered_dir, g_cop_contact_init_x, g_cop_contact_init_y, g_cop_contact_init_flag
-    global g_cop_init_pos_buf, g_cop_init_stable_cnt, g_cop_init_cand_x, g_cop_init_cand_y
+    global g_cop_init_x_buf, g_cop_init_y_buf
     global g_cop_grad_table_arr
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
@@ -84,10 +80,8 @@ def reset_cop_state():
     g_cop_contact_init_x = None
     g_cop_contact_init_y = None
     g_cop_contact_init_flag = False
-    g_cop_init_pos_buf.clear()
-    g_cop_init_stable_cnt = 0
-    g_cop_init_cand_x = None
-    g_cop_init_cand_y = None
+    g_cop_init_x_buf.clear()
+    g_cop_init_y_buf.clear()
     g_cop_post_init_frame_cnt = 0
     g_cop_post_stable_cnt = 0
     g_cop_post_refined_flag = False
@@ -105,7 +99,7 @@ def compute_pressure_direction(baseline_subtracted_frame):
     """
     global g_cop_filtered_dir, g_cop_grad_table_arr
     global g_cop_contact_init_x, g_cop_contact_init_y, g_cop_contact_init_flag
-    global g_cop_init_pos_buf, g_cop_init_stable_cnt, g_cop_init_cand_x, g_cop_init_cand_y
+    global g_cop_init_x_buf, g_cop_init_y_buf
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
     global g_cop_noise_sum_buf, g_cop_dynamic_thresh
@@ -159,30 +153,16 @@ def compute_pressure_direction(baseline_subtracted_frame):
     cop_base_x = cop_curr_x
     cop_base_y = cop_curr_y
 
-    # ============ 初始点稳定判断（速度判定） ============
+    # ============ 初始点稳定判断（中位数判定） ============
     if not g_cop_contact_init_flag:
-        g_cop_init_pos_buf.append((cop_curr_x, cop_curr_y))
-        if len(g_cop_init_pos_buf) >= COP_INIT_VEL_WINDOW:
-            prev_x, prev_y = g_cop_init_pos_buf[0]
-            vel = np.hypot(cop_curr_x - prev_x, cop_curr_y - prev_y) / COP_INIT_VEL_WINDOW
-            if vel < COP_INIT_VEL_THRESH:
-                if g_cop_init_cand_x is not None:
-                    dist = np.hypot(cop_curr_x - g_cop_init_cand_x,
-                                    cop_curr_y - g_cop_init_cand_y)
-                    if dist < COP_INIT_VEL_THRESH * COP_INIT_VEL_WINDOW:
-                        g_cop_init_stable_cnt += 1
-                    else:
-                        g_cop_init_cand_x, g_cop_init_cand_y = cop_curr_x, cop_curr_y
-                        g_cop_init_stable_cnt = 1
-                else:
-                    g_cop_init_cand_x, g_cop_init_cand_y = cop_curr_x, cop_curr_y
-                    g_cop_init_stable_cnt = 1
-
-                if g_cop_init_stable_cnt >= COP_INIT_STABLE_CNT:
-                    g_cop_contact_init_x = g_cop_init_cand_x
-                    g_cop_contact_init_y = g_cop_init_cand_y
-                    g_cop_contact_init_flag = True
-                    g_cop_init_pos_buf.clear()
+        g_cop_init_x_buf.append(cop_curr_x)
+        g_cop_init_y_buf.append(cop_curr_y)
+        if len(g_cop_init_x_buf) >= COP_INIT_MEDIAN_FRAMES:
+            g_cop_contact_init_x = float(np.median(g_cop_init_x_buf))
+            g_cop_contact_init_y = float(np.median(g_cop_init_y_buf))
+            g_cop_contact_init_flag = True
+            g_cop_init_x_buf.clear()
+            g_cop_init_y_buf.clear()
 
     # ========== 计算偏移量 ==========
     else:  # g_cop_contact_init_flag 为 True
