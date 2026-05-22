@@ -9,20 +9,16 @@ import threading
 
 
 # ===================== 算法参数（仅与CoP计算相关）=====================
-COP_STABILITY_FRAME_CNT = 5            # 初始稳定所需连续帧数
-COP_PRESSURE_LOW_THRESH = 500          # 低压判定阈值（ADC原始值之和）
-COP_SENSOR_ROW_CNT = 12                # 传感器阵列行数
-COP_SENSOR_COL_CNT = 7                 # 传感器阵列列数
-
-
-# ===================== 直线方向稳定判断参数 =====================
-COP_LINE_DIST_THRESH = 0.1             # 点到参考直线最大允许距离（CoP坐标单位）
-COP_DIR_DOT_THRESH = 0.7               # 移动方向与参考方向一致性最小点积
+COP_INIT_MEDIAN_FRAMES = 20             # 初始COP取中位数的帧数
+COP_BASELINE_COLLECT_FRAMES = 20        # 基线采集帧数（用于动态阈值计算）
+COP_THRESH_K = 5                        # 阈值乘数：mean + K * std
+COP_SENSOR_ROW_CNT = 12                 # 传感器阵列行数
+COP_SENSOR_COL_CNT = 7                  # 传感器阵列列数
 
 
 # ===================== 二次静置精修参数 =====================
-COP_POST_INIT_WINDOW_CNT = 100         # 初始CoP确定后精修监测帧数上限
-COP_POST_INIT_STABLE_CNT = 10          # 精修阶段需连续保持不变的帧数
+COP_POST_INIT_WINDOW_CNT = 600000        # 初始CoP确定后精修监测帧数上限
+COP_POST_INIT_STABLE_CNT = 100          # 精修阶段需连续保持不变的帧数
 COP_POST_INIT_STABLE_THRESH = 0.1      # 精修判据：CoP偏移距离阈值
 
 
@@ -34,10 +30,8 @@ g_cop_contact_init_x = None            # 初始接触点CoP X坐标
 g_cop_contact_init_y = None            # 初始接触点CoP Y坐标
 g_cop_contact_init_flag = False        # 初始接触点是否已稳定确定
 
-g_cop_init_x_buf = deque(maxlen=COP_STABILITY_FRAME_CNT)  # 候选初始CoP X序列缓冲
-g_cop_init_y_buf = deque(maxlen=COP_STABILITY_FRAME_CNT)  # 候选初始CoP Y序列缓冲
-
-g_cop_press_low_cnt = 0                # 连续低压帧计数器
+g_cop_init_x_buf = deque(maxlen=COP_INIT_MEDIAN_FRAMES)   # 候选初始CoP X序列缓冲
+g_cop_init_y_buf = deque(maxlen=COP_INIT_MEDIAN_FRAMES)   # 候选初始CoP Y序列缓冲
 
 # 二次静置精修状态
 g_cop_post_init_frame_cnt = 0          # 精修阶段已监测帧数
@@ -45,6 +39,9 @@ g_cop_post_stable_cnt = 0              # 精修阶段连续满足静止判据的
 g_cop_post_refined_flag = False        # 精修是否已完成
 g_cop_post_cand_x = None               # 精修候选静止点X
 g_cop_post_cand_y = None               # 精修候选静止点Y
+
+g_cop_noise_sum_buf = deque(maxlen=COP_BASELINE_COLLECT_FRAMES)  # 基线期total_press_val缓冲
+g_cop_dynamic_thresh = None             # 动态计算后的阈值（None=未校准）
 
 g_cop_filtered_dir = None              # 滤波后的方向向量（暂未使用）
 g_cop_grad_table_arr = np.zeros((COP_SENSOR_ROW_CNT, COP_SENSOR_COL_CNT, 2))  # 梯度表(rows,cols,2)
@@ -74,8 +71,8 @@ def reset_cop_state():
     """
     # global 声明要修改全局变量
     global g_cop_filtered_dir, g_cop_contact_init_x, g_cop_contact_init_y, g_cop_contact_init_flag
-    global g_cop_press_low_cnt
-    global g_cop_init_x_buf, g_cop_init_y_buf, g_cop_grad_table_arr
+    global g_cop_init_x_buf, g_cop_init_y_buf
+    global g_cop_grad_table_arr
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
 
@@ -83,7 +80,6 @@ def reset_cop_state():
     g_cop_contact_init_x = None
     g_cop_contact_init_y = None
     g_cop_contact_init_flag = False
-    g_cop_press_low_cnt = 0
     g_cop_init_x_buf.clear()
     g_cop_init_y_buf.clear()
     g_cop_post_init_frame_cnt = 0
@@ -103,10 +99,10 @@ def compute_pressure_direction(baseline_subtracted_frame):
     """
     global g_cop_filtered_dir, g_cop_grad_table_arr
     global g_cop_contact_init_x, g_cop_contact_init_y, g_cop_contact_init_flag
-    global g_cop_press_low_cnt
     global g_cop_init_x_buf, g_cop_init_y_buf
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
+    global g_cop_noise_sum_buf, g_cop_dynamic_thresh
 
     sensor_rows, sensor_cols = COP_SENSOR_ROW_CNT, COP_SENSOR_COL_CNT
     frame_flat_arr = np.asarray(baseline_subtracted_frame, dtype=np.float32).flatten()
@@ -127,28 +123,24 @@ def compute_pressure_direction(baseline_subtracted_frame):
     with g_cop_grad_table_lock:
         g_cop_grad_table_arr[:] = grad_arr[:]
 
-    # 总压力判断
+    # 总压力
     total_press_val = np.sum(frame_2d_arr)
-    if total_press_val < COP_PRESSURE_LOW_THRESH:
-        g_cop_press_low_cnt += 1
-    else:
-        g_cop_press_low_cnt = 0
 
-    # 连续低压 → 重置
-    if g_cop_press_low_cnt >= COP_STABILITY_FRAME_CNT:
-        reset_cop_state()
-        # 返回默认值，表示无有效CoP或已重置
-        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0  # 10个值
+    # 动态阈值：启动后收集前N帧的total_press_val，计算 mean + K*std
+    if g_cop_dynamic_thresh is None:
+        g_cop_noise_sum_buf.append(total_press_val)
+        if len(g_cop_noise_sum_buf) >= COP_BASELINE_COLLECT_FRAMES:
+            sums = np.array(g_cop_noise_sum_buf)
+            g_cop_dynamic_thresh = COP_THRESH_K * float(np.mean(sums))
+
+    # 总压力判断：动态阈值就绪后才启用低压重置
+    if g_cop_dynamic_thresh is not None and total_press_val < g_cop_dynamic_thresh:
+        if g_cop_contact_init_flag:
+            reset_cop_state()
+        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0, 0
 
     if total_press_val == 0:
-        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0  # 10个值
-
-    # 已建立初始接触但当前压力过低 → 跳过噪声CoP计算，返回零偏移
-    if g_cop_contact_init_flag and total_press_val < COP_PRESSURE_LOW_THRESH:
-        return (g_cop_contact_init_x, g_cop_contact_init_y,
-                0, sensor_rows-1, 0, sensor_cols-1,
-                0.0, 0.0,
-                g_cop_contact_init_x, g_cop_contact_init_y)
+        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0, 0
 
     # 计算CoP中心
     grid_x_arr = np.tile(np.arange(sensor_cols), (sensor_rows, 1))
@@ -161,68 +153,14 @@ def compute_pressure_direction(baseline_subtracted_frame):
     cop_base_x = cop_curr_x
     cop_base_y = cop_curr_y
 
-    # ============ 初始点稳定判断 ============
+    # ============ 初始点稳定判断（中位数判定） ============
     if not g_cop_contact_init_flag:
-        g_cop_init_x_buf.append(cop_curr_x)  # 当前CoP加入候选缓冲
+        g_cop_init_x_buf.append(cop_curr_x)
         g_cop_init_y_buf.append(cop_curr_y)
-
-        is_seq_stable_flag = True  # 假设当前序列稳定，直到被证明不稳定
-
-        if len(g_cop_init_x_buf) >= 2:
-            # 用缓冲器前两个点定义参考直线方向
-            ref_p0_x, ref_p0_y = g_cop_init_x_buf[0], g_cop_init_y_buf[0]
-            ref_p1_x, ref_p1_y = g_cop_init_x_buf[1], g_cop_init_y_buf[1]
-
-            ref_dir_x = ref_p1_x - ref_p0_x
-            ref_dir_y = ref_p1_y - ref_p0_y
-            ref_dir_len = np.hypot(ref_dir_x, ref_dir_y)
-
-            if ref_dir_len < 1e-4:  # 前两点重合，无法定义方向
-                is_seq_stable_flag = False
-            else:
-                ref_dir_norm_x = ref_dir_x / ref_dir_len  # 归一化参考方向
-                ref_dir_norm_y = ref_dir_y / ref_dir_len
-
-                for buf_idx in range(2, len(g_cop_init_x_buf)):
-                    buf_pt_x, buf_pt_y = g_cop_init_x_buf[buf_idx], g_cop_init_y_buf[buf_idx]
-                    buf_prev_x, buf_prev_y = g_cop_init_x_buf[buf_idx-1], g_cop_init_y_buf[buf_idx-1]
-
-                    # 1. 当前点到参考直线的距离
-                    # 距离 = |(p1-p0) × (pt-p0)| / |p1-p0|
-                    cross_prod_val = abs((ref_p1_x - ref_p0_x) * (buf_pt_y - ref_p0_y)
-                                        - (ref_p1_y - ref_p0_y) * (buf_pt_x - ref_p0_x))
-                    line_dist_val = cross_prod_val / ref_dir_len
-
-                    if line_dist_val > COP_LINE_DIST_THRESH:
-                        is_seq_stable_flag = False
-                        break  # 偏离直线太远
-
-                    # 2. 当前移动方向与参考方向的一致性
-                    seg_dir_x = buf_pt_x - buf_prev_x
-                    seg_dir_y = buf_pt_y - buf_prev_y
-                    seg_len = np.hypot(seg_dir_x, seg_dir_y)
-
-                    if seg_len > 1e-4:  # 有实际移动才检查方向
-                        seg_norm_x = seg_dir_x / seg_len
-                        seg_norm_y = seg_dir_y / seg_len
-                        dot_prod_val = ref_dir_norm_x * seg_norm_x + ref_dir_norm_y * seg_norm_y
-                        if dot_prod_val < COP_DIR_DOT_THRESH:
-                            is_seq_stable_flag = False
-                            break  # 方向不一致
-
-        if not is_seq_stable_flag:
-            # 序列不稳定：清空缓冲，以当前CoP作为新序列起点
-            g_cop_init_x_buf.clear()
-            g_cop_init_y_buf.clear()
-            g_cop_init_x_buf.append(cop_curr_x)
-            g_cop_init_y_buf.append(cop_curr_y)
-
-        elif len(g_cop_init_x_buf) == COP_STABILITY_FRAME_CNT:
-            g_cop_contact_init_x = g_cop_init_x_buf[0]  # 取稳定序列的第一个点
-            g_cop_contact_init_y = g_cop_init_y_buf[0]
+        if len(g_cop_init_x_buf) >= COP_INIT_MEDIAN_FRAMES:
+            g_cop_contact_init_x = float(np.median(g_cop_init_x_buf))
+            g_cop_contact_init_y = float(np.median(g_cop_init_y_buf))
             g_cop_contact_init_flag = True
-
-            # 确定初始点后，清空缓冲器，不再需要它
             g_cop_init_x_buf.clear()
             g_cop_init_y_buf.clear()
 
@@ -257,7 +195,10 @@ def compute_pressure_direction(baseline_subtracted_frame):
         cop_base_x = g_cop_contact_init_x
         cop_base_y = g_cop_contact_init_y
 
+    cop_state = 2 if g_cop_post_refined_flag else 1
+
     return (cop_curr_x, cop_curr_y,
-            0, sensor_rows-1, 0, sensor_cols-1,  # 绘图范围 (min_y, max_y, min_x, max_x)
+            0, sensor_rows-1, 0, sensor_cols-1,
             cop_delta_x, cop_delta_y,
-            cop_base_x, cop_base_y)
+            cop_base_x, cop_base_y,
+            cop_state)
