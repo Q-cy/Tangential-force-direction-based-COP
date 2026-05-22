@@ -134,6 +134,9 @@ class RealTimePlot:
         self._cop_delta_y = 0.0             # CoP偏移Y
         self._total_press_val = 0.0         # 总压力值
         self._cop_state = 0                 # 接触状态
+        self._pre_init_trail_x = []         # 初始COP确定前的轨迹X
+        self._pre_init_trail_y = []         # 初始COP确定前的轨迹Y
+        self._prev_init_flag = False        # 前一帧的初始COP确定标志，用于检测reset
 
     def init_history(self):
         hist_len = PLOT_MAG_HISTORY_LEN
@@ -248,6 +251,9 @@ class RealTimePlot:
                 t.setPos(c, r)
                 row_t.append(t)
             self._cell_txts.append(row_t)
+        # 初始COP确定前轨迹（橙色小点，持久显示）
+        self._pre_init_trail = pg.ScatterPlotItem()
+        self.p_table.addItem(self._pre_init_trail)
         # CoP 标记
         self._cop_dots = pg.ScatterPlotItem()
         self.p_table.addItem(self._cop_dots)
@@ -292,6 +298,16 @@ class RealTimePlot:
             self._cop_delta_x = cop_delta_x
             self._cop_delta_y = cop_delta_y
             self._total_press_val = total_press_val
+
+            # 初始COP确定前：累积COP轨迹；检测reset时清空
+            if not COP.g_cop_contact_init_flag:
+                if self._prev_init_flag:  # True→False：reset 发生
+                    self._pre_init_trail_x.clear()
+                    self._pre_init_trail_y.clear()
+                if not np.isnan(cop_curr_x):
+                    self._pre_init_trail_x.append(cop_curr_x)
+                    self._pre_init_trail_y.append(cop_curr_y)
+            self._prev_init_flag = COP.g_cop_contact_init_flag
 
             self.adc_mag_history.append(pzt_mag_val)
             self.pzt_fz_history.append(total_press_val)
@@ -349,6 +365,13 @@ class RealTimePlot:
         self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_x", fs=fs)
         self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_y", fs=fs)
 
+        # 初始COP确定前轨迹（始终显示）
+        if self._pre_init_trail_x:
+            self._pre_init_trail.setData(
+                x=self._pre_init_trail_x, y=self._pre_init_trail_y,
+                brush=(255, 165, 0), size=6
+            )
+
         # Pressure table + CoP + Gradient
         if COP.g_cop_contact_init_flag:
             cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
@@ -387,11 +410,14 @@ class RealTimePlot:
                     grad_ln.setData([], [])
                     grad_dot.setData(x=[], y=[])
         else:
-            self._cell_grid.set_data(np.zeros((12, 7)), 1.0)
+            # 初始COP未确定：正常显示压力表，用黄色标记当前COP
+            cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
+            self._cell_grid.set_data(press_table_arr, cell_vmax)
             for row_idx in range(12):
                 for col_idx in range(7):
-                    self._cell_txts[row_idx][col_idx].setText("")
-            self._cop_dots.setData(spots=[])
+                    cell_val = press_table_arr[row_idx, col_idx]
+                    self._cell_txts[row_idx][col_idx].setText(f"{cell_val:.0f}" if cell_val > 0 else "")
+            self._cop_dots.setData(spots=[{'pos': (cop_curr_x, cop_curr_y), 'brush': 'y', 'size': 12}])
             self._cop_arr.setData([], [])
             self._cop_hL.setData([], [])
             self._cop_hR.setData([], [])

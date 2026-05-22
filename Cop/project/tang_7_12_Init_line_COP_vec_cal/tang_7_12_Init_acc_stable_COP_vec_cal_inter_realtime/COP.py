@@ -9,18 +9,18 @@ import threading
 
 
 # ===================== 算法参数（仅与CoP计算相关）=====================
-COP_INIT_VEL_WINDOW = 5                 # 计算速度的帧间隔
-COP_INIT_VEL_THRESH = 0.05              # 速度阈值（传感器格点/帧），低于此值视为静止
-COP_INIT_STABLE_CNT = 10                # 连续静止帧数，达到后确定初始CoP
+COP_INIT_VEL_WINDOW = 1                 # 计算速度的帧间隔
+COP_INIT_VEL_THRESH = 1                 # 速度阈值（传感器格点/帧），低于此值视为静止
+COP_INIT_STABLE_CNT = 5                 # 连续静止帧数，达到后确定初始CoP
 COP_BASELINE_COLLECT_FRAMES = 20        # 基线采集帧数（用于动态阈值计算）
 COP_THRESH_K = 5                        # 阈值乘数：mean + K * std
-COP_SENSOR_ROW_CNT = 12                # 传感器阵列行数
-COP_SENSOR_COL_CNT = 7                 # 传感器阵列列数
+COP_SENSOR_ROW_CNT = 12                 # 传感器阵列行数
+COP_SENSOR_COL_CNT = 7                  # 传感器阵列列数
 
 
 # ===================== 二次静置精修参数 =====================
 COP_POST_INIT_WINDOW_CNT = 10000000000000000         # 初始CoP确定后精修监测帧数上限
-COP_POST_INIT_STABLE_CNT = 200          # 精修阶段需连续保持不变的帧数
+COP_POST_INIT_STABLE_CNT = 200         # 精修阶段需连续保持不变的帧数
 COP_POST_INIT_STABLE_THRESH = 0.1      # 精修判据：CoP偏移距离阈值
 
 
