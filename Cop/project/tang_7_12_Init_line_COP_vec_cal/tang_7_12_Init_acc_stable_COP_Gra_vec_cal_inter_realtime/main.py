@@ -16,7 +16,7 @@ import calibrate
 import importlib
 
 # ===================== 配置 =====================
-MAIN_REALTIME_MODULE = "realtime2"           # "realtime"=全显示, "realtime2"=仅压阻
+MAIN_REALTIME_MODULE = "realtime3"           # "realtime"=全显示, "realtime2"=仅压阻
 MAIN_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"  # 数据保存根目录
 
 realtime = importlib.import_module(MAIN_REALTIME_MODULE)
@@ -114,6 +114,7 @@ def data_loop():
     median_filt_window = 5
     buf_cop_delta_x = deque(maxlen=median_filt_window)
     buf_cop_delta_y = deque(maxlen=median_filt_window)
+    buf_cop_angle = deque(maxlen=median_filt_window)
     buf_force_fx = deque(maxlen=median_filt_window)
     buf_force_fy = deque(maxlen=median_filt_window)
     buf_force_fz = deque(maxlen=median_filt_window)
@@ -139,19 +140,26 @@ def data_loop():
             cop_curr_x, cop_curr_y = cop_res[0], cop_res[1]
             cop_delta_x, cop_delta_y = cop_res[6], cop_res[7]
             cop_base_x, cop_base_y = cop_res[8], cop_res[9]
+            cop_state = cop_res[10]
+            fused_angle_raw, fused_mag_raw = cop_res[11], cop_res[12]
+            cop_angle_raw, cop_mag_raw = cop_res[13], cop_res[14]
+            grad_angle_raw, grad_mag_raw = cop_res[15], cop_res[16]
             total_press_val = np.sum(press_item["data"])
 
             buf_cop_delta_x.append(cop_delta_x)
             buf_cop_delta_y.append(cop_delta_y)
             cop_delta_x_filt = np.median(buf_cop_delta_x)
             cop_delta_y_filt = np.median(buf_cop_delta_y)
-            pzt_angle_deg, pzt_mag_val = angle.compute_PZT_angle(cop_delta_x_filt, cop_delta_y_filt)
+            buf_cop_angle.append(fused_angle_raw)
+            pzt_angle_deg = float(np.median(buf_cop_angle))
+            pzt_mag_val = fused_mag_raw
         else:
             base_sub_arr = np.zeros(84)
             cop_curr_x = cop_curr_y = cop_delta_x = cop_delta_y = cop_base_x = cop_base_y = float('nan')
             cop_delta_x_filt = cop_delta_y_filt = 0.0
             pzt_angle_deg = pzt_mag_val = 0.0
             total_press_val = 0.0
+            cop_state = 0
 
         # ---- 计算 Force ----
         if force_item is not None:
@@ -200,6 +208,8 @@ def data_loop():
             fy_cal=cal_fy_val,
             force_cal_mag=cal_mag_val,
             force_cal_angle=cal_angle_deg,
+            cop_state=cop_state,
+            adc_sum=total_press_val,
         )
         csv_writer.writerow(csv_row)
 
@@ -211,6 +221,9 @@ def data_loop():
             cop_delta_x_filt, cop_delta_y_filt,
             force_fx_filt, force_fy_filt, force_fz_filt,
             cal_fx_val, cal_fy_val, cal_angle_deg, cal_mag_val,
+            cop_state=cop_state,
+            cop_angle_raw=cop_angle_raw, cop_mag_raw=cop_mag_raw,
+            grad_angle_raw=grad_angle_raw, grad_mag_raw=grad_mag_raw,
         )
         if COP.g_cop_contact_init_flag:
             g_main_plot.append_full_data(

@@ -10,17 +10,20 @@ import threading
 
 # ===================== 算法参数（仅与CoP计算相关）=====================
 COP_INIT_VEL_WINDOW = 1                 # 计算速度的帧间隔
-COP_INIT_VEL_THRESH = 0.5               # 速度阈值（传感器格点/帧），低于此值视为静止
-COP_INIT_STABLE_CNT = 10                 # 连续静止帧数，达到后确定初始CoP
+COP_INIT_VEL_THRESH = 1                 # 速度阈值（传感器格点/帧），低于此值视为静止
+COP_INIT_STABLE_CNT = 5                 # 连续静止帧数，达到后确定初始CoP
 COP_BASELINE_COLLECT_FRAMES = 20        # 基线采集帧数（用于动态阈值计算）
 COP_THRESH_K = 5                        # 阈值乘数：mean + K * std
+COP_GRAD_THRESH = 100                   # 梯度计算：压力高于此值计入有效区域
+COP_DIST_POWER = 2                    # 距离因子幂次（>1=陡峭过渡, <1=平缓过渡）
+COP_ANGLE_BOOST = 10.0                # 角度差异增强系数（0=仅用距离, 越大角度差异越放大偏好）
 COP_SENSOR_ROW_CNT = 12                 # 传感器阵列行数
 COP_SENSOR_COL_CNT = 7                  # 传感器阵列列数
 
 
 # ===================== 二次静置精修参数 =====================
 COP_POST_INIT_WINDOW_CNT = 10000000000000000         # 初始CoP确定后精修监测帧数上限
-COP_POST_INIT_STABLE_CNT = 200         # 精修阶段需连续保持不变的帧数
+COP_POST_INIT_STABLE_CNT = 1000000000000000         # 精修阶段需连续保持不变的帧数
 COP_POST_INIT_STABLE_THRESH = 0.1      # 精修判据：CoP偏移距离阈值
 
 
@@ -97,6 +100,41 @@ def reset_cop_state():
         g_cop_grad_table_arr.fill(0)
 
 
+# ===================== 梯度角度计算（基于压力分布不对称性） =====================
+def compute_gradient_angle(frame_2d_arr):
+    """
+    移植自 dottoface/7_12_tang_face_mod.py
+    基于压力分布左右/上下不对称性计算切向力方向角
+    返回 (angle_deg, magnitude)
+    """
+    rows, cols = frame_2d_arr.shape
+    valid_mask = frame_2d_arr > COP_GRAD_THRESH
+    if not np.any(valid_mask):
+        return 0.0, 0.0
+
+    active_rows, active_cols = np.where(valid_mask)
+    min_row, max_row = active_rows.min(), active_rows.max()
+    min_col, max_col = active_cols.min(), active_cols.max()
+
+    sub_mat = frame_2d_arr[min_row:max_row + 1, min_col:max_col + 1]
+    center_row = min_row + int(np.argmax(sub_mat.sum(axis=1)))
+    center_col = min_col + int(np.argmax(sub_mat.sum(axis=0)))
+
+    left_sum = frame_2d_arr[min_row:max_row + 1, min_col:center_col][valid_mask[min_row:max_row + 1, min_col:center_col]].sum()
+    right_sum = frame_2d_arr[min_row:max_row + 1, center_col + 1:max_col + 1][valid_mask[min_row:max_row + 1, center_col + 1:max_col + 1]].sum()
+    x_diff = right_sum - left_sum
+
+    upper_sum = frame_2d_arr[min_row:center_row, min_col:max_col + 1][valid_mask[min_row:center_row, min_col:max_col + 1]].sum()
+    lower_sum = frame_2d_arr[center_row + 1:max_row + 1, min_col:max_col + 1][valid_mask[center_row + 1:max_row + 1, min_col:max_col + 1]].sum()
+    y_diff = upper_sum - lower_sum
+
+    angle = float(np.degrees(np.arctan2(-y_diff, -x_diff + 1e-8)))
+    if angle < 0:
+        angle += 360.0
+    mag = float(np.sqrt(x_diff ** 2 + y_diff ** 2))
+    return angle, mag
+
+
 # ===================== 核心CoP计算 =====================
 def compute_pressure_direction(baseline_subtracted_frame):
     """
@@ -143,10 +181,10 @@ def compute_pressure_direction(baseline_subtracted_frame):
     if g_cop_dynamic_thresh is not None and total_press_val < g_cop_dynamic_thresh:
         if g_cop_contact_init_flag:
             reset_cop_state()
-        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0, 0
+        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
     if total_press_val == 0:
-        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0, 0
+        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
     # 计算CoP中心
     grid_x_arr = np.tile(np.arange(sensor_cols), (sensor_rows, 1))
@@ -217,8 +255,50 @@ def compute_pressure_direction(baseline_subtracted_frame):
 
     cop_state = 2 if g_cop_post_refined_flag else 1
 
+    # 梯度角度（基于压力分布不对称性）
+    grad_angle_deg, grad_mag = compute_gradient_angle(frame_2d_arr)
+
+    # COP位移角度
+    _eps = 1e-8
+    cop_mag = float(np.hypot(cop_delta_x, cop_delta_y))
+    cop_angle_deg = float(np.degrees(np.arctan2(cop_delta_y, cop_delta_x + _eps)))
+    if cop_angle_deg < 0:
+        cop_angle_deg += 360.0
+
+    # 双因子权重：初始COP离中心越近 且 两角度差异越大 → 梯度权重越高
+    center_x = (sensor_cols - 1) / 2.0
+    center_y = (sensor_rows - 1) / 2.0
+    dist_to_center = np.hypot(cop_curr_x - center_x, cop_curr_y - center_y)
+    max_dist = np.hypot(center_x, center_y)
+    dist_norm = min(dist_to_center / max_dist, 1.0)
+    angle_diff = abs(cop_angle_deg - grad_angle_deg)
+    if angle_diff > 180.0:
+        angle_diff = 360.0 - angle_diff
+    angle_diff_norm = angle_diff / 180.0
+    # 距离偏好：中心→梯度，边缘→COP
+    center_pow = (1.0 - dist_norm) ** COP_DIST_POWER
+    edge_pow = dist_norm ** COP_DIST_POWER
+    base_w_grad = center_pow / (center_pow + edge_pow + 1e-8)
+    # 角度差异放大距离偏好方向
+    push = COP_ANGLE_BOOST * angle_diff_norm * (base_w_grad - 0.8)
+    w_grad = max(0.0, min(1.0, base_w_grad + push))
+    w_cop = 1.0 - w_grad
+
+    # 矢量加权融合
+    cop_rad = np.radians(cop_angle_deg)
+    grad_rad = np.radians(grad_angle_deg)
+    vx = w_cop * np.cos(cop_rad) + w_grad * np.cos(grad_rad)
+    vy = w_cop * np.sin(cop_rad) + w_grad * np.sin(grad_rad)
+    fused_angle_deg = float(np.degrees(np.arctan2(vy, vx)))
+    if fused_angle_deg < 0:
+        fused_angle_deg += 360.0
+    fused_mag = float(np.hypot(vx, vy))
+
     return (cop_curr_x, cop_curr_y,
             0, sensor_rows-1, 0, sensor_cols-1,
             cop_delta_x, cop_delta_y,
             cop_base_x, cop_base_y,
-            cop_state)
+            cop_state,
+            fused_angle_deg, fused_mag,
+            cop_angle_deg, cop_mag,
+            grad_angle_deg, grad_mag)
