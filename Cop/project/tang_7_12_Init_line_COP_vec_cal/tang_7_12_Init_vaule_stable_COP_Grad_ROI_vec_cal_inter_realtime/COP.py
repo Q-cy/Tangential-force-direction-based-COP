@@ -9,12 +9,37 @@ import threading
 
 
 # ===================== 算法参数（仅与CoP计算相关）=====================
-COP_INIT_MEDIAN_FRAMES = 20             # 初始COP取中位数的帧数
-COP_BASELINE_COLLECT_FRAMES = 20        # 基线采集帧数（用于动态阈值计算）
-COP_THRESH_K = 5                        # 阈值乘数：mean + K * std
-COP_WEIGHT = 0.5                        # COP位移权重 (0~1), 梯度权重=1-COP_WEIGHT
-COP_SENSOR_ROW_CNT = 12                 # 传感器阵列行数
-COP_SENSOR_COL_CNT = 7                  # 传感器阵列列数
+# --- 初始COP ---
+COP_INIT_MEDIAN_FRAMES = 20
+
+# --- 动态接触阈值（自动适应环境噪声） ---
+COP_BASELINE_COLLECT_FRAMES = 20
+COP_THRESH_K = 5
+
+# --- 传感器阵列尺寸 ---
+COP_SENSOR_ROW_CNT = 12
+COP_SENSOR_COL_CNT = 7
+# --- 角度环形EWMA平滑 ---
+# 将角度转为(cos,sin)向量后做EWMA，天然避免0°/360°跳变。
+# 0=无平滑, 0.3=强平滑略滞后, 0.7=轻平滑响应快, 1=不滞后(只用原始值)。
+COP_ANGLE_SMOOTH_ALPHA = 0.3
+
+# --- 上下边界触发梯度 ---
+# 连通域触碰上下边界 且 初始COP连续N帧不在边缘 → 用梯度角度，否则用COP角度。
+# DIST_ROW: 初始COP距上下边缘多远(格点)视为"在边缘"。建议1.0~2.5。
+# INIT_LOOKBACK: 回看N帧判断初始COP是否一直在边缘外。建议3~10。
+COP_EDGE_DIST_ROW = 3
+COP_EDGE_INIT_LOOKBACK = 5
+
+# --- 初始COP自动重置 ---
+# 最近N帧COP整体移向初始COP时(手指重新定位)，自动重置初始点为当前COP。
+# LOOKBACK: 回看帧数, 建议5~20。
+# DOT_THRESH: 方向一致性阈值, 0.5=宽松, 0.9=严格, 建议0.6~0.8。
+# MIN_DIST: 距初始COP最小累计位移(格点), 低于此值不触发重置。建议0.5~2.0。
+# 每接触周期仅触发一次，卸载力后恢复。
+COP_INIT_RESET_LOOKBACK = 3
+COP_INIT_RESET_DOT_THRESH = 0.7
+COP_INIT_RESET_MIN_DIST = 0.5
 
 
 # ===================== 二次静置精修参数 =====================
@@ -44,9 +69,17 @@ g_cop_post_cand_y = None               # 精修候选静止点Y
 g_cop_noise_sum_buf = deque(maxlen=COP_BASELINE_COLLECT_FRAMES)  # 基线期total_press_val缓冲
 g_cop_dynamic_thresh = None             # 动态计算后的阈值（None=未校准）
 
-g_cop_filtered_dir = None              # 滤波后的方向向量（暂未使用）
+g_cop_filtered_dir = None               # 滤波后的方向向量（暂未使用）
+g_cop_smooth_vx = 0.0                   # 环形EWMA平滑向量X
+g_cop_smooth_vy = 0.0                   # 环形EWMA平滑向量Y
 g_cop_grad_table_arr = np.zeros((COP_SENSOR_ROW_CNT, COP_SENSOR_COL_CNT, 2))  # 梯度表(rows,cols,2)
 g_cop_grad_table_lock = threading.Lock()  # 梯度表读写锁
+
+# 初始COP自动重置：最近N帧COP位移方向
+g_cop_init_reset_buf = deque(maxlen=COP_INIT_RESET_LOOKBACK)
+g_cop_reset_done = False                   # 本次接触是否已触发过COP重置
+g_cop_init_at_edge_buf = deque(maxlen=COP_EDGE_INIT_LOOKBACK)  # 最近N帧初始COP是否在边缘
+g_cop_curr_at_edge_buf = deque(maxlen=COP_EDGE_INIT_LOOKBACK)  # 最近N帧当前COP是否在边缘
 
 
 # ===================== 基线减除 =====================
@@ -71,13 +104,17 @@ def reset_cop_state():
     压力过低/离开接触面 → 重置所有状态
     """
     # global 声明要修改全局变量
-    global g_cop_filtered_dir, g_cop_contact_init_x, g_cop_contact_init_y, g_cop_contact_init_flag
+    global g_cop_filtered_dir, g_cop_smooth_vx, g_cop_smooth_vy
+    global g_cop_contact_init_x, g_cop_contact_init_y, g_cop_contact_init_flag
     global g_cop_init_x_buf, g_cop_init_y_buf
     global g_cop_grad_table_arr
+    global g_cop_init_reset_buf, g_cop_reset_done, g_cop_init_at_edge_buf, g_cop_curr_at_edge_buf
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
 
     g_cop_filtered_dir = None
+    g_cop_smooth_vx = 0.0
+    g_cop_smooth_vy = 0.0
     g_cop_contact_init_x = None
     g_cop_contact_init_y = None
     g_cop_contact_init_flag = False
@@ -88,6 +125,10 @@ def reset_cop_state():
     g_cop_post_refined_flag = False
     g_cop_post_cand_x = None
     g_cop_post_cand_y = None
+    g_cop_init_reset_buf.clear()
+    g_cop_reset_done = False
+    g_cop_init_at_edge_buf.clear()
+    g_cop_curr_at_edge_buf.clear()
     with g_cop_grad_table_lock:
         g_cop_grad_table_arr.fill(0)
 
@@ -99,13 +140,13 @@ def compute_roi_gradient_angle(frame_2d_arr):
     阈值 = g_cop_dynamic_thresh / 84（单通道）; 未就绪时返回(0,0)。
     """
     if g_cop_dynamic_thresh is None:
-        return 0.0, 0.0
+        return 0.0, 0.0, False
 
     rows, cols = frame_2d_arr.shape
-    cell_thresh = g_cop_dynamic_thresh / (rows * cols)
+    cell_thresh = float(np.mean(frame_2d_arr))  # 当前帧平均值
     mask = frame_2d_arr > cell_thresh
     if not np.any(mask):
-        return 0.0, 0.0
+        return 0.0, 0.0, False
 
     # BFS 找连通域，取最大
     visited = np.zeros_like(mask, dtype=bool)
@@ -128,13 +169,19 @@ def compute_roi_gradient_angle(frame_2d_arr):
                     best_region = region
 
     if len(best_region) < 3:
-        return 0.0, 0.0
+        return 0.0, 0.0, False
+
+    # 检测连通域是否触碰上下边界
+    touches_tb = (min(p[0] for p in best_region) == 0 or
+                  max(p[0] for p in best_region) == rows - 1)
 
     # 连通域内逐点加权梯度聚合
     weighted_gx = 0.0
     weighted_gy = 0.0
+    total_weight = 0.0
     for (r, c) in best_region:
         v = frame_2d_arr[r, c]
+        total_weight += v
         left_v = frame_2d_arr[r, c-1] if c-1 >= 0 else v
         right_v = frame_2d_arr[r, c+1] if c+1 < cols else v
         up_v = frame_2d_arr[r-1, c] if r-1 >= 0 else v
@@ -147,8 +194,8 @@ def compute_roi_gradient_angle(frame_2d_arr):
     angle = float(np.degrees(np.arctan2(-weighted_gy, weighted_gx + 1e-8)))
     if angle < 0:
         angle += 360.0
-    mag = float(np.hypot(weighted_gx, weighted_gy))
-    return angle, mag
+    mag = float(np.hypot(weighted_gx, weighted_gy)) / max(total_weight, 1.0)
+    return angle, mag, touches_tb
 
 
 # ===================== 核心CoP计算 =====================
@@ -163,6 +210,7 @@ def compute_pressure_direction(baseline_subtracted_frame):
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
     global g_cop_noise_sum_buf, g_cop_dynamic_thresh
+    global g_cop_init_reset_buf, g_cop_reset_done, g_cop_init_at_edge_buf, g_cop_curr_at_edge_buf
 
     sensor_rows, sensor_cols = COP_SENSOR_ROW_CNT, COP_SENSOR_COL_CNT
     frame_flat_arr = np.asarray(baseline_subtracted_frame, dtype=np.float32).flatten()
@@ -255,9 +303,40 @@ def compute_pressure_direction(baseline_subtracted_frame):
         cop_base_x = g_cop_contact_init_x
         cop_base_y = g_cop_contact_init_y
 
+        # 初始COP自动重置（每接触周期仅触发一次）
+        global g_cop_reset_done
+        g_cop_init_reset_buf.append((cop_curr_x, cop_curr_y))
+        if not g_cop_reset_done and len(g_cop_init_reset_buf) >= COP_INIT_RESET_LOOKBACK:
+            # 从buffer首尾计算平均速度，检查是否朝向初始点
+            first_x, first_y = g_cop_init_reset_buf[0]
+            last_x, last_y = g_cop_init_reset_buf[-1]
+            avg_vel_x = last_x - first_x
+            avg_vel_y = last_y - first_y
+            vec_to_init = np.array([g_cop_contact_init_x - cop_curr_x,
+                                     cop_curr_y - g_cop_contact_init_y])
+            dot_val = np.dot(vec_to_init, [avg_vel_x, avg_vel_y])
+            norm_prod = np.linalg.norm(vec_to_init) * np.hypot(avg_vel_x, avg_vel_y) + 1e-8
+            dist_from_init = float(np.hypot(cop_delta_x, cop_delta_y))
+
+            if (dot_val / norm_prod > COP_INIT_RESET_DOT_THRESH and
+                    dist_from_init >= COP_INIT_RESET_MIN_DIST):
+                # 从历史中找第一个距旧初始COP超过MIN_DIST的帧
+                for (hx, hy) in g_cop_init_reset_buf:
+                    if np.hypot(hx - g_cop_contact_init_x, hy - g_cop_contact_init_y) >= COP_INIT_RESET_MIN_DIST:
+                        g_cop_contact_init_x = hx
+                        g_cop_contact_init_y = hy
+                        break
+                g_cop_post_refined_flag = False
+                g_cop_post_cand_x = None
+                g_cop_post_cand_y = None
+                g_cop_post_stable_cnt = 0
+                g_cop_init_reset_buf.clear()
+                g_cop_reset_done = True
+
+    # 记录COP位移历史（用于边缘检测）
     cop_state = 2 if g_cop_post_refined_flag else 1
 
-    grad_angle_deg, grad_mag = compute_roi_gradient_angle(frame_2d_arr)
+    grad_angle_deg, grad_mag, touches_tb = compute_roi_gradient_angle(frame_2d_arr)
 
     # COP位移角度
     _eps = 1e-8
@@ -266,16 +345,38 @@ def compute_pressure_direction(baseline_subtracted_frame):
     if cop_angle_deg < 0:
         cop_angle_deg += 360.0
 
-    # 矢量加权融合
-    w_grad = 1.0 - COP_WEIGHT
-    cop_rad = np.radians(cop_angle_deg)
-    grad_rad = np.radians(grad_angle_deg)
-    vx = COP_WEIGHT * np.cos(cop_rad) + w_grad * np.cos(grad_rad)
-    vy = COP_WEIGHT * np.sin(cop_rad) + w_grad * np.sin(grad_rad)
-    fused_angle_deg = float(np.degrees(np.arctan2(vy, vx)))
-    if fused_angle_deg < 0:
-        fused_angle_deg += 360.0
-    fused_mag = float(np.hypot(vx, vy))
+    # 融合规则：上下边界触发梯度，初始COP和当前COP都不在边缘时启用
+    global g_cop_init_at_edge_buf, g_cop_curr_at_edge_buf
+    if g_cop_contact_init_y is not None:
+        at_edge = (g_cop_contact_init_y < COP_EDGE_DIST_ROW or
+                   g_cop_contact_init_y > sensor_rows - 1 - COP_EDGE_DIST_ROW)
+        g_cop_init_at_edge_buf.append(at_edge)
+    curr_at_edge = (cop_curr_y < COP_EDGE_DIST_ROW or
+                    cop_curr_y > sensor_rows - 1 - COP_EDGE_DIST_ROW)
+    g_cop_curr_at_edge_buf.append(curr_at_edge)
+    init_away = (len(g_cop_init_at_edge_buf) >= COP_EDGE_INIT_LOOKBACK and
+                 not any(g_cop_init_at_edge_buf))
+    curr_away = (len(g_cop_curr_at_edge_buf) >= COP_EDGE_INIT_LOOKBACK and
+                 not any(g_cop_curr_at_edge_buf))
+
+    if touches_tb and init_away and curr_away:
+        fused_angle_deg = grad_angle_deg
+        fused_mag = grad_mag
+    else:
+        fused_angle_deg = cop_angle_deg
+        fused_mag = cop_mag
+
+    # 环形EWMA平滑 (cos/sin空间避免0°/360°跳变)
+    global g_cop_smooth_vx, g_cop_smooth_vy
+    if COP_ANGLE_SMOOTH_ALPHA < 1.0:
+        alpha = COP_ANGLE_SMOOTH_ALPHA
+        fused_rad = np.radians(fused_angle_deg)
+        g_cop_smooth_vx += alpha * (np.cos(fused_rad) - g_cop_smooth_vx)
+        g_cop_smooth_vy += alpha * (np.sin(fused_rad) - g_cop_smooth_vy)
+        if g_cop_smooth_vx != 0.0 or g_cop_smooth_vy != 0.0:
+            fused_angle_deg = float(np.degrees(np.arctan2(g_cop_smooth_vy, g_cop_smooth_vx)))
+            if fused_angle_deg < 0:
+                fused_angle_deg += 360.0
 
     return (cop_curr_x, cop_curr_y,
             0, sensor_rows-1, 0, sensor_cols-1,
