@@ -139,6 +139,8 @@ class RealTimePlot:
         self._cop_base_y = 0.0              # 初始CoP Y
         self._cop_delta_x = 0.0             # CoP偏移X
         self._cop_delta_y = 0.0             # CoP偏移Y
+        self._bbox_cx = float('nan')        # 包围盒中心X
+        self._bbox_cy = float('nan')        # 包围盒中心Y
         self._force_fx_val = 0.0            # 力传感器Fx
         self._force_fy_val = 0.0            # 力传感器Fy
         self._force_fz_val = 0.0            # 力传感器Fz
@@ -255,6 +257,10 @@ class RealTimePlot:
         self.p_dir.addItem(self._dir_txt_pzt)
         self._dir_txt_frc = pg.TextItem("", anchor=(0, 1))
         self.p_dir.addItem(self._dir_txt_frc)
+        self._dir_bbox_dot = pg.ScatterPlotItem()
+        self.p_dir.addItem(self._dir_bbox_dot)
+        self._dir_cop_dot = pg.ScatterPlotItem()
+        self.p_dir.addItem(self._dir_cop_dot)
 
         self.p_mag = self.win.addPlot(row=0, col=3, title="Magnitude")
         self.p_mag.hideAxis('left'); self.p_mag.hideAxis('bottom')
@@ -332,7 +338,7 @@ class RealTimePlot:
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
                  cal_fx_val=None, cal_fy_val=None, cal_angle_deg=None, cal_mag_val=None,
-                 cop_state=0):
+                 cop_state=0, cop_x=None, cop_y=None, bbox_cx=None, bbox_cy=None):
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
             self._pzt_mag_val = pzt_mag_val
@@ -354,6 +360,8 @@ class RealTimePlot:
             self._cal_angle_deg = cal_angle_deg
             self._cal_mag_val = cal_mag_val
             self._cop_state = cop_state
+            self._bbox_cx = bbox_cx if bbox_cx is not None else float('nan')
+            self._bbox_cy = bbox_cy if bbox_cy is not None else float('nan')
 
             angle_err = min(abs(pzt_angle_deg - force_angle_deg),
                            360 - abs(pzt_angle_deg - force_angle_deg))
@@ -416,6 +424,7 @@ class RealTimePlot:
             cop_base_x = self._cop_base_x; cop_base_y = self._cop_base_y
             cop_delta_x = self._cop_delta_x; cop_delta_y = self._cop_delta_y
             cal_fx_val = self._cal_fx_val; cal_fy_val = self._cal_fy_val
+            bbox_cx = self._bbox_cx; bbox_cy = self._bbox_cy
             cop_state = self._cop_state
             grad_arr = np.zeros((12, 7, 2))
 
@@ -435,6 +444,22 @@ class RealTimePlot:
         self._dir_txt_pzt.setPos(0.75, 1.15)
         self._dir_txt_frc.setHtml(self._html(f'Force_Angle: {_fa:.1f}°', 'blue', fs))
         self._dir_txt_frc.setPos(0.75, 0.95)
+
+        # Bbox中心(蓝) 和 COP中心(绿) 归一化到 Direction 图坐标
+        def _norm_x(v):
+            return (v - 3.0) / 3.0
+        def _norm_y(v):
+            return (v - 5.5) / 5.5
+        if COP.g_cop_contact_active and not (np.isnan(cop_curr_x) or np.isnan(cop_curr_y)):
+            self._dir_cop_dot.setData(x=[_norm_x(cop_curr_x)], y=[_norm_y(cop_curr_y)],
+                                       brush='g', size=10)
+        else:
+            self._dir_cop_dot.setData(x=[], y=[])
+        if COP.g_cop_contact_active and not (np.isnan(bbox_cx) or np.isnan(bbox_cy)):
+            self._dir_bbox_dot.setData(x=[_norm_x(bbox_cx)], y=[_norm_y(bbox_cy)],
+                                        brush='b', size=10)
+        else:
+            self._dir_bbox_dot.setData(x=[], y=[])
 
         # Magnitude: proportional length
         pzt_mag_len = max(min((pzt_mag_val / 5.0) * 0.65, 0.65), 0.01)

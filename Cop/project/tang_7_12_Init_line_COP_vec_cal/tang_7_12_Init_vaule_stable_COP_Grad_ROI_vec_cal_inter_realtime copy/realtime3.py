@@ -132,13 +132,15 @@ class RealTimePlot:
         self._cop_base_y = 0.0              # 初始CoP Y
         self._cop_delta_x = 0.0             # CoP偏移X
         self._cop_delta_y = 0.0             # CoP偏移Y
-        self._bbox_cx = float('nan')        # 包围盒中心X
-        self._bbox_cy = float('nan')        # 包围盒中心Y
         self._total_press_val = 0.0         # 总压力值
         self._cop_state = 0                 # 接触状态
         self._pre_init_trail_x = []         # 初始COP确定前的轨迹X
         self._pre_init_trail_y = []         # 初始COP确定前的轨迹Y
         self._prev_init_flag = False        # 前一帧的初始COP确定标志，用于检测reset
+        self._grad_angle_deg = 0.0          # 梯度ROI方向角度
+        self._grad_mag = 0.0                # 梯度ROI幅值
+        self._cop_angle_deg = 0.0           # 纯COP位移角度
+        self._cop_mag = 0.0                 # 纯COP位移幅值
 
     def init_history(self):
         hist_len = PLOT_MAG_HISTORY_LEN
@@ -221,19 +223,28 @@ class RealTimePlot:
         self.p_dir.hideAxis('left'); self.p_dir.hideAxis('bottom')
         self.p_dir.setXRange(-1.2, 1.2); self.p_dir.setYRange(-1.2, 1.2); self.p_dir.setAspectLocked()
         self._dir_pzt = self._make_arrow_parts(self.p_dir)
+        self._dir_grad = self._make_arrow_parts(self.p_dir)
+        self._dir_cop = self._make_arrow_parts(self.p_dir)
         self._update_arrow(self._dir_pzt, 0, 0.45, 'r')
+        self._update_arrow(self._dir_grad, 0, 0.40, 'g')
+        self._update_arrow(self._dir_cop, 0, 0.35, 'b')
         self._dir_txt_pzt = pg.TextItem("", anchor=(0, 1))
         self.p_dir.addItem(self._dir_txt_pzt)
-        self._dir_bbox_dot = pg.ScatterPlotItem()
-        self.p_dir.addItem(self._dir_bbox_dot)
-        self._dir_cop_dot = pg.ScatterPlotItem()
-        self.p_dir.addItem(self._dir_cop_dot)
+        # 图例
+        for label, color, y in [("Fused", "red", 1.2), ("Grad", "green", 1.1), ("COP", "blue", 1.0)]:
+            t = pg.TextItem(label, color=color, anchor=(1, 0.5))
+            t.setPos(1.15, y)
+            self.p_dir.addItem(t)
 
         self.p_mag = self.win.addPlot(row=0, col=3, title="Magnitude")
         self.p_mag.hideAxis('left'); self.p_mag.hideAxis('bottom')
         self.p_mag.setXRange(-0.8, 0.8); self.p_mag.setYRange(-0.8, 0.8); self.p_mag.setAspectLocked()
         self._mag_pzt = self._make_arrow_parts(self.p_mag)
+        self._mag_grad = self._make_arrow_parts(self.p_mag)
+        self._mag_cop = self._make_arrow_parts(self.p_mag)
         self._update_arrow(self._mag_pzt, 0, 0.10, 'r')
+        self._update_arrow(self._mag_grad, 0, 0.08, 'g')
+        self._update_arrow(self._mag_cop, 0, 0.06, 'b')
         self._mag_txt_pzt = pg.TextItem("", anchor=(0, 1))
         self.p_mag.addItem(self._mag_txt_pzt)
 
@@ -291,7 +302,9 @@ class RealTimePlot:
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
                  cal_fx_val=None, cal_fy_val=None, cal_angle_deg=None, cal_mag_val=None,
-                 cop_state=0, cop_x=None, cop_y=None, bbox_cx=None, bbox_cy=None):
+                 cop_state=0,
+                 grad_angle_deg=0.0, grad_mag=0.0,
+                 cop_angle_deg=0.0, cop_mag=0.0):
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
             self._pzt_mag_val = pzt_mag_val
@@ -303,19 +316,21 @@ class RealTimePlot:
             self._cop_base_y = cop_base_y
             self._cop_delta_x = cop_delta_x
             self._cop_delta_y = cop_delta_y
-            self._bbox_cx = bbox_cx if bbox_cx is not None else float('nan')
-            self._bbox_cy = bbox_cy if bbox_cy is not None else float('nan')
             self._total_press_val = total_press_val
+            self._grad_angle_deg = grad_angle_deg
+            self._grad_mag = grad_mag
+            self._cop_angle_deg = cop_angle_deg
+            self._cop_mag = cop_mag
 
             # 初始COP确定前：累积COP轨迹；检测reset时清空
-            if not COP.g_cop_contact_active:
+            if not COP.g_cop_contact_init_flag:
                 if self._prev_init_flag:  # True→False：reset 发生
                     self._pre_init_trail_x.clear()
                     self._pre_init_trail_y.clear()
                 if not np.isnan(cop_curr_x):
                     self._pre_init_trail_x.append(cop_curr_x)
                     self._pre_init_trail_y.append(cop_curr_y)
-            self._prev_init_flag = COP.g_cop_contact_active
+            self._prev_init_flag = COP.g_cop_contact_init_flag
 
             self.adc_mag_history.append(pzt_mag_val)
             self.pzt_fz_history.append(total_press_val)
@@ -348,40 +363,33 @@ class RealTimePlot:
             cop_curr_x = self._cop_curr_x; cop_curr_y = self._cop_curr_y
             cop_base_x = self._cop_base_x; cop_base_y = self._cop_base_y
             cop_delta_x = self._cop_delta_x; cop_delta_y = self._cop_delta_y
-            bbox_cx = self._bbox_cx; bbox_cy = self._bbox_cy
             cop_state = self._cop_state
+            grad_angle_deg = self._grad_angle_deg
+            grad_mag = self._grad_mag
+            cop_angle_deg = self._cop_angle_deg
+            cop_mag = self._cop_mag
             grad_arr = np.zeros((12, 7, 2))
 
         # 状态显示
-        _state_names = {0: "未接触", 1: "接触中"}
-        self.win.setWindowTitle(f"RealTime2 — {_state_names.get(cop_state, '?')}")
+        _state_names = {0: "未接触", 1: "粗略测量", 2: "精细测量"}
+        self.win.setWindowTitle(f"RealTime3 — {_state_names.get(cop_state, '?')}")
 
-        # Direction: PZT=red
+        # Direction: Fused=红, Grad=绿, COP=蓝
         fs = self._font_size(12)
         self._update_arrow(self._dir_pzt, pzt_angle_deg, 0.45, 'r')
-        self._dir_txt_pzt.setHtml(self._html(f'PZT_Angle: {pzt_angle_deg:.1f}°', 'red', fs))
+        self._update_arrow(self._dir_grad, grad_angle_deg, 0.40, 'g')
+        self._update_arrow(self._dir_cop, cop_angle_deg, 0.35, 'b')
+        self._dir_txt_pzt.setHtml(self._html(f'F:{pzt_angle_deg:.0f} G:{grad_angle_deg:.0f} C:{cop_angle_deg:.0f}', 'red', fs))
         self._dir_txt_pzt.setPos(0.75, 1.15)
 
-        # Bbox中心(蓝) 和 COP中心(绿) 归一化到 Direction 图坐标
-        def _norm_x(v):
-            return (v - 3.0) / 3.0
-        def _norm_y(v):
-            return (v - 5.5) / 5.5
-        if COP.g_cop_contact_active and not (np.isnan(cop_curr_x) or np.isnan(cop_curr_y)):
-            self._dir_cop_dot.setData(x=[_norm_x(cop_curr_x)], y=[_norm_y(cop_curr_y)],
-                                       brush='g', size=10)
-        else:
-            self._dir_cop_dot.setData(x=[], y=[])
-        if COP.g_cop_contact_active and not (np.isnan(bbox_cx) or np.isnan(bbox_cy)):
-            self._dir_bbox_dot.setData(x=[_norm_x(bbox_cx)], y=[_norm_y(bbox_cy)],
-                                        brush='b', size=10)
-        else:
-            self._dir_bbox_dot.setData(x=[], y=[])
-
-        # Magnitude
+        # Magnitude: Fused=红, Grad=绿, COP=蓝
         pzt_mag_len = max(min((pzt_mag_val / 5.0) * 0.65, 0.65), 0.01)
+        grad_mag_len = max(min((grad_mag / 500.0) * 0.65, 0.65), 0.01)
+        cop_mag_len = max(min((cop_mag / 5.0) * 0.65, 0.65), 0.01)
         self._update_arrow(self._mag_pzt, pzt_angle_deg, pzt_mag_len, 'r')
-        self._mag_txt_pzt.setHtml(self._html(f'PZT_Mag: {pzt_mag_val:.1f}', 'red', fs))
+        self._update_arrow(self._mag_grad, grad_angle_deg, grad_mag_len, 'g')
+        self._update_arrow(self._mag_cop, cop_angle_deg, cop_mag_len, 'b')
+        self._mag_txt_pzt.setHtml(self._html(f'F:{pzt_mag_val:.0f} G:{grad_mag:.0f} C:{cop_mag:.0f}', 'red', fs))
         self._mag_txt_pzt.setPos(0.35, 0.75)
 
         # Time-series
@@ -397,7 +405,7 @@ class RealTimePlot:
             )
 
         # Pressure table + CoP + Gradient
-        if COP.g_cop_contact_active:
+        if COP.g_cop_contact_init_flag:
             cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
             self._cell_grid.set_data(press_table_arr, cell_vmax)
             for row_idx in range(12):

@@ -227,6 +227,7 @@ def compute_contact_stats(subtracted_frame):
         'min_row': min_row, 'max_row': max_row,
         'min_col': min_col, 'max_col': max_col,
         'cop_x': cop_x, 'cop_y': cop_y,
+        'bbox_cx': bbox_cx, 'bbox_cy': bbox_cy,
         'asym_x': asym_x / active_total,
         'asym_y': asym_y / active_total,
     }
@@ -236,7 +237,8 @@ def compute_contact_stats(subtracted_frame):
 def compute_pressure_direction(subtracted_frame):
     """
     输入：基线减除后的84通道压力数据（flat或2d均可）
-    输出: (angle_deg, magnitude, planar_x, planar_y, confidence, contact_active)
+    输出: (angle_deg, magnitude, planar_x, planar_y, confidence, contact_active,
+           cop_x, cop_y, bbox_cx, bbox_cy)
     """
     global g_cop_anchor_x, g_cop_anchor_y, g_cop_last_x, g_cop_last_y
     global g_cop_smooth_x, g_cop_smooth_y
@@ -248,8 +250,10 @@ def compute_pressure_direction(subtracted_frame):
         # 弱接触或无有效cell
         if g_cop_anchor_x is not None:
             angle, mag = _compute_vector_angle(g_cop_smooth_x, -g_cop_smooth_y)
-            return angle, mag, g_cop_smooth_x, -g_cop_smooth_y, 0.0, g_cop_contact_active
-        return 0.0, 0.0, 0.0, 0.0, 0.0, g_cop_contact_active
+            return (angle, mag, g_cop_smooth_x, -g_cop_smooth_y, 0.0, g_cop_contact_active,
+                    float('nan'), float('nan'), float('nan'), float('nan'))
+        return (0.0, 0.0, 0.0, 0.0, 0.0, g_cop_contact_active,
+                float('nan'), float('nan'), float('nan'), float('nan'))
 
     cop_x, cop_y = stats['cop_x'], stats['cop_y']
 
@@ -259,7 +263,8 @@ def compute_pressure_direction(subtracted_frame):
         g_cop_anchor_y = cop_y
         g_cop_last_x = cop_x
         g_cop_last_y = cop_y
-        return 0.0, 0.0, 0.0, 0.0, 0.0, g_cop_contact_active
+        return (0.0, 0.0, 0.0, 0.0, 0.0, g_cop_contact_active,
+                cop_x, cop_y, stats['bbox_cx'], stats['bbox_cy'])
 
     anchor_x = g_cop_anchor_x
     anchor_y = g_cop_anchor_y
@@ -300,7 +305,8 @@ def compute_pressure_direction(subtracted_frame):
     confidence = (activity * 0.35 + span * 0.2 + pressure_ratio * 0.3 + peak_ratio * 0.15)
     confidence = min(max(confidence, 0.0), 1.0)
 
-    return (angle_deg, magnitude, planar_x, planar_y, confidence, g_cop_contact_active)
+    return (angle_deg, magnitude, planar_x, planar_y, confidence, g_cop_contact_active,
+            cop_x, cop_y, stats['bbox_cx'], stats['bbox_cy'])
 
 
 # ===================== 重置基线 =====================
@@ -316,13 +322,15 @@ def get_pzt_analysis(raw_adc_data):
     """
     完整的单帧处理管线。
     输入: 84通道原始ADC数据
-    输出: (angle_deg, magnitude, planar_x, planar_y, confidence, contact_active)
+    输出: (angle_deg, magnitude, planar_x, planar_y, confidence, contact_active,
+           cop_x, cop_y, bbox_cx, bbox_cy)
     """
     if len(raw_adc_data) != COP_SENSOR_COUNT:
         raise ValueError(f"ADC数据长度必须为{COP_SENSOR_COUNT}")
 
     subtracted = subtract_baseline(raw_adc_data, is_idle=False)
     if not update_contact_state(raw_adc_data, subtracted):
-        return 0.0, 0.0, 0.0, 0.0, 0.0, False
+        return (0.0, 0.0, 0.0, 0.0, 0.0, False,
+                float('nan'), float('nan'), float('nan'), float('nan'))
 
     return compute_pressure_direction(subtracted)

@@ -16,7 +16,7 @@ import calibrate
 import importlib
 
 # ===================== 配置 =====================
-MAIN_REALTIME_MODULE = "realtime2"           # "realtime"=全显示, "realtime2"=仅压阻
+MAIN_REALTIME_MODULE = "realtime3"           # "realtime"=全显示, "realtime2"=仅压阻
 MAIN_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"  # 数据保存根目录
 
 realtime = importlib.import_module(MAIN_REALTIME_MODULE)
@@ -111,9 +111,12 @@ def data_loop():
     else:
         print("💡 未找到标定文件")
 
-    buf_force_fx = deque(maxlen=5)
-    buf_force_fy = deque(maxlen=5)
-    buf_force_fz = deque(maxlen=5)
+    median_filt_window = 5
+    buf_cop_delta_x = deque(maxlen=median_filt_window)
+    buf_cop_delta_y = deque(maxlen=median_filt_window)
+    buf_force_fx = deque(maxlen=median_filt_window)
+    buf_force_fy = deque(maxlen=median_filt_window)
+    buf_force_fz = deque(maxlen=median_filt_window)
 
     _NAN6 = [float('nan')] * 6  # 力传感器占位
 
@@ -131,24 +134,28 @@ def data_loop():
 
         # ---- 计算 PZT / CoP ----
         if press_item is not None:
-            pzt_angle_deg, pzt_mag, planar_x, planar_y, confidence, contact_active, \
-                cop_x, cop_y, bbox_cx, bbox_cy = COP.get_pzt_analysis(press_item["data"])
-            pzt_mag_val = pzt_mag
-            cop_state = 1 if contact_active else 0
-            total_press_val = float(np.sum(press_item["data"]))
-            base_sub_arr = np.zeros(84)  # 压力表留空或后续适配
-            cop_curr_x = cop_x
-            cop_curr_y = cop_y
-            cop_base_x = cop_base_y = 0.0
-            cop_delta_x_filt = planar_x
-            cop_delta_y_filt = -planar_y
+            base_sub_arr = COP.subtract_baseline(press_item["data"])
+            cop_res = COP.compute_pressure_direction(base_sub_arr)
+            cop_curr_x, cop_curr_y = cop_res[0], cop_res[1]
+            cop_delta_x, cop_delta_y = cop_res[6], cop_res[7]
+            cop_base_x, cop_base_y = cop_res[8], cop_res[9]
+            cop_state = cop_res[10]
+            grad_angle_deg, grad_mag = cop_res[11], cop_res[12]
+            fused_angle_deg, fused_mag = cop_res[13], cop_res[14]
+            cop_angle_deg, cop_mag = cop_res[15], cop_res[16]
+            total_press_val = np.sum(press_item["data"])
+
+            buf_cop_delta_x.append(cop_delta_x)
+            buf_cop_delta_y.append(cop_delta_y)
+            cop_delta_x_filt = np.median(buf_cop_delta_x)
+            cop_delta_y_filt = np.median(buf_cop_delta_y)
+            pzt_angle_deg, pzt_mag_val = fused_angle_deg, fused_mag
         else:
             base_sub_arr = np.zeros(84)
-            cop_curr_x = cop_curr_y = cop_base_x = cop_base_y = 0.0
-            cop_x = cop_y = bbox_cx = bbox_cy = float('nan')
+            cop_curr_x = cop_curr_y = cop_delta_x = cop_delta_y = cop_base_x = cop_base_y = float('nan')
+            cop_delta_x_filt = cop_delta_y_filt = 0.0
             pzt_angle_deg = pzt_mag_val = 0.0
             total_press_val = 0.0
-            cop_delta_x_filt = cop_delta_y_filt = 0.0
             cop_state = 0
 
         # ---- 计算 Force ----
@@ -212,9 +219,10 @@ def data_loop():
             force_fx_filt, force_fy_filt, force_fz_filt,
             cal_fx_val, cal_fy_val, cal_angle_deg, cal_mag_val,
             cop_state=cop_state,
-            cop_x=cop_x, cop_y=cop_y, bbox_cx=bbox_cx, bbox_cy=bbox_cy,
+            grad_angle_deg=grad_angle_deg, grad_mag=grad_mag,
+            cop_angle_deg=cop_angle_deg, cop_mag=cop_mag,
         )
-        if COP.g_cop_contact_active:
+        if COP.g_cop_contact_init_flag:
             g_main_plot.append_full_data(
                 rel_time_ms,
                 pzt_angle_deg, pzt_mag_val, total_press_val,
