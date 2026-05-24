@@ -132,15 +132,21 @@ class RealTimePlot:
         self._cop_base_y = 0.0              # 初始CoP Y
         self._cop_delta_x = 0.0             # CoP偏移X
         self._cop_delta_y = 0.0             # CoP偏移Y
+        self._lcc_cx = float('nan')         # 最大连通域中心X
+        self._lcc_cy = float('nan')         # 最大连通域中心Y
+        self._skew_x = float('nan')         # 不对称性X
+        self._skew_y = float('nan')         # 不对称性Y
+        self._skew_pt_x = float('nan')      # 不对称偏移点X
+        self._skew_pt_y = float('nan')      # 不对称偏移点Y
+        self._angle_init_to_curr = float('nan')  # 初始→当前COP角度
+        self._angle_skew = float('nan')          # 不对称方向角度
+        self._lcc_min_r = self._lcc_max_r = float('nan')
+        self._lcc_min_c = self._lcc_max_c = float('nan')
         self._total_press_val = 0.0         # 总压力值
         self._cop_state = 0                 # 接触状态
         self._pre_init_trail_x = []         # 初始COP确定前的轨迹X
         self._pre_init_trail_y = []         # 初始COP确定前的轨迹Y
         self._prev_init_flag = False        # 前一帧的初始COP确定标志，用于检测reset
-        self._grad_angle_deg = 0.0          # 梯度ROI方向角度
-        self._grad_mag = 0.0                # 梯度ROI幅值
-        self._cop_angle_deg = 0.0           # 纯COP位移角度
-        self._cop_mag = 0.0                 # 纯COP位移幅值
 
     def init_history(self):
         hist_len = PLOT_MAG_HISTORY_LEN
@@ -223,28 +229,21 @@ class RealTimePlot:
         self.p_dir.hideAxis('left'); self.p_dir.hideAxis('bottom')
         self.p_dir.setXRange(-1.2, 1.2); self.p_dir.setYRange(-1.2, 1.2); self.p_dir.setAspectLocked()
         self._dir_pzt = self._make_arrow_parts(self.p_dir)
-        self._dir_grad = self._make_arrow_parts(self.p_dir)
-        self._dir_cop = self._make_arrow_parts(self.p_dir)
         self._update_arrow(self._dir_pzt, 0, 0.45, 'r')
-        self._update_arrow(self._dir_grad, 0, 0.40, 'g')
-        self._update_arrow(self._dir_cop, 0, 0.35, 'b')
         self._dir_txt_pzt = pg.TextItem("", anchor=(0, 1))
         self.p_dir.addItem(self._dir_txt_pzt)
-        # 图例
-        for label, color, y in [("Fused", "red", 1.2), ("Grad", "green", 1.1), ("COP", "blue", 1.0)]:
-            t = pg.TextItem(label, color=color, anchor=(1, 0.5))
-            t.setPos(1.15, y)
-            self.p_dir.addItem(t)
+        self._dir_init_to_curr = self._make_arrow_parts(self.p_dir)
+        self._dir_txt_init_to_curr = pg.TextItem("", anchor=(0, 1))
+        self.p_dir.addItem(self._dir_txt_init_to_curr)
+        self._dir_skew = self._make_arrow_parts(self.p_dir)
+        self._dir_txt_skew = pg.TextItem("", anchor=(0, 1))
+        self.p_dir.addItem(self._dir_txt_skew)
 
         self.p_mag = self.win.addPlot(row=0, col=3, title="Magnitude")
         self.p_mag.hideAxis('left'); self.p_mag.hideAxis('bottom')
         self.p_mag.setXRange(-0.8, 0.8); self.p_mag.setYRange(-0.8, 0.8); self.p_mag.setAspectLocked()
         self._mag_pzt = self._make_arrow_parts(self.p_mag)
-        self._mag_grad = self._make_arrow_parts(self.p_mag)
-        self._mag_cop = self._make_arrow_parts(self.p_mag)
         self._update_arrow(self._mag_pzt, 0, 0.10, 'r')
-        self._update_arrow(self._mag_grad, 0, 0.08, 'g')
-        self._update_arrow(self._mag_cop, 0, 0.06, 'b')
         self._mag_txt_pzt = pg.TextItem("", anchor=(0, 1))
         self.p_mag.addItem(self._mag_txt_pzt)
 
@@ -275,6 +274,19 @@ class RealTimePlot:
         self._cop_dots = pg.ScatterPlotItem()
         self.p_table.addItem(self._cop_dots)
         self._cop_arr, self._cop_hL, self._cop_hR = self._make_arrow_parts(self.p_table)
+        # LCC 矩形边框（4条线）
+        self._lcc_rect_lines = [self.p_table.plot([], [], pen=pg.mkPen('#CCAA00', width=2)) for _ in range(4)]
+        # LCC 中心 + 不对称偏移点
+        self._lcc_dot = pg.ScatterPlotItem()
+        self.p_table.addItem(self._lcc_dot)
+        self._skew_pt_dot = pg.ScatterPlotItem()
+        self.p_table.addItem(self._skew_pt_dot)
+        # 初始COP → 当前COP 箭头
+        self._init_to_curr_arrow = list(self._make_arrow_parts(self.p_table))
+        # 图例
+        self._legend = pg.TextItem("", anchor=(0, 0))
+        self.p_table.addItem(self._legend)
+        self._legend.setPos(0, -1.2)
 
         self.p_grad = self.win.addPlot(row=1, col=3, rowspan=3, title="Gradient Arrows")
         self.p_grad.hideAxis('left'); self.p_grad.hideAxis('bottom')
@@ -302,9 +314,12 @@ class RealTimePlot:
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
                  cal_fx_val=None, cal_fy_val=None, cal_angle_deg=None, cal_mag_val=None,
-                 cop_state=0,
-                 grad_angle_deg=0.0, grad_mag=0.0,
-                 cop_angle_deg=0.0, cop_mag=0.0):
+                 cop_state=0, lcc_cx=None, lcc_cy=None,
+                 skew_x=None, skew_y=None,
+                 skew_pt_x=None, skew_pt_y=None,
+                 angle_init_to_curr=None, angle_skew=None,
+                 lcc_min_r=None, lcc_max_r=None,
+                 lcc_min_c=None, lcc_max_c=None):
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
             self._pzt_mag_val = pzt_mag_val
@@ -316,11 +331,19 @@ class RealTimePlot:
             self._cop_base_y = cop_base_y
             self._cop_delta_x = cop_delta_x
             self._cop_delta_y = cop_delta_y
+            self._lcc_cx = lcc_cx if lcc_cx is not None else float('nan')
+            self._lcc_cy = lcc_cy if lcc_cy is not None else float('nan')
+            self._skew_x = skew_x if skew_x is not None else float('nan')
+            self._skew_y = skew_y if skew_y is not None else float('nan')
+            self._skew_pt_x = skew_pt_x if skew_pt_x is not None else float('nan')
+            self._skew_pt_y = skew_pt_y if skew_pt_y is not None else float('nan')
+            self._angle_init_to_curr = angle_init_to_curr if angle_init_to_curr is not None else float('nan')
+            self._angle_skew = angle_skew if angle_skew is not None else float('nan')
+            self._lcc_min_r = lcc_min_r if lcc_min_r is not None else float('nan')
+            self._lcc_max_r = lcc_max_r if lcc_max_r is not None else float('nan')
+            self._lcc_min_c = lcc_min_c if lcc_min_c is not None else float('nan')
+            self._lcc_max_c = lcc_max_c if lcc_max_c is not None else float('nan')
             self._total_press_val = total_press_val
-            self._grad_angle_deg = grad_angle_deg
-            self._grad_mag = grad_mag
-            self._cop_angle_deg = cop_angle_deg
-            self._cop_mag = cop_mag
 
             # 初始COP确定前：累积COP轨迹；检测reset时清空
             if not COP.g_cop_contact_init_flag:
@@ -363,33 +386,49 @@ class RealTimePlot:
             cop_curr_x = self._cop_curr_x; cop_curr_y = self._cop_curr_y
             cop_base_x = self._cop_base_x; cop_base_y = self._cop_base_y
             cop_delta_x = self._cop_delta_x; cop_delta_y = self._cop_delta_y
+            lcc_cx = self._lcc_cx; lcc_cy = self._lcc_cy
+            skew_x = self._skew_x; skew_y = self._skew_y
+            skew_pt_x = self._skew_pt_x; skew_pt_y = self._skew_pt_y
+            angle_init_to_curr = self._angle_init_to_curr
+            angle_skew = self._angle_skew
+            lcc_min_r = self._lcc_min_r; lcc_max_r = self._lcc_max_r
+            lcc_min_c = self._lcc_min_c; lcc_max_c = self._lcc_max_c
             cop_state = self._cop_state
-            grad_angle_deg = self._grad_angle_deg
-            grad_mag = self._grad_mag
-            cop_angle_deg = self._cop_angle_deg
-            cop_mag = self._cop_mag
-            grad_arr = np.zeros((12, 7, 2))
+            with COP.g_cop_grad_table_lock:
+                grad_arr = COP.g_cop_grad_table_arr.copy()
 
         # 状态显示
         _state_names = {0: "未接触", 1: "粗略测量", 2: "精细测量"}
-        self.win.setWindowTitle(f"RealTime3 — {_state_names.get(cop_state, '?')}")
+        self.win.setWindowTitle(f"RealTime2 — {_state_names.get(cop_state, '?')}")
 
-        # Direction: Fused=红, Grad=绿, COP=蓝
+        # Direction: PZT=red
         fs = self._font_size(12)
         self._update_arrow(self._dir_pzt, pzt_angle_deg, 0.45, 'r')
-        self._update_arrow(self._dir_grad, grad_angle_deg, 0.40, 'g')
-        self._update_arrow(self._dir_cop, cop_angle_deg, 0.35, 'b')
-        self._dir_txt_pzt.setHtml(self._html(f'F:{pzt_angle_deg:.0f} G:{grad_angle_deg:.0f} C:{cop_angle_deg:.0f}', 'red', fs))
+        self._dir_txt_pzt.setHtml(self._html(f'PZT_Angle: {pzt_angle_deg:.1f}°', 'red', fs))
         self._dir_txt_pzt.setPos(0.75, 1.15)
 
-        # Magnitude: Fused=红, Grad=绿, COP=蓝
+        # Direction: 初始COP→当前COP = blue
+        if not np.isnan(angle_init_to_curr):
+            self._update_arrow(self._dir_init_to_curr, angle_init_to_curr, 0.40, 'b')
+            self._dir_txt_init_to_curr.setHtml(self._html(f'Init→Curr: {angle_init_to_curr:.1f}°', 'blue', fs))
+        else:
+            self._update_arrow(self._dir_init_to_curr, 0, 0.0, 'b')
+            self._dir_txt_init_to_curr.setHtml("")
+        self._dir_txt_init_to_curr.setPos(0.75, 0.95)
+
+        # Direction: 不对称方向 = orange
+        if not np.isnan(angle_skew):
+            self._update_arrow(self._dir_skew, angle_skew, 0.40, 'orange')
+            self._dir_txt_skew.setHtml(self._html(f'Skew: {angle_skew:.1f}°', 'orange', fs))
+        else:
+            self._update_arrow(self._dir_skew, 0, 0.0, 'orange')
+            self._dir_txt_skew.setHtml("")
+        self._dir_txt_skew.setPos(0.75, 0.75)
+
+        # Magnitude
         pzt_mag_len = max(min((pzt_mag_val / 5.0) * 0.65, 0.65), 0.01)
-        grad_mag_len = max(min((grad_mag / 500.0) * 0.65, 0.65), 0.01)
-        cop_mag_len = max(min((cop_mag / 5.0) * 0.65, 0.65), 0.01)
         self._update_arrow(self._mag_pzt, pzt_angle_deg, pzt_mag_len, 'r')
-        self._update_arrow(self._mag_grad, grad_angle_deg, grad_mag_len, 'g')
-        self._update_arrow(self._mag_cop, cop_angle_deg, cop_mag_len, 'b')
-        self._mag_txt_pzt.setHtml(self._html(f'F:{pzt_mag_val:.0f} G:{grad_mag:.0f} C:{cop_mag:.0f}', 'red', fs))
+        self._mag_txt_pzt.setHtml(self._html(f'PZT_Mag: {pzt_mag_val:.1f}', 'red', fs))
         self._mag_txt_pzt.setPos(0.35, 0.75)
 
         # Time-series
@@ -412,8 +451,8 @@ class RealTimePlot:
                 for col_idx in range(7):
                     cell_val = press_table_arr[row_idx, col_idx]
                     self._cell_txts[row_idx][col_idx].setText(f"{cell_val:.0f}" if cell_val > 0 else "")
-            # CoP dots + arrow
-            spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+            # CoP dots + arrow (绿色=COP, 蓝色x=初始COP)
+            spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12, 'symbol': 'o'}]
             if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
                 spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
             self._cop_dots.setData(spots=spots)
@@ -425,6 +464,61 @@ class RealTimePlot:
                 self._cop_arr.setData([], [])
                 self._cop_hL.setData([], [])
                 self._cop_hR.setData([], [])
+
+            # LCC 中心（黄色方块）
+            if not np.isnan(lcc_cx) and not np.isnan(lcc_cy):
+                self._lcc_dot.setData(x=[lcc_cx], y=[lcc_cy], brush='y', symbol='s', size=14)
+            else:
+                self._lcc_dot.setData(x=[], y=[])
+
+            # LCC 矩形边框
+            has_rect = not (np.isnan(lcc_min_r) or np.isnan(lcc_max_r) or
+                           np.isnan(lcc_min_c) or np.isnan(lcc_max_c))
+            if has_rect:
+                x0, x1 = lcc_min_c - 0.5, lcc_max_c + 0.5
+                y0, y1 = lcc_min_r - 0.5, lcc_max_r + 0.5
+                self._lcc_rect_lines[0].setData([x0, x1], [y0, y0])  # top
+                self._lcc_rect_lines[1].setData([x0, x1], [y1, y1])  # bottom
+                self._lcc_rect_lines[2].setData([x0, x0], [y0, y1])  # left
+                self._lcc_rect_lines[3].setData([x1, x1], [y0, y1])  # right
+            else:
+                for ln in self._lcc_rect_lines:
+                    ln.setData([], [])
+
+            # 不对称偏移点（橙色圆点）
+            has_skew = not (np.isnan(skew_pt_x) or np.isnan(skew_pt_y))
+            if has_skew:
+                self._skew_pt_dot.setData(x=[skew_pt_x], y=[skew_pt_y], brush='orange', symbol='o', size=12)
+            else:
+                self._skew_pt_dot.setData(x=[], y=[])
+
+            # 初始COP → 当前COP 箭头（蓝色）
+            has_cop = not (np.isnan(cop_curr_x) or np.isnan(cop_curr_y))
+            has_base = not (np.isnan(cop_base_x) or np.isnan(cop_base_y))
+            if has_cop and has_base:
+                dx, dy = cop_curr_x - cop_base_x, cop_curr_y - cop_base_y
+                dist = np.hypot(dx, dy)
+                if dist > 0.03:
+                    ang = np.degrees(np.arctan2(dy, dx))
+                    self._update_arrow(tuple(self._init_to_curr_arrow), ang, dist, 'b', (cop_base_x, cop_base_y))
+                else:
+                    for p in self._init_to_curr_arrow: p.setData([], [])
+            else:
+                for p in self._init_to_curr_arrow: p.setData([], [])
+
+            # 角度文字和颜色图例
+            a1_str = f"{angle_init_to_curr:.1f}" if not np.isnan(angle_init_to_curr) else "--"
+            a2_str = f"{angle_skew:.1f}" if not np.isnan(angle_skew) else "--"
+            legend_html = (
+                f'<span style="color:black;font-size:10pt;font-weight:bold">Legend:</span><br>'
+                f'<span style="color:blue">✚ InitCOP</span>  '
+                f'<span style="color:green">● CurrCOP</span><br>'
+                f'<span style="color:#CCAA00">■ LCC</span>  '
+                f'<span style="color:orange">● SkewPt</span><br>'
+                f'<span style="color:blue">→ Init→Curr: {a1_str}°</span><br>'
+                f'<span style="color:orange">→ Skew: {a2_str}°</span>'
+            )
+            self._legend.setHtml(legend_html)
 
             # Gradient arrows
             for grad_idx, (grad_ln, grad_dot) in enumerate(zip(self._g_lines, self._g_heads)):
@@ -453,6 +547,11 @@ class RealTimePlot:
             self._cop_arr.setData([], [])
             self._cop_hL.setData([], [])
             self._cop_hR.setData([], [])
+            self._lcc_dot.setData(x=[], y=[])
+            self._skew_pt_dot.setData(x=[], y=[])
+            for ln in self._lcc_rect_lines: ln.setData([], [])
+            for p in self._init_to_curr_arrow: p.setData([], [])
+            self._legend.setHtml("")
             for grad_ln, grad_dot in zip(self._g_lines, self._g_heads):
                 grad_ln.setData([], [])
                 grad_dot.setData(x=[], y=[])

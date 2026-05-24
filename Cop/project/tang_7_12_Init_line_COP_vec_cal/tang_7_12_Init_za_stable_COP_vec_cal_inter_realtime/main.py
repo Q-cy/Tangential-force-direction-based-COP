@@ -131,8 +131,10 @@ def data_loop():
 
         # ---- 计算 PZT / CoP ----
         if press_item is not None:
-            pzt_angle_deg, pzt_mag, planar_x, planar_y, confidence, contact_active, \
-                cop_x, cop_y, bbox_cx, bbox_cy = COP.get_pzt_analysis(press_item["data"])
+            (pzt_angle_deg, pzt_mag, planar_x, planar_y, confidence, contact_active,
+             cop_x, cop_y, bbox_cx, bbox_cy,
+             asym_x, asym_y, drift_x, drift_y, motion_x, motion_y
+             ) = COP.get_pzt_analysis(press_item["data"])
             pzt_mag_val = pzt_mag
             cop_state = 1 if contact_active else 0
             total_press_val = float(np.sum(press_item["data"]))
@@ -142,10 +144,15 @@ def data_loop():
             cop_base_x = cop_base_y = 0.0
             cop_delta_x_filt = planar_x
             cop_delta_y_filt = -planar_y
+            # 三分量角度
+            angle_asym, _ = angle.compute_vector_angle(asym_x, asym_y)
+            angle_drift, _ = angle.compute_vector_angle(drift_x, drift_y)
+            angle_motion, _ = angle.compute_vector_angle(motion_x, motion_y)
         else:
             base_sub_arr = np.zeros(84)
             cop_curr_x = cop_curr_y = cop_base_x = cop_base_y = 0.0
             cop_x = cop_y = bbox_cx = bbox_cy = float('nan')
+            angle_asym = angle_drift = angle_motion = float('nan')
             pzt_angle_deg = pzt_mag_val = 0.0
             total_press_val = 0.0
             cop_delta_x_filt = cop_delta_y_filt = 0.0
@@ -213,6 +220,7 @@ def data_loop():
             cal_fx_val, cal_fy_val, cal_angle_deg, cal_mag_val,
             cop_state=cop_state,
             cop_x=cop_x, cop_y=cop_y, bbox_cx=bbox_cx, bbox_cy=bbox_cy,
+            angle_asym=angle_asym, angle_drift=angle_drift, angle_motion=angle_motion,
         )
         if COP.g_cop_contact_active:
             g_main_plot.append_full_data(

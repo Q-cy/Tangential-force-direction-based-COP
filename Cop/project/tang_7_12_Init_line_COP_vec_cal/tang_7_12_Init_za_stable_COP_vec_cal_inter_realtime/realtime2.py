@@ -134,6 +134,9 @@ class RealTimePlot:
         self._cop_delta_y = 0.0             # CoP偏移Y
         self._bbox_cx = float('nan')        # 包围盒中心X
         self._bbox_cy = float('nan')        # 包围盒中心Y
+        self._angle_asym = float('nan')     # 不对称性角度
+        self._angle_drift = float('nan')    # 漂移角度
+        self._angle_motion = float('nan')   # 运动角度
         self._total_press_val = 0.0         # 总压力值
         self._cop_state = 0                 # 接触状态
         self._pre_init_trail_x = []         # 初始COP确定前的轨迹X
@@ -224,6 +227,15 @@ class RealTimePlot:
         self._update_arrow(self._dir_pzt, 0, 0.45, 'r')
         self._dir_txt_pzt = pg.TextItem("", anchor=(0, 1))
         self.p_dir.addItem(self._dir_txt_pzt)
+        self._dir_asym = self._make_arrow_parts(self.p_dir)
+        self._dir_drift = self._make_arrow_parts(self.p_dir)
+        self._dir_motion = self._make_arrow_parts(self.p_dir)
+        self._dir_txt_asym = pg.TextItem("", anchor=(0, 1))
+        self.p_dir.addItem(self._dir_txt_asym)
+        self._dir_txt_drift = pg.TextItem("", anchor=(0, 1))
+        self.p_dir.addItem(self._dir_txt_drift)
+        self._dir_txt_motion = pg.TextItem("", anchor=(0, 1))
+        self.p_dir.addItem(self._dir_txt_motion)
         self._dir_bbox_dot = pg.ScatterPlotItem()
         self.p_dir.addItem(self._dir_bbox_dot)
         self._dir_cop_dot = pg.ScatterPlotItem()
@@ -291,7 +303,8 @@ class RealTimePlot:
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
                  cal_fx_val=None, cal_fy_val=None, cal_angle_deg=None, cal_mag_val=None,
-                 cop_state=0, cop_x=None, cop_y=None, bbox_cx=None, bbox_cy=None):
+                 cop_state=0, cop_x=None, cop_y=None, bbox_cx=None, bbox_cy=None,
+                 angle_asym=None, angle_drift=None, angle_motion=None):
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
             self._pzt_mag_val = pzt_mag_val
@@ -305,6 +318,9 @@ class RealTimePlot:
             self._cop_delta_y = cop_delta_y
             self._bbox_cx = bbox_cx if bbox_cx is not None else float('nan')
             self._bbox_cy = bbox_cy if bbox_cy is not None else float('nan')
+            self._angle_asym = angle_asym if angle_asym is not None else float('nan')
+            self._angle_drift = angle_drift if angle_drift is not None else float('nan')
+            self._angle_motion = angle_motion if angle_motion is not None else float('nan')
             self._total_press_val = total_press_val
 
             # 初始COP确定前：累积COP轨迹；检测reset时清空
@@ -349,6 +365,9 @@ class RealTimePlot:
             cop_base_x = self._cop_base_x; cop_base_y = self._cop_base_y
             cop_delta_x = self._cop_delta_x; cop_delta_y = self._cop_delta_y
             bbox_cx = self._bbox_cx; bbox_cy = self._bbox_cy
+            angle_asym = self._angle_asym
+            angle_drift = self._angle_drift
+            angle_motion = self._angle_motion
             cop_state = self._cop_state
             grad_arr = np.zeros((12, 7, 2))
 
@@ -361,6 +380,31 @@ class RealTimePlot:
         self._update_arrow(self._dir_pzt, pzt_angle_deg, 0.45, 'r')
         self._dir_txt_pzt.setHtml(self._html(f'PZT_Angle: {pzt_angle_deg:.1f}°', 'red', fs))
         self._dir_txt_pzt.setPos(0.75, 1.15)
+
+        # 三分量箭头：Asym=orange, Drift=blue, Motion=green
+        if not np.isnan(angle_asym):
+            self._update_arrow(self._dir_asym, angle_asym, 0.35, 'orange')
+            self._dir_txt_asym.setHtml(self._html(f'Asym: {angle_asym:.1f}°', 'orange', fs))
+        else:
+            self._update_arrow(self._dir_asym, 0, 0.0, 'orange')
+            self._dir_txt_asym.setHtml("")
+        self._dir_txt_asym.setPos(0.75, 0.95)
+
+        if not np.isnan(angle_drift):
+            self._update_arrow(self._dir_drift, angle_drift, 0.35, 'b')
+            self._dir_txt_drift.setHtml(self._html(f'Drift: {angle_drift:.1f}°', 'blue', fs))
+        else:
+            self._update_arrow(self._dir_drift, 0, 0.0, 'b')
+            self._dir_txt_drift.setHtml("")
+        self._dir_txt_drift.setPos(0.75, 0.75)
+
+        if not np.isnan(angle_motion):
+            self._update_arrow(self._dir_motion, angle_motion, 0.35, 'g')
+            self._dir_txt_motion.setHtml(self._html(f'Motion: {angle_motion:.1f}°', 'green', fs))
+        else:
+            self._update_arrow(self._dir_motion, 0, 0.0, 'g')
+            self._dir_txt_motion.setHtml("")
+        self._dir_txt_motion.setPos(0.75, 0.55)
 
         # Bbox中心(蓝) 和 COP中心(绿) 归一化到 Direction 图坐标
         def _norm_x(v):

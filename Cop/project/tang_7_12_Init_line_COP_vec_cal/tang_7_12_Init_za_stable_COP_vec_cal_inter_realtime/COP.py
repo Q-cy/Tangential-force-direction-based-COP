@@ -251,9 +251,13 @@ def compute_pressure_direction(subtracted_frame):
         if g_cop_anchor_x is not None:
             angle, mag = _compute_vector_angle(g_cop_smooth_x, -g_cop_smooth_y)
             return (angle, mag, g_cop_smooth_x, -g_cop_smooth_y, 0.0, g_cop_contact_active,
-                    float('nan'), float('nan'), float('nan'), float('nan'))
+                    float('nan'), float('nan'), float('nan'), float('nan'),
+                    float('nan'), float('nan'), float('nan'), float('nan'),
+                    float('nan'), float('nan'))
         return (0.0, 0.0, 0.0, 0.0, 0.0, g_cop_contact_active,
-                float('nan'), float('nan'), float('nan'), float('nan'))
+                float('nan'), float('nan'), float('nan'), float('nan'),
+                float('nan'), float('nan'), float('nan'), float('nan'),
+                float('nan'), float('nan'))
 
     cop_x, cop_y = stats['cop_x'], stats['cop_y']
 
@@ -264,7 +268,9 @@ def compute_pressure_direction(subtracted_frame):
         g_cop_last_x = cop_x
         g_cop_last_y = cop_y
         return (0.0, 0.0, 0.0, 0.0, 0.0, g_cop_contact_active,
-                cop_x, cop_y, stats['bbox_cx'], stats['bbox_cy'])
+                cop_x, cop_y, stats['bbox_cx'], stats['bbox_cy'],
+                stats['asym_x'], stats['asym_y'],
+                0.0, 0.0, 0.0, 0.0)
 
     anchor_x = g_cop_anchor_x
     anchor_y = g_cop_anchor_y
@@ -306,7 +312,9 @@ def compute_pressure_direction(subtracted_frame):
     confidence = min(max(confidence, 0.0), 1.0)
 
     return (angle_deg, magnitude, planar_x, planar_y, confidence, g_cop_contact_active,
-            cop_x, cop_y, stats['bbox_cx'], stats['bbox_cy'])
+            cop_x, cop_y, stats['bbox_cx'], stats['bbox_cy'],
+            stats['asym_x'], stats['asym_y'],
+            drift_x, drift_y, motion_x, motion_y)
 
 
 # ===================== 重置基线 =====================
@@ -331,6 +339,8 @@ def get_pzt_analysis(raw_adc_data):
     subtracted = subtract_baseline(raw_adc_data, is_idle=False)
     if not update_contact_state(raw_adc_data, subtracted):
         return (0.0, 0.0, 0.0, 0.0, 0.0, False,
-                float('nan'), float('nan'), float('nan'), float('nan'))
+                float('nan'), float('nan'), float('nan'), float('nan'),
+                float('nan'), float('nan'), float('nan'), float('nan'),
+                float('nan'), float('nan'))
 
     return compute_pressure_direction(subtracted)

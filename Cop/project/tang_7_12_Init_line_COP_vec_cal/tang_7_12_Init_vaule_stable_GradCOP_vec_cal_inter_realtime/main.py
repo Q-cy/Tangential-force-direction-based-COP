@@ -16,7 +16,7 @@ import calibrate
 import importlib
 
 # ===================== 配置 =====================
-MAIN_REALTIME_MODULE = "realtime3"           # "realtime"=全显示, "realtime2"=仅压阻
+MAIN_REALTIME_MODULE = "realtime2"           # "realtime"=全显示, "realtime2"=仅压阻
 MAIN_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"  # 数据保存根目录
 
 realtime = importlib.import_module(MAIN_REALTIME_MODULE)
@@ -140,16 +140,23 @@ def data_loop():
             cop_delta_x, cop_delta_y = cop_res[6], cop_res[7]
             cop_base_x, cop_base_y = cop_res[8], cop_res[9]
             cop_state = cop_res[10]
-            grad_angle_deg, grad_mag = cop_res[11], cop_res[12]
-            fused_angle_deg, fused_mag = cop_res[13], cop_res[14]
-            cop_angle_deg, cop_mag = cop_res[15], cop_res[16]
+            lcc_cx, lcc_cy = cop_res[11], cop_res[12]
+            skew_x, skew_y = cop_res[13], cop_res[14]
+            skew_pt_x, skew_pt_y = cop_res[15], cop_res[16]
+            lcc_min_r, lcc_max_r = cop_res[17], cop_res[18]
+            lcc_min_c, lcc_max_c = cop_res[19], cop_res[20]
+            # 初始COP→当前COP 角度
+            angle_init_to_curr, _ = angle.compute_vector_angle(
+                cop_curr_x - cop_base_x, cop_curr_y - cop_base_y)
+            # 不对称方向角度（skew向量方向）
+            angle_skew, _ = angle.compute_vector_angle(skew_x, skew_y)
             total_press_val = np.sum(press_item["data"])
 
             buf_cop_delta_x.append(cop_delta_x)
             buf_cop_delta_y.append(cop_delta_y)
             cop_delta_x_filt = np.median(buf_cop_delta_x)
             cop_delta_y_filt = np.median(buf_cop_delta_y)
-            pzt_angle_deg, pzt_mag_val = fused_angle_deg, fused_mag
+            pzt_angle_deg, pzt_mag_val = angle.compute_PZT_angle(cop_delta_x_filt, cop_delta_y_filt)
         else:
             base_sub_arr = np.zeros(84)
             cop_curr_x = cop_curr_y = cop_delta_x = cop_delta_y = cop_base_x = cop_base_y = float('nan')
@@ -157,6 +164,12 @@ def data_loop():
             pzt_angle_deg = pzt_mag_val = 0.0
             total_press_val = 0.0
             cop_state = 0
+            lcc_cx = lcc_cy = float('nan')
+            skew_x = skew_y = float('nan')
+            skew_pt_x = skew_pt_y = float('nan')
+            angle_init_to_curr = float('nan')
+            angle_skew = float('nan')
+            lcc_min_r = lcc_max_r = lcc_min_c = lcc_max_c = float('nan')
 
         # ---- 计算 Force ----
         if force_item is not None:
@@ -219,8 +232,13 @@ def data_loop():
             force_fx_filt, force_fy_filt, force_fz_filt,
             cal_fx_val, cal_fy_val, cal_angle_deg, cal_mag_val,
             cop_state=cop_state,
-            grad_angle_deg=grad_angle_deg, grad_mag=grad_mag,
-            cop_angle_deg=cop_angle_deg, cop_mag=cop_mag,
+            lcc_cx=lcc_cx, lcc_cy=lcc_cy,
+            skew_x=skew_x, skew_y=skew_y,
+            skew_pt_x=skew_pt_x, skew_pt_y=skew_pt_y,
+            angle_init_to_curr=angle_init_to_curr,
+            angle_skew=angle_skew,
+            lcc_min_r=lcc_min_r, lcc_max_r=lcc_max_r,
+            lcc_min_c=lcc_min_c, lcc_max_c=lcc_max_c,
         )
         if COP.g_cop_contact_init_flag:
             g_main_plot.append_full_data(

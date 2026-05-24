@@ -120,6 +120,8 @@ def data_loop():
 
     _NAN6 = [float('nan')] * 6  # 力传感器占位
 
+    frame_cnt = 0
+
     while not g_main_stop_flag.is_set():
         loop_start_s = time.perf_counter()
         rel_time_ms = int((loop_start_s - start_time_s) * 1000)
@@ -157,6 +159,9 @@ def data_loop():
             pzt_angle_deg = pzt_mag_val = 0.0
             total_press_val = 0.0
             cop_state = 0
+
+        frame_cnt += 1
+        print(f"frame={frame_cnt:04d}  Angle={pzt_angle_deg:.1f}°  Mag={pzt_mag_val:.3f}  state={cop_state}")
 
         # ---- 计算 Force ----
         if force_item is not None:

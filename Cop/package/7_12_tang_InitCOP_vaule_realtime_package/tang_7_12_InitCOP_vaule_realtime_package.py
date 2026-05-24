@@ -3,7 +3,7 @@ import threading
 from collections import deque
 
 # ===================== 算法参数=====================
-COP_INIT_MEDIAN_FRAMES = 15               # 初始COP取中位数的帧数
+COP_INIT_MEDIAN_FRAMES = 20               # 初始COP取中位数的帧数
 NOISE_COLLECT_FRAMES = 20                 # 动态阈值基线采集帧数
 THRESH_K = 5                              # 阈值 = mean + K * std
 SENSOR_ROWS = 12
@@ -87,7 +87,7 @@ def compute_pressure_direction(baseline_subtracted_frame):
         noise_sum_buf.append(total_pressure)
         if len(noise_sum_buf) >= NOISE_COLLECT_FRAMES:
             sums = np.array(noise_sum_buf)
-            dynamic_thresh = float(np.mean(sums) + THRESH_K * np.std(sums))
+            dynamic_thresh = THRESH_K * float(np.mean(sums))
 
     # 低压重置
     if dynamic_thresh is not None and total_pressure < dynamic_thresh:
