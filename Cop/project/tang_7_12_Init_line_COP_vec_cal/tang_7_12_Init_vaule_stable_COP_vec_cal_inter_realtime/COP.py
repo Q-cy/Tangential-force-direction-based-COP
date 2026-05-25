@@ -9,7 +9,7 @@ import threading
 
 
 # ===================== 算法参数（仅与CoP计算相关）=====================
-COP_INIT_MEDIAN_FRAMES = 20             # 初始COP取中位数的帧数
+COP_INIT_MEDIAN_FRAMES = 10             # 初始COP取中位数的帧数
 COP_BASELINE_COLLECT_FRAMES = 20        # 基线采集帧数（用于动态阈值计算）
 COP_THRESH_K = 5                        # 阈值乘数：mean + K * std
 COP_SENSOR_ROW_CNT = 12                 # 传感器阵列行数

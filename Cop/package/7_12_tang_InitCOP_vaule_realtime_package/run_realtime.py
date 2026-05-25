@@ -1,13 +1,9 @@
-"""
-实时读取压力传感器数据，经 COP 算法计算后打印到终端。
-用法：python run_realtime.py
-退出：Ctrl+C
-"""
 import sys
 import os
 import time
 import threading
-# 将 data.py 所在目录加入 sys.path
+import numpy as np
+
 DATA_DIR = os.path.join(
     os.path.dirname(__file__),
     "..", "..", "project",
@@ -57,9 +53,12 @@ def main():
             frame_cnt += 1
             adc = item["data"]
 
-            pzt_angle, magnitude, state = cop.get_pzt_angle(adc)
+            (pzt_angle, magnitude, state, cop_x, cop_y, init_x, init_y,
+             total_press, threshold) = cop.get_pzt_angle(adc)
 
             print(f"frame={frame_cnt:04d}  Angle={pzt_angle:.1f}°  Mag={magnitude:.3f}  state={state}")
+            if not np.isnan(cop_x):
+                print(f"  COP=({cop_x:.2f},{cop_y:.2f})  Init=({init_x:.2f},{init_y:.2f})  Total={total_press:.1f}  Thresh={threshold}")
 
             time.sleep(0.005)
     except KeyboardInterrupt:
