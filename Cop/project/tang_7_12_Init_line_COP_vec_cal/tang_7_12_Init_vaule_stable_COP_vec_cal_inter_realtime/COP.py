@@ -9,7 +9,7 @@ import threading
 
 
 # ===================== 算法参数（仅与CoP计算相关）=====================
-COP_INIT_MEDIAN_FRAMES = 10             # 初始COP取中位数的帧数
+COP_INIT_MEDIAN_FRAMES = 6             # 初始COP取中位数的帧数
 COP_BASELINE_COLLECT_FRAMES = 20        # 基线采集帧数（用于动态阈值计算）
 COP_THRESH_K = 5                        # 阈值乘数：mean + K * std
 COP_SENSOR_ROW_CNT = 12                 # 传感器阵列行数
@@ -21,11 +21,12 @@ COP_POST_INIT_WINDOW_CNT = 600000        # 初始CoP确定后精修监测帧数�
 COP_POST_INIT_STABLE_CNT = 100          # 精修阶段需连续保持不变的帧数
 COP_POST_INIT_STABLE_THRESH = 0.1      # 精修判据：CoP偏移距离阈值
 
+COP_SNAP_CENTER_X, COP_SNAP_CENTER_Y = 3.0, 5.5   # 吸附目标（阵列中心）
+COP_SNAP_RANGE_X = 0.0                # X方向吸附范围
+COP_SNAP_RANGE_Y = 0.0                # Y方向吸附范围
+
 
 # ===================== 线程安全全局状态 =====================
-g_cop_base_frame_arr = None            # 第一帧基线（84通道flat数组）
-g_cop_base_frame_lock = threading.Lock()  # 基线读写锁
-
 g_cop_contact_init_x = None            # 初始接触点CoP X坐标
 g_cop_contact_init_y = None            # 初始接触点CoP Y坐标
 g_cop_contact_init_flag = False        # 初始接触点是否已稳定确定
@@ -46,22 +47,6 @@ g_cop_dynamic_thresh = None             # 动态计算后的阈值（None=未校
 g_cop_filtered_dir = None              # 滤波后的方向向量（暂未使用）
 g_cop_grad_table_arr = np.zeros((COP_SENSOR_ROW_CNT, COP_SENSOR_COL_CNT, 2))  # 梯度表(rows,cols,2)
 g_cop_grad_table_lock = threading.Lock()  # 梯度表读写锁
-
-
-# ===================== 基线减除 =====================
-def subtract_baseline(raw_frame_arr):
-    """
-    用第一帧作为基线，减去背景。返回基线减除后的84通道数据。
-    """
-    global g_cop_base_frame_arr
-    frame_flat_arr = np.array(raw_frame_arr, dtype=np.float32).flatten()
-
-    with g_cop_base_frame_lock:
-        if g_cop_base_frame_arr is None:
-            g_cop_base_frame_arr = frame_flat_arr.copy()
-
-    diff_arr = frame_flat_arr - g_cop_base_frame_arr
-    return np.clip(diff_arr, 0, None)  # 截断负值为0
 
 
 # ===================== 重置CoP状态 =====================
@@ -92,9 +77,9 @@ def reset_cop_state():
 
 
 # ===================== 核心CoP计算 =====================
-def compute_pressure_direction(baseline_subtracted_frame):
+def compute_pressure_direction(raw_frame):
     """
-    输入：基线减除后的84通道压力数据
+    输入：84通道原始ADC数据
     输出：方向、幅值、CoP坐标、初始点、偏移量等
     """
     global g_cop_filtered_dir, g_cop_grad_table_arr
@@ -105,7 +90,7 @@ def compute_pressure_direction(baseline_subtracted_frame):
     global g_cop_noise_sum_buf, g_cop_dynamic_thresh
 
     sensor_rows, sensor_cols = COP_SENSOR_ROW_CNT, COP_SENSOR_COL_CNT
-    frame_flat_arr = np.asarray(baseline_subtracted_frame, dtype=np.float32).flatten()
+    frame_flat_arr = np.asarray(raw_frame, dtype=np.float32).flatten()
     frame_2d_arr = frame_flat_arr.reshape(sensor_rows, sensor_cols)
 
     # 计算梯度（用于可视化）
@@ -163,6 +148,10 @@ def compute_pressure_direction(baseline_subtracted_frame):
             g_cop_contact_init_flag = True
             g_cop_init_x_buf.clear()
             g_cop_init_y_buf.clear()
+            if (abs(g_cop_contact_init_x - COP_SNAP_CENTER_X) <= COP_SNAP_RANGE_X and
+                abs(g_cop_contact_init_y - COP_SNAP_CENTER_Y) <= COP_SNAP_RANGE_Y):
+                g_cop_contact_init_x = COP_SNAP_CENTER_X
+                g_cop_contact_init_y = COP_SNAP_CENTER_Y
 
     # ========== 计算偏移量 ==========
     else:  # g_cop_contact_init_flag 为 True

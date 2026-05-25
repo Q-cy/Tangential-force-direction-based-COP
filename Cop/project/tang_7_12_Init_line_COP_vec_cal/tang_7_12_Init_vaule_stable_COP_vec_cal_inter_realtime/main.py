@@ -134,8 +134,8 @@ def data_loop():
 
         # ---- 计算 PZT / CoP ----
         if press_item is not None:
-            base_sub_arr = COP.subtract_baseline(press_item["data"])
-            cop_res = COP.compute_pressure_direction(base_sub_arr)
+            cop_res = COP.compute_pressure_direction(press_item["data"])
+            base_sub_arr = np.array(press_item["data"])
             cop_curr_x, cop_curr_y = cop_res[0], cop_res[1]
             cop_delta_x, cop_delta_y = cop_res[6], cop_res[7]
             cop_base_x, cop_base_y = cop_res[8], cop_res[9]
