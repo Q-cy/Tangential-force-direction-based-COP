@@ -20,7 +20,7 @@ MAIN_REALTIME_MODULE = "realtime2"           # "realtime"=全显示, "realtime2"
 MAIN_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"  # 数据保存根目录
 
 realtime = importlib.import_module(MAIN_REALTIME_MODULE)
-MAIN_TARGET_FPS = 200                      # 目标采集帧率
+MAIN_TARGET_FPS = 100                      # 目标采集帧率
 MAIN_MAX_TIME_DIFF_S = 0.015               # 压力-力传感器最大时间匹配差(秒)
 g_main_stop_flag = threading.Event()       # 全局停止信号
 g_main_plot = None                         # 绘图对象引用

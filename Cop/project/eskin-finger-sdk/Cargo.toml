@@ -1,0 +1,25 @@
+[package]
+name = "eskin-finger-sdk"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "eskin_finger_sdk"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = []
+debug = []
+
+[dependencies]
+chrono = "0.4.44"
+crc = "3.4.0"
+crossbeam-channel = "0.5.15"
+fern = "0.7.1"
+libc = "0.2.186"
+log = "0.4.29"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+serialport = "4.7.3"
+thiserror = "2.0.18"
+uuid = "1.23.1"
