@@ -126,6 +126,11 @@ class EskinDevice:
             c_void_p, c_uint32, POINTER(CFingerSample)
         ]
 
+        lib.eskin_read_stream_frame.restype = c_uint32
+        lib.eskin_read_stream_frame.argtypes = [
+            c_void_p, c_uint32, POINTER(c_uint8), c_uint32, POINTER(c_uint32)
+        ]
+
         lib.eskin_get_mode.restype = c_uint32
         lib.eskin_get_mode.argtypes = [c_void_p, POINTER(c_uint32)]
 
@@ -270,6 +275,17 @@ class EskinDevice:
         if err != 0:
             raise RuntimeError(f"read_sample failed: error={err}")
         return sample
+
+    def read_stream_frame(self, timeout_ms: int = 200, max_len: int = 512) -> bytes:
+        """读取一个 stream 原始完整协议帧（流模式下调用）"""
+        buf = (c_uint8 * max_len)()
+        actual = c_uint32(0)
+        err = self._lib.eskin_read_stream_frame(
+            self._handle, timeout_ms, buf, len(buf), ctypes.byref(actual)
+        )
+        if err != 0:
+            raise RuntimeError(f"read_stream_frame failed: error={err}")
+        return bytes(buf[:min(actual.value, len(buf))])
 
     def get_mode(self) -> int:
         """查询当前设备模式（0=Command, 1=Streaming）"""

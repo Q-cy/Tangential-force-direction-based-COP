@@ -9,6 +9,7 @@ import struct
 from collections import deque
 import threading
 import numpy as np
+
 from eskin_ffi import EskinDevice
 
 DATA_BAUDRATE_FORCE = 460800  # 六维力传感器串口波特率
@@ -18,19 +19,36 @@ class PressureSensor:
     def __init__(self):
         self.dev = EskinDevice()
         self.dev.open("/dev/ttyUSB0")
+        self.dev.start_stream()
+        self._raw_queue = deque(maxlen=100)
+        self._running = True
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+
+    def _read_loop(self):
+        while self._running:
+            try:
+                self.dev.read_sample(timeout_ms=50)
+                raw = self.dev.read_stream_frame(timeout_ms=1)
+                if raw:
+                    self._raw_queue.append(raw)
+            except RuntimeError:
+                pass
 
     def read_data(self):
-        try:
-            return self.dev.read_register(0x1C00, 168)
-        except Exception:
-            return None
+        return self._raw_queue.popleft() if self._raw_queue else None
 
     def decode(self, raw):
-        arr = [struct.unpack("<H", raw[i:i+2])[0] for i in range(0, 168, 2)]
+        raw_after = raw[14:-1]
+        arr = [struct.unpack("<H", raw_after[i:i+2])[0] for i in range(0, 168, 2)]
         out = []
         for i in range(12):
             out.extend(arr[i*7:(i+1)*7])
         return out
+
+    def close(self):
+        self._running = False
+        self.dev.stop_stream()
 
 # ===================== 六维力传感器 =====================
 class SixAxisForceSensor:
