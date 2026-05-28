@@ -4,14 +4,6 @@ import time
 import threading
 import numpy as np
 
-DATA_DIR = os.path.join(
-    os.path.dirname(__file__),
-    "..", "..", "project",
-    "tang_7_12_Init_line_COP_vec_cal",
-    "tang_7_12_Init_vaule_stable_COP_vec_cal_inter_realtime",
-)
-sys.path.insert(0, os.path.abspath(DATA_DIR))
-
 import data
 import tang_7_12_InitCOP_vaule_realtime_package as cop
 

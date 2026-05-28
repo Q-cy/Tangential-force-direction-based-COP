@@ -1,7 +1,7 @@
 import numpy as np
 from collections import deque
 
-COP_INIT_MEDIAN_FRAMES = 6
+COP_INIT_MEDIAN_FRAMES = 1
 NOISE_COLLECT_FRAMES = 20
 THRESH_K = 5
 SENSOR_ROWS = 12
