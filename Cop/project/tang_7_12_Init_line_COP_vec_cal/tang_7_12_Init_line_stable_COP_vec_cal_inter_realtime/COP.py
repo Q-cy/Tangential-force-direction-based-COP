@@ -10,7 +10,8 @@ import threading
 
 # ===================== 算法参数（仅与CoP计算相关）=====================
 COP_STABILITY_FRAME_CNT = 5            # 初始稳定所需连续帧数
-COP_PRESSURE_LOW_THRESH = 500          # 低压判定阈值（ADC原始值之和）
+COP_BASELINE_COLLECT_FRAMES = 20       # 基线采集帧数（用于动态阈值计算）
+COP_THRESH_K = 5                       # 阈值乘数：mean + K * std
 COP_SENSOR_ROW_CNT = 12                # 传感器阵列行数
 COP_SENSOR_COL_CNT = 7                 # 传感器阵列列数
 
@@ -21,8 +22,8 @@ COP_DIR_DOT_THRESH = 0.7               # 移动方向与参考方向一致性最
 
 
 # ===================== 二次静置精修参数 =====================
-COP_POST_INIT_WINDOW_CNT = 100         # 初始CoP确定后精修监测帧数上限
-COP_POST_INIT_STABLE_CNT = 10          # 精修阶段需连续保持不变的帧数
+COP_POST_INIT_WINDOW_CNT = 600000      # 初始CoP确定后精修监测帧数上限
+COP_POST_INIT_STABLE_CNT = 100         # 精修阶段需连续保持不变的帧数
 COP_POST_INIT_STABLE_THRESH = 0.1      # 精修判据：CoP偏移距离阈值
 
 
@@ -37,7 +38,8 @@ g_cop_contact_init_flag = False        # 初始接触点是否已稳定确定
 g_cop_init_x_buf = deque(maxlen=COP_STABILITY_FRAME_CNT)  # 候选初始CoP X序列缓冲
 g_cop_init_y_buf = deque(maxlen=COP_STABILITY_FRAME_CNT)  # 候选初始CoP Y序列缓冲
 
-g_cop_press_low_cnt = 0                # 连续低压帧计数器
+g_cop_noise_sum_buf = deque(maxlen=COP_BASELINE_COLLECT_FRAMES)  # 基线期total_press_val缓冲
+g_cop_dynamic_thresh = None             # 动态计算后的阈值（None=未校准）
 
 # 二次静置精修状态
 g_cop_post_init_frame_cnt = 0          # 精修阶段已监测帧数
@@ -74,8 +76,8 @@ def reset_cop_state():
     """
     # global 声明要修改全局变量
     global g_cop_filtered_dir, g_cop_contact_init_x, g_cop_contact_init_y, g_cop_contact_init_flag
-    global g_cop_press_low_cnt
-    global g_cop_init_x_buf, g_cop_init_y_buf, g_cop_grad_table_arr
+    global g_cop_init_x_buf, g_cop_init_y_buf
+    global g_cop_grad_table_arr
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
 
@@ -83,7 +85,6 @@ def reset_cop_state():
     g_cop_contact_init_x = None
     g_cop_contact_init_y = None
     g_cop_contact_init_flag = False
-    g_cop_press_low_cnt = 0
     g_cop_init_x_buf.clear()
     g_cop_init_y_buf.clear()
     g_cop_post_init_frame_cnt = 0
@@ -103,10 +104,10 @@ def compute_pressure_direction(baseline_subtracted_frame):
     """
     global g_cop_filtered_dir, g_cop_grad_table_arr
     global g_cop_contact_init_x, g_cop_contact_init_y, g_cop_contact_init_flag
-    global g_cop_press_low_cnt
     global g_cop_init_x_buf, g_cop_init_y_buf
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
+    global g_cop_noise_sum_buf, g_cop_dynamic_thresh
 
     sensor_rows, sensor_cols = COP_SENSOR_ROW_CNT, COP_SENSOR_COL_CNT
     frame_flat_arr = np.asarray(baseline_subtracted_frame, dtype=np.float32).flatten()
@@ -127,28 +128,24 @@ def compute_pressure_direction(baseline_subtracted_frame):
     with g_cop_grad_table_lock:
         g_cop_grad_table_arr[:] = grad_arr[:]
 
-    # 总压力判断
+    # 总压力
     total_press_val = np.sum(frame_2d_arr)
-    if total_press_val < COP_PRESSURE_LOW_THRESH:
-        g_cop_press_low_cnt += 1
-    else:
-        g_cop_press_low_cnt = 0
 
-    # 连续低压 → 重置
-    if g_cop_press_low_cnt >= COP_STABILITY_FRAME_CNT:
-        reset_cop_state()
-        # 返回默认值，表示无有效CoP或已重置
-        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0  # 10个值
+    # 动态阈值：启动后收集前N帧的total_press_val，计算 mean + K*std
+    if g_cop_dynamic_thresh is None:
+        g_cop_noise_sum_buf.append(total_press_val)
+        if len(g_cop_noise_sum_buf) >= COP_BASELINE_COLLECT_FRAMES:
+            sums = np.array(g_cop_noise_sum_buf)
+            g_cop_dynamic_thresh = COP_THRESH_K * float(np.mean(sums))
+
+    # 总压力判断：动态阈值就绪后才启用低压重置
+    if g_cop_dynamic_thresh is not None and total_press_val < g_cop_dynamic_thresh:
+        if g_cop_contact_init_flag:
+            reset_cop_state()
+        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0, 0
 
     if total_press_val == 0:
-        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0  # 10个值
-
-    # 已建立初始接触但当前压力过低 → 跳过噪声CoP计算，返回零偏移
-    if g_cop_contact_init_flag and total_press_val < COP_PRESSURE_LOW_THRESH:
-        return (g_cop_contact_init_x, g_cop_contact_init_y,
-                0, sensor_rows-1, 0, sensor_cols-1,
-                0.0, 0.0,
-                g_cop_contact_init_x, g_cop_contact_init_y)
+        return 0.0, 0.0, 0, sensor_rows-1, 0, sensor_cols-1, 0.0, 0.0, 0.0, 0.0, 0
 
     # 计算CoP中心
     grid_x_arr = np.tile(np.arange(sensor_cols), (sensor_rows, 1))
@@ -257,7 +254,10 @@ def compute_pressure_direction(baseline_subtracted_frame):
         cop_base_x = g_cop_contact_init_x
         cop_base_y = g_cop_contact_init_y
 
+    cop_state = 2 if g_cop_post_refined_flag else 1
+
     return (cop_curr_x, cop_curr_y,
-            0, sensor_rows-1, 0, sensor_cols-1,  # 绘图范围 (min_y, max_y, min_x, max_x)
+            0, sensor_rows-1, 0, sensor_cols-1,
             cop_delta_x, cop_delta_y,
-            cop_base_x, cop_base_y)
+            cop_base_x, cop_base_y,
+            cop_state)

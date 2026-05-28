@@ -1,22 +1,25 @@
 import numpy as np
-import threading
 from collections import deque
 
 # ===================== 算法参数=====================
-COP_INIT_MEDIAN_FRAMES = 20               # 初始COP取中位数的帧数
+COP_INIT_MEDIAN_FRAMES = 6                # 初始COP取中位数的帧数
 NOISE_COLLECT_FRAMES = 20                 # 动态阈值基线采集帧数
 THRESH_K = 5                              # 阈值 = mean + K * std
 SENSOR_ROWS = 12
 SENSOR_COLS = 7
 
+# ===================== 吸附中心参数 =====================
+SNAP_CENTER_X, SNAP_CENTER_Y = 3.0, 5.5   # 吸附目标（阵列中心）
+SNAP_RANGE_X = 0.0                         # X方向吸附范围
+SNAP_RANGE_Y = 0.0                         # Y方向吸附范围
+
 # ===================== 二次静置精修参数 =====================
-POST_INIT_WINDOW_CNT = 60000
-POST_INIT_STABLE_CNT = 200
+POST_INIT_WINDOW_CNT = 600000
+POST_INIT_STABLE_CNT = 100
 POST_INIT_STABLE_THRESH = 0.1
 
-# ===================== 线程安全全局状态 =====================
+# ===================== 全局状态 =====================
 first_frame = None
-first_frame_lock = threading.Lock()
 
 first_contact_CoP_x = None
 first_contact_CoP_y = None
@@ -43,9 +46,8 @@ def subtract_baseline(current_frame):
     global first_frame
     current_frame = np.array(current_frame, dtype=np.float32).flatten()
 
-    with first_frame_lock:
-        if first_frame is None:
-            first_frame = current_frame.copy()
+    if first_frame is None:
+        first_frame = current_frame.copy()
 
     diff = current_frame - first_frame
     return np.clip(diff, 0, None)
@@ -111,17 +113,15 @@ def compute_pressure_direction(baseline_subtracted_frame):
         cop_init_y_buf.append(cop_y)
 
         if len(cop_init_x_buf) >= COP_INIT_MEDIAN_FRAMES:
-            xs = list(cop_init_x_buf)
-            ys = list(cop_init_y_buf)
-            first_contact_CoP_x = float(np.median(xs))
-            first_contact_CoP_y = float(np.median(ys))
-            print(f"[CoP Init] 前{COP_INIT_MEDIAN_FRAMES}帧坐标:")
-            for i in range(len(xs)):
-                print(f"  frame {i}: x={xs[i]:.3f}, y={ys[i]:.3f}")
-            print(f"  中位数: x={first_contact_CoP_x:.3f}, y={first_contact_CoP_y:.3f}")
+            first_contact_CoP_x = float(np.median(cop_init_x_buf))
+            first_contact_CoP_y = float(np.median(cop_init_y_buf))
             contact_initialized = True
             cop_init_x_buf.clear()
             cop_init_y_buf.clear()
+            if (abs(first_contact_CoP_x - SNAP_CENTER_X) <= SNAP_RANGE_X and
+                abs(first_contact_CoP_y - SNAP_CENTER_Y) <= SNAP_RANGE_Y):
+                first_contact_CoP_x = SNAP_CENTER_X
+                first_contact_CoP_y = SNAP_CENTER_Y
 
     # ========== 计算偏移量 ==========
     else:
@@ -202,7 +202,6 @@ def get_pzt_angle(adc_data):
 # ===================== 重置基线（校准用） =====================
 def reset_baseline():
     global first_frame
-    with first_frame_lock:
-        first_frame = None
+    first_frame = None
     reset_cop_state()
 

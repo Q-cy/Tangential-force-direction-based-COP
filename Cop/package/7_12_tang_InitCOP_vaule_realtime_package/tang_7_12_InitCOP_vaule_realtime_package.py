@@ -1,14 +1,18 @@
 import numpy as np
 from collections import deque
 
-COP_INIT_MEDIAN_FRAMES = 5
-NOISE_COLLECT_FRAMES = 10
+COP_INIT_MEDIAN_FRAMES = 6
+NOISE_COLLECT_FRAMES = 20
 THRESH_K = 5
 SENSOR_ROWS = 12
 SENSOR_COLS = 7
 
-POST_INIT_WINDOW_CNT = 60000
-POST_INIT_STABLE_CNT = 100
+SNAP_CENTER_X, SNAP_CENTER_Y = 3.0, 5.5
+SNAP_RANGE_X = 0.0
+SNAP_RANGE_Y = 0.0
+
+POST_INIT_WINDOW_CNT = 600000
+POST_INIT_STABLE_CNT = 500
 POST_INIT_STABLE_THRESH = 0.1
 
 first_contact_CoP_x = None
@@ -45,14 +49,14 @@ def reset_cop_state():
     post_cand_y = None
 
 
-def compute_pressure_direction(raw_frame):
+def compute_pressure_direction(baseline_subtracted_frame):
     global first_contact_CoP_x, first_contact_CoP_y, contact_initialized
     global post_init_frame_cnt, post_stable_cnt, post_refined_flag
     global post_cand_x, post_cand_y
     global noise_sum_buf, dynamic_thresh
 
     rows, cols = SENSOR_ROWS, SENSOR_COLS
-    frame_flat = np.asarray(raw_frame, dtype=np.float32).flatten()
+    frame_flat = np.asarray(baseline_subtracted_frame, dtype=np.float32).flatten()
     frame2d = frame_flat.reshape(rows, cols)
 
     total_pressure = np.sum(frame2d)
@@ -88,6 +92,10 @@ def compute_pressure_direction(raw_frame):
             contact_initialized = True
             cop_init_x_buf.clear()
             cop_init_y_buf.clear()
+            if (abs(first_contact_CoP_x - SNAP_CENTER_X) <= SNAP_RANGE_X and
+                abs(first_contact_CoP_y - SNAP_CENTER_Y) <= SNAP_RANGE_Y):
+                first_contact_CoP_x = SNAP_CENTER_X
+                first_contact_CoP_y = SNAP_CENTER_Y
 
     else:
         post_init_frame_cnt += 1
@@ -141,7 +149,6 @@ def compute_vector_angle(x: float, y: float) -> tuple[float, float]:
         angle += 360
     return angle, mag
 
-
 def compute_PZT_angle(Px: float, Py: float) -> tuple[float, float]:
     return compute_vector_angle(Px, Py)
 
@@ -159,5 +166,3 @@ def get_pzt_angle(adc_data):
     threshold = result[13]
     pzt_angle, _ = compute_PZT_angle(dx, dy)
     return pzt_angle, magnitude, state, cop_x, cop_y, base_x, base_y, total_press, threshold
-
-

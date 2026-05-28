@@ -20,7 +20,7 @@ MAIN_REALTIME_MODULE = "realtime2"           # "realtime"=全显示, "realtime2"
 MAIN_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"  # 数据保存根目录
 
 realtime = importlib.import_module(MAIN_REALTIME_MODULE)
-MAIN_TARGET_FPS = 200                      # 目标采集帧率
+MAIN_TARGET_FPS = 100                      # 目标采集帧率
 MAIN_MAX_TIME_DIFF_S = 0.015               # 压力-力传感器最大时间匹配差(秒)
 g_main_stop_flag = threading.Event()       # 全局停止信号
 g_main_plot = None                         # 绘图对象引用
@@ -134,11 +134,12 @@ def data_loop():
 
         # ---- 计算 PZT / CoP ----
         if press_item is not None:
-            base_sub_arr = COP.subtract_baseline(press_item["data"])
-            cop_res = COP.compute_pressure_direction(base_sub_arr)
+            cop_res = COP.compute_pressure_direction(press_item["data"])
+            base_sub_arr = np.array(press_item["data"])
             cop_curr_x, cop_curr_y = cop_res[0], cop_res[1]
             cop_delta_x, cop_delta_y = cop_res[6], cop_res[7]
             cop_base_x, cop_base_y = cop_res[8], cop_res[9]
+            cop_state = cop_res[10]
             total_press_val = np.sum(press_item["data"])
 
             buf_cop_delta_x.append(cop_delta_x)
@@ -152,6 +153,7 @@ def data_loop():
             cop_delta_x_filt = cop_delta_y_filt = 0.0
             pzt_angle_deg = pzt_mag_val = 0.0
             total_press_val = 0.0
+            cop_state = 0
 
         # ---- 计算 Force ----
         if force_item is not None:
@@ -200,6 +202,8 @@ def data_loop():
             fy_cal=cal_fy_val,
             force_cal_mag=cal_mag_val,
             force_cal_angle=cal_angle_deg,
+            cop_state=cop_state,
+            adc_sum=total_press_val,
         )
         csv_writer.writerow(csv_row)
 
@@ -211,6 +215,7 @@ def data_loop():
             cop_delta_x_filt, cop_delta_y_filt,
             force_fx_filt, force_fy_filt, force_fz_filt,
             cal_fx_val, cal_fy_val, cal_angle_deg, cal_mag_val,
+            cop_state=cop_state,
         )
         if COP.g_cop_contact_init_flag:
             g_main_plot.append_full_data(
