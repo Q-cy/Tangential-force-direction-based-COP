@@ -17,6 +17,7 @@ import calibrate
 import realtime2
 
 # ===================== 配置 =====================
+REPLAY_CSV_PATH = "/home/qcy/Project/data/2.PZT_tangential/weight/test/data_1.csv"  # ← 修改这里
 MAIN_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
 MAIN_CAL_MODE = "lookup"
 
@@ -184,11 +185,7 @@ def replay_loop(csv_path):
 def main():
     global g_main_plot
 
-    if len(sys.argv) < 2:
-        print("用法: python replay.py <csv_path>")
-        sys.exit(1)
-
-    csv_path = sys.argv[1]
+    csv_path = REPLAY_CSV_PATH
     if not os.path.exists(csv_path):
         print(f"❌ 文件不存在: {csv_path}")
         sys.exit(1)
