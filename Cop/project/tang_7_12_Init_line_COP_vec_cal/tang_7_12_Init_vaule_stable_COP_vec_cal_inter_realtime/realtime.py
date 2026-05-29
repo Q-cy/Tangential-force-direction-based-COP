@@ -147,6 +147,7 @@ class RealTimePlot:
         self._cal_fy_val = None             # 标定力Fy
         self._cal_angle_deg = None          # 标定力角度(度)
         self._cal_mag_val = None            # 标定力幅值
+        self._cop_state = 0                 # CoP状态(0=未接触,1=粗略,2=精细)
 
     def init_history(self):
         hist_len = PLOT_MAG_HISTORY_LEN

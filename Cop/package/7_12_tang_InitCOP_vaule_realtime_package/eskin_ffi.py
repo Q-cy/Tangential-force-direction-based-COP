@@ -4,7 +4,7 @@ from ctypes import (
     c_uint32, c_uint64, c_bool
 )
 
-LIB_PATH = "./libeskin_finger_sdk.so"
+LIB_PATH = "/home/qcy/Project/code/Tangential/finger_tang_7_12/Cop/package/7_12_tang_InitCOP_vaule_realtime_package/libeskin_finger_sdk.so"
 
 class EskinSdkVersion(Structure):
     _fields_ = [

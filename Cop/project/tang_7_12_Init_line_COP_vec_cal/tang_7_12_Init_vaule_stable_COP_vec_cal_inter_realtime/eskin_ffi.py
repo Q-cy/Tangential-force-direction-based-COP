@@ -1,10 +1,11 @@
+import os
 import ctypes
 from ctypes import (
     Structure, POINTER, c_void_p, c_char, c_char_p, c_uint8, c_uint16,
     c_uint32, c_uint64, c_bool
 )
 
-LIB_PATH = "./libeskin_finger_sdk.so"
+LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libeskin_finger_sdk.so")
 
 class EskinSdkVersion(Structure):
     _fields_ = [
