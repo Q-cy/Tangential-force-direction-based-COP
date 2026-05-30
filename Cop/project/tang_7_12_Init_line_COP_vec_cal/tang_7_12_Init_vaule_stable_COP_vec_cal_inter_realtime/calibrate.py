@@ -14,6 +14,12 @@ import sys
 import csv
 import numpy as np
 
+# ===================== 可调参数 =====================
+CAL_CSV_PATH = "/home/qcy/Project/data/2.PZT_tangential/weight/test/data_20260513_150200.csv"  # CSV文件路径
+CAL_MODE = "continuous"       # "continuous"=连续标定, "discrete"=离散标定
+CAL_DO_FIT = True             # 是否同时生成拟合模型
+CAL_FORCE_BIN = 0.2           # discrete模式的力分组间隔(N)
+
 
 def build_lookup_from_csv(csv_path: str, mode: str = "continuous", force_bin: float = 0.2):
     """
@@ -171,53 +177,18 @@ def load_fit_model(path: str) -> tuple:
     return data[:6], data[6:12]
 
 
-# ==================== CLI 入口 ====================
-CAL_DEFAULT_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
-
-
-def _resolve_path(arg: str) -> str:
-    if arg.isdigit():
-        return os.path.join(CAL_DEFAULT_SAVE_DIR, f"data_{arg}.csv")
-    if os.path.sep not in arg and not arg.startswith("."):
-        return os.path.join(CAL_DEFAULT_SAVE_DIR, arg)
-    return arg
-
-
+# ==================== 运行 ====================
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("用法: python calibrate.py <csv_path|N|filename> [--fit] [--discrete [bin]]")
-        print("  python calibrate.py data_20260513_150200.csv                                     → 连续查找表 cal_lookup.bin")
-        print("  python calibrate.py 1 --fit                               → 连续查找表 + 拟合")
-        print("  python calibrate.py 1 --discrete                          → 离散查找表 (bin=0.2N)")
-        print("  python calibrate.py data_20260513_150200.csv --discrete 0.5                      → 离散查找表 (bin=0.5N)")
-        print("  python calibrate.py data_20260513_150200.csv --discrete --fit                    → 离散查找表 + 拟合")
-        sys.exit(1)
-
-    do_fit = "--fit" in sys.argv
-    do_discrete = "--discrete" in sys.argv
-
-    # 解析 force_bin
-    force_bin = 0.2
-    args = [a for a in sys.argv[1:] if a not in ("--fit", "--discrete")]
-    if do_discrete and len(args) > 1:
-        try:
-            force_bin = float(args[1])
-            args = args[:1]
-        except ValueError:
-            pass
-
-    csv_path = _resolve_path(args[0])
-    out_dir = os.path.dirname(csv_path)
-    mode = "discrete" if do_discrete else "continuous"
+    out_dir = os.path.dirname(CAL_CSV_PATH)
 
     try:
-        points, fx_vals, fy_vals = build_lookup_from_csv(csv_path, mode=mode, force_bin=force_bin)
+        points, fx_vals, fy_vals = build_lookup_from_csv(CAL_CSV_PATH, mode=CAL_MODE, force_bin=CAL_FORCE_BIN)
         save_lookup(points, fx_vals, fy_vals, os.path.join(out_dir, "cal_lookup.bin"))
-        if do_fit:
+        if CAL_DO_FIT:
             coef_fx, coef_fy = build_fit_model(points, fx_vals, fy_vals)
             save_fit_model(coef_fx, coef_fy, os.path.join(out_dir, "cal_fit.bin"))
             print(f"  Fx = {coef_fx[0]:.4f} + {coef_fx[1]:.4f}*dx + {coef_fx[2]:.4f}*dy + {coef_fx[3]:.4f}*dx² + {coef_fx[4]:.4f}*dx*dy + {coef_fx[5]:.4f}*dy²")
-            print(f"  Fy = {coef_fy[0]:.4f} + {coef_fy[1]:.4f}*dx + {coef_fy[2]:.4f}*dy + {coef_fy[3]:.4f}*dx² + {coef_fy[4]:.4f}*dx*dy + {coef_fy[5]:.4f}*dy²")
+            print(f"  Fy = {coef_fy[0]:.4f} + {coef_fy[1]:.4f}*dy + {coef_fy[2]:.4f}*dy + {coef_fy[3]:.4f}*dx² + {coef_fy[4]:.4f}*dx*dy + {coef_fy[5]:.4f}*dy²")
     except Exception as e:
         print(f"  构建失败: {e}")
         sys.exit(1)
