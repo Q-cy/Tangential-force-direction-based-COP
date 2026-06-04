@@ -48,7 +48,10 @@ CSV_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
 #   关键词
 #     "latest:N" → 最新的 N 个文件
 #     "all"      → 全部文件
-CSV_PICK = "data_20260513_150200.csv"
+CSV_PICK = "data_20260604_165434.csv"
+
+# valid 分段显示：True=valid!=0 深色粗线(valid=0 浅色淡化)，False=统一普通样式
+HIGHLIGHT_VALID = True
 
 # 要绘制的列：支持列名（字符串）或列号（整数从 0 开始）
 # 例：["rel_ms", "ADC_angle", "Force_angle"] 或 [1, 100, 102]
@@ -57,7 +60,7 @@ PLOT_COLUMNS = ["Force_cal_angle", "Force_angle"]
 # 行范围：None=全程，整数=起/止行号（不含表头）
 # 例：ROW_START=0, ROW_END=None  → 全部行
 # 例：ROW_START=100, ROW_END=500 → 第 100~500 行
-ROW_START = 2000
+ROW_START = 1000
 ROW_END = None
 
 # X 轴列名/列号（None=用第 0 列，即 timestamp）
@@ -76,13 +79,21 @@ SHARE_AXIS = True
 # 例：ERROR_REF_COLUMN = "Force_angle"   → 计算其他列 vs Force_angle 的误差
 ERROR_REF_COLUMN = "Force_angle"
 
+# ==================== 模式选择 ====================
+# "full_analysis" — 5×2 子图：左列 PZT(角度/幅值/Fz/Fx/Fy)，右列 Force(真值 vs 标定)
+#                   适合查看全程数据总览和标定效果对比
+# "plot"          — 自定义列折线图：按 PLOT_COLUMNS 选列画图，支持误差标注
+#                   适合查看特定列的详细变化和数值误差
+PLOT_MODE = "full_analysis"
+
+
 # ===================================================================
 # 以下为代码，一般不需要修改
 # ===================================================================
 
 # CSV 列名 → 索引映射（与 table.py TABLE_CSV_HEADER 一致）
 _COLUMN_NAMES = [
-    "timestamp", "rel_ms",
+    "timestamp", "rel_ms", "adc_sum",
     *(f"ch{i}" for i in range(1, 85)),
     "Fx", "Fy", "Fz", "Mx", "My", "Mz",
     "press_t", "force_t", "dt",
@@ -90,7 +101,7 @@ _COLUMN_NAMES = [
     "delta_Force_X", "delta_Force_Y", "delta_Force_Z",
     "ADC_angle", "ADC_mag", "Force_angle", "Force_mag",
     "Fx_cal", "Fy_cal", "Force_cal_mag", "Force_cal_angle",
-    "CoP_state",
+    "CoP_state", "valid",
 ]
 
 _NAME_TO_IDX = {name: idx for idx, name in enumerate(_COLUMN_NAMES)}
@@ -379,6 +390,135 @@ def plot_static(csv_paths: list, plot_cols: list, x_col, row_start=None, row_end
         _save_error_csv(error_path, all_error_results)
 
 
+
+def plot_full_analysis(csv_path: str, save_path=None, row_start=None, row_end=None,
+                       save_dir=None):
+    """生成 5×2 full_analysis 图，与 realtime.py plot_full_magnitude_curve 一致"""
+    header, data = load_csv(csv_path)
+    r0 = row_start if row_start is not None else 0
+    r1 = row_end if row_end is not None else data.shape[0]
+    data = data[r0:r1, :]
+
+    name_to_idx = {name.strip(): i for i, name in enumerate(header)}
+
+    def _col(name):
+        """按列名获取数据，不存在返回 None"""
+        idx = name_to_idx.get(name)
+        if idx is not None:
+            return data[:, idx].astype(np.float64)
+        return None
+
+    t = _col("rel_ms")
+    if t is None:
+        t = np.arange(len(data))
+
+    # 左列数据
+    adc_angle = _col("ADC_angle")
+    adc_mag = _col("ADC_mag")
+    adc_sum = _col("adc_sum")
+    cop_dx = _col("delta_CoP_X")
+    cop_dy = _col("delta_CoP_Y")
+
+    # 右列数据
+    force_angle = _col("Force_angle")
+    force_mag = _col("Force_mag")
+    force_cal_angle = _col("Force_cal_angle")
+    force_cal_mag = _col("Force_cal_mag")
+    force_fz = _col("delta_Force_Z")
+    force_fx = _col("delta_Force_X")
+    force_fy = _col("delta_Force_Y")
+    fx_cal = _col("Fx_cal")
+    fy_cal = _col("Fy_cal")
+
+    has_cal_angle = force_cal_angle is not None
+    has_cal_mag = force_cal_mag is not None
+    has_fx_cal = fx_cal is not None
+    has_fy_cal = fy_cal is not None
+
+    # valid 列：用于区分有效/无效数据段
+    valid = _col("valid")
+    if valid is None:
+        valid = np.ones(len(data))
+
+    fig, axes = plt.subplots(5, 2, figsize=(18, 24))
+    (aL1, aR1), (aL2, aR2), (aL3, aR3), (aL4, aR4), (aL5, aR5) = axes
+
+    def _p(ax, d, c, lbl, first_valid_only=False):
+        if d is None or len(d) != len(t):
+            return
+        if not HIGHLIGHT_VALID:
+            ax.plot(t, d, c, linewidth=1.0, label=lbl)
+            return
+        """分段绘制：valid=0 浅色淡化，valid!=0 深色粗线"""
+        mask = valid != 0
+        changes = np.where(np.diff(mask.astype(int)))[0] + 1
+        segments = np.split(np.arange(len(t)), changes)
+        _labeled = [False, False]
+        for seg in segments:
+            if len(seg) == 0:
+                continue
+            s, e = seg[0], seg[-1] + 1
+            is_valid = mask[s]
+            if first_valid_only and not is_valid:
+                continue
+            lbl_use = None
+            if is_valid and not _labeled[1]:
+                lbl_use = lbl; _labeled[1] = True
+            elif not is_valid and not _labeled[0]:
+                lbl_use = f"{lbl} (inactive)"; _labeled[0] = True
+            ax.plot(t[s:e], d[s:e], c,
+                    linewidth=2.0 if is_valid else 0.8,
+                    alpha=1.0 if is_valid else 0.3,
+                    label=lbl_use)
+
+    # 左列：PZT
+    _p(aL1, adc_angle, 'b-', 'PZT Angle'); aL1.set_title("PZT Angle"); aL1.grid(True, alpha=0.3)
+    _p(aL2, adc_mag, 'b-', 'PZT Mag'); aL2.set_title("PZT Mag"); aL2.grid(True, alpha=0.3)
+    if adc_sum is not None:
+        _p(aL3, adc_sum, 'b-', 'PZT Fz')
+    aL3.set_title("PZT Fz"); aL3.grid(True, alpha=0.3)
+    _p(aL4, cop_dx, 'b-', 'PZT Fx'); aL4.set_title("PZT Fx"); aL4.grid(True, alpha=0.3)
+    _p(aL5, cop_dy, 'c-', 'PZT Fy'); aL5.set_title("PZT Fy"); aL5.grid(True, alpha=0.3)
+
+    # 右列：Force
+    _p(aR1, force_angle, 'r-', 'Measured')
+    if has_cal_angle: _p(aR1, force_cal_angle, 'g--', 'Calibrated')
+    aR1.set_title("Angle: Meas vs Cal"); aR1.grid(True, alpha=0.3)
+    if has_cal_angle: aR1.legend(fontsize=8)
+
+    _p(aR2, force_mag, 'r-', 'Measured')
+    if has_cal_mag: _p(aR2, force_cal_mag, 'g--', 'Calibrated')
+    aR2.set_title("Mag: Meas vs Cal"); aR2.grid(True, alpha=0.3)
+    if has_cal_mag: aR2.legend(fontsize=8)
+
+    _p(aR3, force_fz, 'r-', 'Fz'); aR3.set_title("Fz: Measured"); aR3.grid(True, alpha=0.3)
+
+    _p(aR4, force_fx, 'r-', 'Measured')
+    if has_fx_cal: _p(aR4, fx_cal, 'g--', 'Calibrated')
+    aR4.set_title("Fx: Meas vs Cal"); aR4.grid(True, alpha=0.3)
+    if has_fx_cal: aR4.legend(fontsize=8)
+
+    _p(aR5, force_fy, 'r-', 'Measured')
+    if has_fy_cal: _p(aR5, fy_cal, 'c--', 'Calibrated')
+    aR5.set_title("Fy: Meas vs Cal"); aR5.grid(True, alpha=0.3)
+    if has_fy_cal: aR5.legend(fontsize=8)
+
+    for row in axes:
+        for ax in row:
+            ax.set_xlabel("Time (ms)", fontsize=9)
+
+    plt.tight_layout()
+
+    if save_path is None:
+        base_dir = save_dir or os.path.dirname(csv_path)
+        base_name = os.path.splitext(os.path.basename(csv_path))[0]  # e.g. data_20260604_131142
+        save_path = os.path.join(base_dir, f"full_analysis_{base_name}.png")
+
+    plt.savefig(save_path, dpi=300)
+    print(f"📊 已保存：{save_path}")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description="CSV 静态图绘制")
     parser.add_argument("-d", "--dir", default=None, help="CSV 目录")
@@ -438,4 +578,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if PLOT_MODE == "full_analysis":
+        csv_paths = _resolve_pick(CSV_DIR, CSV_PICK)
+        if not csv_paths:
+            print(f"❌ 未找到匹配的 CSV 文件: dir={CSV_DIR}, pick={CSV_PICK}")
+            sys.exit(1)
+        plot_full_analysis(csv_paths[0],
+                           row_start=ROW_START,
+                           row_end=ROW_END)
+    else:
+        main()
