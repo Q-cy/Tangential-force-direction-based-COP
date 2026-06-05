@@ -35,6 +35,7 @@ class PressureThread(threading.Thread):
     def run(self):
         while not g_main_stop_flag.is_set():
             ts = time.perf_counter()
+            
             raw = self.s.read_data()
             if raw:
                 try:

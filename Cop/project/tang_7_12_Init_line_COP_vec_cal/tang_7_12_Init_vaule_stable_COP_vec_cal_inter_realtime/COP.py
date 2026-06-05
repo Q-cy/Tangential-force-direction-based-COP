@@ -18,8 +18,9 @@ COP_SENSOR_COL_CNT = 7                  # 传感器阵列列数
 
 # ===================== 二次静置精修参数 =====================
 COP_POST_INIT_WINDOW_CNT = 600000        # 初始CoP确定后精修监测帧数上限
-COP_POST_INIT_STABLE_CNT = 100           # 精修阶段需连续保持不变的帧数
+COP_POST_INIT_STABLE_CNT = 100           # 原始模式：精修阶段需连续保持不变的帧数
 COP_POST_INIT_STABLE_THRESH = 0.1        # 精修判据：CoP偏移距离阈值
+COP_POST_INIT_TRIGGER_CNT = 20           # 触发模式：收到触发信号后需连续保持不变的帧数
 
 COP_SNAP_CENTER_X, COP_SNAP_CENTER_Y = 3.0, 5.5   # 吸附目标（阵列中心）
 COP_SNAP_RANGE_X = 0.0                # X方向吸附范围
@@ -44,6 +45,9 @@ g_cop_post_cand_y = None               # 精修候选静止点Y
 g_cop_noise_sum_buf = deque(maxlen=COP_BASELINE_COLLECT_FRAMES)  # 基线期total_press_val缓冲
 g_cop_dynamic_thresh = None             # 动态计算后的阈值（None=未校准）
 
+g_cop_post_trigger_signal = False       # 外部触发信号（由 trigger_cop_refine 设置）
+g_cop_post_triggered = False            # 是否已进入触发模式
+
 g_cop_filtered_dir = None              # 滤波后的方向向量（暂未使用）
 g_cop_grad_table_arr = np.zeros((COP_SENSOR_ROW_CNT, COP_SENSOR_COL_CNT, 2))  # 梯度表(rows,cols,2)
 g_cop_grad_table_lock = threading.Lock()  # 梯度表读写锁
@@ -60,6 +64,7 @@ def reset_cop_state():
     global g_cop_grad_table_arr
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
+    global g_cop_post_trigger_signal, g_cop_post_triggered
 
     g_cop_filtered_dir = None
     g_cop_contact_init_x = None
@@ -72,8 +77,18 @@ def reset_cop_state():
     g_cop_post_refined_flag = False
     g_cop_post_cand_x = None
     g_cop_post_cand_y = None
+    g_cop_post_trigger_signal = False
+    g_cop_post_triggered = False
     with g_cop_grad_table_lock:
         g_cop_grad_table_arr.fill(0)
+
+
+# ===================== 触发精修 =====================
+def trigger_cop_refine():
+    """外部调用：触发二次精修切换为触发模式（20帧）"""
+    global g_cop_post_trigger_signal
+    if g_cop_contact_init_flag and not g_cop_post_refined_flag:
+        g_cop_post_trigger_signal = True
 
 
 # ===================== 核心CoP计算 =====================
@@ -88,6 +103,7 @@ def compute_pressure_direction(raw_frame):
     global g_cop_post_init_frame_cnt, g_cop_post_stable_cnt, g_cop_post_refined_flag
     global g_cop_post_cand_x, g_cop_post_cand_y
     global g_cop_noise_sum_buf, g_cop_dynamic_thresh
+    global g_cop_post_trigger_signal, g_cop_post_triggered
 
     sensor_rows, sensor_cols = COP_SENSOR_ROW_CNT, COP_SENSOR_COL_CNT
     frame_flat_arr = np.asarray(raw_frame, dtype=np.float32).flatten()
@@ -157,6 +173,18 @@ def compute_pressure_direction(raw_frame):
     else:  # g_cop_contact_init_flag 为 True
         # 二次静置精修：检测静止，修正初始CoP
         g_cop_post_init_frame_cnt += 1
+
+        # 检查触发信号：原始模式计数中收到触发 → 切换为触发模式
+        if g_cop_post_trigger_signal and not g_cop_post_refined_flag and not g_cop_post_triggered:
+            g_cop_post_trigger_signal = False
+            g_cop_post_triggered = True
+            g_cop_post_cand_x = cop_curr_x
+            g_cop_post_cand_y = cop_curr_y
+            g_cop_post_stable_cnt = 1
+
+        # 确定当前精修阈值
+        stable_thresh = COP_POST_INIT_TRIGGER_CNT if g_cop_post_triggered else COP_POST_INIT_STABLE_CNT
+
         if not g_cop_post_refined_flag and g_cop_post_init_frame_cnt <= COP_POST_INIT_WINDOW_CNT:
             if g_cop_post_cand_x is not None:
                 dist_val = np.hypot(cop_curr_x - g_cop_post_cand_x,
@@ -172,7 +200,7 @@ def compute_pressure_direction(raw_frame):
                 g_cop_post_cand_y = cop_curr_y
                 g_cop_post_stable_cnt = 1
 
-            if g_cop_post_stable_cnt >= COP_POST_INIT_STABLE_CNT:
+            if g_cop_post_stable_cnt >= stable_thresh:
                 g_cop_contact_init_x = g_cop_post_cand_x
                 g_cop_contact_init_y = g_cop_post_cand_y
                 g_cop_post_refined_flag = True
