@@ -18,7 +18,7 @@ import importlib
 # ===================== 配置 =====================
 MAIN_REALTIME_MODULE = "realtime"           # "realtime"=全显示, "realtime2"=仅压阻
 MAIN_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"  # 数据保存根目录
-MAIN_CAL_MODE = "lookup"                       # "lookup"=纯查表, "fit"=纯拟合, "auto"=优先拟合回退查表
+MAIN_CAL_MODE = "discrete"                       # "lookup"=最近邻查表, "discrete"=双线性插值, "fit"=拟合, "auto"=优先拟合回退查表
 MAIN_CAL_DIM = "2D"                            # "2D"=仅切向力(Fx,Fy), "3D"=三维力(Fz,Fx,Fy)
 
 realtime = importlib.import_module(MAIN_REALTIME_MODULE)
@@ -107,6 +107,7 @@ def data_loop():
     cal_fit_ready_flag = False
     cal_pts_arr = cal_fz_arr = cal_fx_arr = cal_fy_arr = None
     cal_coefs = None
+    disc_dx_grid = disc_dy_grid = disc_fx_grid = disc_fy_grid = None
     if os.path.exists(cal_bin_path):
         try:
             if MAIN_CAL_DIM == "3D":
@@ -114,6 +115,9 @@ def data_loop():
             else:
                 cal_pts_arr, cal_fx_arr, cal_fy_arr = calibrate.load_lookup(cal_bin_path, dim="2D")
             cal_lut_ready_flag = True
+            # discrete 模式：构建规则网格
+            if MAIN_CAL_MODE == "discrete":
+                disc_dx_grid, disc_dy_grid, disc_fx_grid, disc_fy_grid = calibrate.build_discrete_grid(cal_pts_arr, cal_fx_arr, cal_fy_arr)
             print(f"📐 查找表已加载: {cal_bin_path}")
         except Exception as e:
             print(f"⚠️ 查找表加载失败: {e}")
@@ -195,6 +199,7 @@ def data_loop():
         if press_item is not None:
             do_fit = MAIN_CAL_MODE == "fit" and cal_fit_ready_flag
             do_lut = MAIN_CAL_MODE == "lookup" and cal_lut_ready_flag
+            do_discrete = MAIN_CAL_MODE == "discrete" and cal_lut_ready_flag
             do_auto = MAIN_CAL_MODE == "auto"
 
             if MAIN_CAL_DIM == "3D":
@@ -203,6 +208,8 @@ def data_loop():
                     cal_fz_val, cal_fx_val, cal_fy_val = calibrate.apply_fit(query, cal_coefs, dim="3D")
                 elif do_lut:
                     cal_fz_val, cal_fx_val, cal_fy_val = calibrate.apply(query, cal_pts_arr, cal_fx_arr, cal_fy_arr, fz_vals=cal_fz_arr)
+                elif do_discrete:
+                    cal_fx_val, cal_fy_val = calibrate.apply_discrete(cop_delta_x_filt, cop_delta_y_filt, disc_dx_grid, disc_dy_grid, disc_fx_grid, disc_fy_grid)
                 elif do_auto:
                     if cal_fit_ready_flag:
                         cal_fz_val, cal_fx_val, cal_fy_val = calibrate.apply_fit(query, cal_coefs, dim="3D")
@@ -216,6 +223,8 @@ def data_loop():
                     cal_fx_val, cal_fy_val = calibrate.apply_fit(query, cal_coefs, dim="2D")
                 elif do_lut:
                     cal_fx_val, cal_fy_val = calibrate.apply(query, cal_pts_arr, cal_fx_arr, cal_fy_arr)
+                elif do_discrete:
+                    cal_fx_val, cal_fy_val = calibrate.apply_discrete(cop_delta_x_filt, cop_delta_y_filt, disc_dx_grid, disc_dy_grid, disc_fx_grid, disc_fy_grid)
                 elif do_auto:
                     if cal_fit_ready_flag:
                         cal_fx_val, cal_fy_val = calibrate.apply_fit(query, cal_coefs, dim="2D")
