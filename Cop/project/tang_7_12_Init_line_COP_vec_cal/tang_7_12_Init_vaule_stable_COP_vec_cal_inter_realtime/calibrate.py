@@ -13,8 +13,8 @@ import csv
 import numpy as np
 
 # ===================== 可调参数 =====================
-CAL_TRAIN_CSV = "/home/qcy/Project/data/2.PZT_tangential/weight/test/data_20260606_172837.csv"  # 训练数据（构建标定模型）
-CAL_CSV_PATH = "/home/qcy/Project/data/2.PZT_tangential/weight/test/data_20260608_123920.csv"   # 被标定的 CSV
+CAL_TRAIN_CSV = "/home/qcy/Project/data/2.PZT_tangential/weight/test/COP_0615_6.csv"  # 训练数据（构建标定模型）
+CAL_CSV_PATH = "/home/qcy/Project/data/2.PZT_tangential/weight/test/COP_0615_7.csv"   # 被标定的 CSV
 CAL_DATA_MODE = "discrete"  # "continuous"=原始数据, "discrete"=按力值分组
 CAL_MODE = "discrete"         # "lookup"=最近邻, "discrete"=双线性插值, "fit"=拟合
 CAL_DIM = "2D"                # "2D"=仅切向力(Fx,Fy), "3D"=三维力(Fz,Fx,Fy)
@@ -180,9 +180,7 @@ def build_discrete_grid(points: np.ndarray, fx_vals: np.ndarray, fy_vals: np.nda
 def apply_discrete(dx: float, dy: float, dx_grid: np.ndarray, dy_grid: np.ndarray,
                    fx_grid: np.ndarray, fy_grid: np.ndarray) -> tuple:
     """规则网格双线性插值：结果连续平滑"""
-    # 钳位到网格范围
-    dx = np.clip(dx, dx_grid[0], dx_grid[-1])
-    dy = np.clip(dy, dy_grid[0], dy_grid[-1])
+    # 不钳位，允许 t/u 超出 [0,1] 实现线性外推
 
     # 找所在格子
     xi = np.searchsorted(dx_grid, dx, side='right') - 1
