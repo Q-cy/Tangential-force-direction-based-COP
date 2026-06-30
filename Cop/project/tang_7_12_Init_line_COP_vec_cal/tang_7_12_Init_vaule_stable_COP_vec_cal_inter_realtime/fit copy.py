@@ -1,3 +1,8 @@
+"""
+Curve fitting tool: fit CSV calibration data, write back to CSV, output formula.
+Standalone, no external dependencies.
+"""
+
 import os
 import csv
 import numpy as np
@@ -9,29 +14,29 @@ from scipy.interpolate import PchipInterpolator
 
 
 # ===================== Config =====================
-TRAIN_CSV_xy = "/home/qcy/Project/data/2.PZT_tangential/weight/test/COP_0615_6.csv"
-TARGET_CSV_xy = "/home/qcy/Project/data/2.PZT_tangential/weight/test/COP_0615_6.csv"
-TRAIN_CSV_z = "/home/qcy/Project/data/2.PZT_tangential/weight/concat/concat_5_10_15.csv"
-TARGET_CSV_z = "/home/qcy/Project/data/2.PZT_tangential/weight/concat/concat_5_10_15.csv"
-FIT_PARAM_Save = "/home/qcy/Project/data/2.PZT_tangential/weight/png"
+
+TRAIN_CSV = "/home/qcy/Project/data/2.PZT_tangential/weight/test/COP_0615_6.csv"
+TARGET_CSV = "/home/qcy/Project/data/2.PZT_tangential/weight/test/COP_0615_6.csv"
+
+# TRAIN_CSV = "/home/qcy/Project/data/2.PZT_tangential/weight/concat/concat_5_10_15.csv"
+# TARGET_CSV = "/home/qcy/Project/data/2.PZT_tangential/weight/concat/concat_5_10_15.csv"
 
 # Full input/output columns
+# INPUT_COLS = ["delta_CoP_X", "delta_CoP_Y"]
+# OUTPUT_COLS = ["delta_Force_X", "delta_Force_Y"]
 INPUT_COLS = ["delta_CoP_X", "delta_CoP_Y", "adc_sum"]
 OUTPUT_COLS = ["delta_Force_X", "delta_Force_Y", "delta_Force_Z"]
 
-DIM = 1                      # 1=each pair independently, 2=first 2 together, 3=all 3 together
-POLY_ORDER = 3               # 1=linear, 2=quadratic, 3=cubic (only used if FIT_TYPE="poly")
-FIT_TYPE_FX = "sym_log"      # "poly"/"sigmoid"/"exp_log"/"pchip"/"sym_exp"/"sym_log"
-FIT_TYPE_FY = "sym_log"
-FIT_TYPE_FXY = "sym_log"
-FIT_TYPE_FZ = "exp"    
-FIT_TYPE_FXYZ = "sym_log"  
+DIM = 1          # 1=each pair independently, 2=first 2 together, 3=all 3 together
+POLY_ORDER = 3   # 1=linear, 2=quadratic, 3=cubic (only used if FIT_TYPE="poly")
+FIT_TYPE = "sym_log"  # "poly"/"sigmoid"/"exp_log"/"pchip"/"sym_exp"/"sym_log"
+FIT_TYPE_FZ = "exp"    # Fz 独立类型（仅 DIM=1 时生效）
 
 TRAIN_VALID_ONLY = True
 WRITE_VALID_ONLY = True
-ONE_ON_ONE = True           # 每个力值只取一个中位数
 SAVE_COEFS = True
-SPLIT_SIGN = True           # True=正负分开拟合，False=不分
+SPLIT_SIGN = True  # True=正负分开拟合，False=不分
+
 
 # ===================== Read CSV =====================
 
@@ -39,29 +44,19 @@ def load_csv(csv_path, input_cols, output_cols, valid_only=True):
     """Read CSV, return (X[N, n_in], Y[N, n_out])"""
     X_rows, Y_rows = [], []
     with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)                                          # 迭代器，会逐行读取
+        reader = csv.DictReader(f)
         reader.fieldnames = [name.strip() for name in reader.fieldnames]
         for row in reader:
             try:
                 if valid_only and float(row.get("valid", 0)) == 0:
                     continue
-                x_vals = [float(row[c]) for c in input_cols]               # 字典按名取值
+                x_vals = [float(row[c]) for c in input_cols]
                 y_vals = [float(row[c]) for c in output_cols]
                 X_rows.append(x_vals)
                 Y_rows.append(y_vals)
             except (KeyError, ValueError):
                 continue
-    return np.array(X_rows), np.array(Y_rows)                              # 转换前N个list，转换后[N,n_in](样本数，特征数)
-
-
-#===================== Func define =====================
-def log_func(x, a, b, c):
-    """Logarithmic: y = a * ln(b * x + 1) + c"""
-    return a * np.log(b * x + 1) + c
-
-def exp_func(x, a, b, c):
-    """Exponential: y = a * exp(b * x) + c"""
-    return a * np.exp(b * x) + c
+    return np.array(X_rows), np.array(Y_rows)
 
 
 # ===================== Polynomial fit =====================
@@ -93,6 +88,7 @@ def build_design_matrix(X, order):
     else:
         raise ValueError(f"Unsupported order: {order}")
 
+
 def get_term_labels(input_cols, order):
     labels = ["1"]
     n = len(input_cols)
@@ -110,14 +106,116 @@ def get_term_labels(input_cols, order):
                     labels.append(f"{short[i]}*{short[j]}*{short[k]}")
     return labels
 
+
 def fit_polynomial(X, Y, order):
     A = build_design_matrix(X, order)
     coefs, _, _, _ = np.linalg.lstsq(A, Y, rcond=None)
     return coefs
 
+
 def predict(X, coefs, order):
     A = build_design_matrix(X, order)
     return A @ coefs
+
+
+# ===================== Sigmoid fit =====================
+
+def sigmoid(x, L, k, x0, b):
+    """Sigmoid function: y = L / (1 + exp(-k*(x-x0))) + b"""
+    return L / (1 + np.exp(-k * (x - x0))) + b
+
+
+def fit_sigmoid(X, Y):
+    """Fit sigmoid for each output column. X[N,1], Y[N,n_out]. Returns list of param arrays."""
+    n_out = Y.shape[1]
+    all_params = []
+    for i in range(n_out):
+        x = X[:, 0]
+        y = Y[:, i]
+        # Initial guess
+        y_min, y_max = np.min(y), np.max(y)
+        L0 = y_max - y_min
+        x0_0 = np.median(x)
+        k0 = 10.0
+        b0 = y_min
+        try:
+            popt, _ = curve_fit(sigmoid, x, y, p0=[L0, k0, x0_0, b0], maxfev=10000)
+            all_params.append(popt)
+        except Exception as e:
+            print(f"  Sigmoid fit failed for output {i}: {e}")
+            all_params.append(np.array([L0, k0, x0_0, b0]))
+    return all_params
+
+
+def predict_sigmoid(X, params_list):
+    """Predict using sigmoid params. X[N,1], params_list: list of [L,k,x0,b]."""
+    Y_pred = np.zeros((len(X), len(params_list)))
+    for i, p in enumerate(params_list):
+        Y_pred[:, i] = sigmoid(X[:, 0], *p)
+    return Y_pred
+
+
+# ===================== Exp/Log fit =====================
+
+def exp_func(x, a, b, c):
+    """Exponential: y = a * exp(b * x) + c"""
+    return a * np.exp(b * x) + c
+
+
+def log_func(x, a, b, c):
+    """Logarithmic: y = a * ln(b * x + 1) + c"""
+    return a * np.log(b * x + 1) + c
+
+
+def fit_exp_log(X, Y):
+    """Fit exp for negative inputs, log for positive inputs. X[N,1], Y[N,n_out]."""
+    n_out = Y.shape[1]
+    all_params = []
+    for i in range(n_out):
+        x = X[:, 0]
+        y = Y[:, i]
+
+        # Negative: exponential
+        neg_mask = x < 0
+        if np.sum(neg_mask) > 3:
+            x_neg, y_neg = x[neg_mask], y[neg_mask]
+            try:
+                # Initial guess: a=1, b=1, c=y_min
+                popt_neg, _ = curve_fit(exp_func, x_neg, y_neg,
+                                        p0=[1.0, 1.0, np.min(y_neg)], maxfev=10000)
+            except Exception:
+                popt_neg = np.array([1.0, 1.0, np.min(y_neg)])
+        else:
+            popt_neg = np.array([1.0, 1.0, 0.0])
+
+        # Positive: logarithmic
+        pos_mask = x >= 0
+        if np.sum(pos_mask) > 3:
+            x_pos, y_pos = x[pos_mask], y[pos_mask]
+            try:
+                popt_pos, _ = curve_fit(log_func, x_pos, y_pos,
+                                        p0=[1.0, 1.0, np.min(y_pos)], maxfev=10000)
+            except Exception:
+                popt_pos = np.array([1.0, 1.0, np.min(y_pos)])
+        else:
+            popt_pos = np.array([1.0, 1.0, 0.0])
+
+        all_params.append((popt_neg, popt_pos))
+    return all_params
+
+
+def predict_exp_log(X, params_list):
+    """Predict using exp/log params. X[N,1], params_list: list of (p_neg, p_pos)."""
+    Y_pred = np.zeros((len(X), len(params_list)))
+    for i, (p_neg, p_pos) in enumerate(params_list):
+        x = X[:, 0]
+        neg_mask = x < 0
+        pos_mask = x >= 0
+        if np.any(neg_mask):
+            Y_pred[neg_mask, i] = exp_func(x[neg_mask], *p_neg)
+        if np.any(pos_mask):
+            Y_pred[pos_mask, i] = log_func(x[pos_mask], *p_pos)
+    return Y_pred
 
 
 # ===================== Symmetric Exponential fit =====================
@@ -182,6 +280,30 @@ def predict_sym_exp(X, params_list):
     return Y_pred
 
 
+# ===================== PCHIP fit =====================
+
+def fit_pchip(X, Y):
+    """Fit PCHIP for each output column. X[N,1], Y[N,n_out]. Returns list of interpolators."""
+    interpolators = []
+    for i in range(Y.shape[1]):
+        x, y = X[:, 0].copy(), Y[:, i].copy()
+        sort_idx = np.argsort(x)
+        x_sorted, y_sorted = x[sort_idx], y[sort_idx]
+        # Remove duplicate x values
+        keep = np.diff(x_sorted, prepend=x_sorted[0]-1) != 0
+        x_uniq, y_uniq = x_sorted[keep], y_sorted[keep]
+        interpolators.append(PchipInterpolator(x_uniq, y_uniq))
+    return interpolators
+
+
+def predict_pchip(X, interpolators):
+    """Predict using PCHIP interpolators. X[N,1]."""
+    Y_pred = np.zeros((len(X), len(interpolators)))
+    for i, interp in enumerate(interpolators):
+        Y_pred[:, i] = interp(X[:, 0])
+    return Y_pred
+
+
 # ===================== Symmetric Logarithmic fit =====================
 
 def fit_sym_log(X, Y):
@@ -226,116 +348,6 @@ def predict_sym_log(X, params_list):
     return Y_pred
 
 
-# ===================== EXP/LOG fit =====================
-
-def fit_exp_log(X, Y):
-    """Fit exp for negative inputs, log for positive inputs. X[N,1], Y[N,n_out]."""
-    n_out = Y.shape[1]
-    all_params = []
-    for i in range(n_out):
-        x = X[:, 0]
-        y = Y[:, i]
-
-        # Negative: exponential
-        neg_mask = x < 0
-        if np.sum(neg_mask) > 3:
-            x_neg, y_neg = x[neg_mask], y[neg_mask]
-            try:
-                # Initial guess: a=1, b=1, c=y_min
-                popt_neg, _ = curve_fit(exp_func, x_neg, y_neg,
-                                        p0=[1.0, 1.0, np.min(y_neg)], maxfev=10000)
-            except Exception:
-                popt_neg = np.array([1.0, 1.0, np.min(y_neg)])
-        else:
-            popt_neg = np.array([1.0, 1.0, 0.0])
-
-        # Positive: logarithmic
-        pos_mask = x >= 0
-        if np.sum(pos_mask) > 3:
-            x_pos, y_pos = x[pos_mask], y[pos_mask]
-            try:
-                popt_pos, _ = curve_fit(log_func, x_pos, y_pos,
-                                        p0=[1.0, 1.0, np.min(y_pos)], maxfev=10000)
-            except Exception:
-                popt_pos = np.array([1.0, 1.0, np.min(y_pos)])
-        else:
-            popt_pos = np.array([1.0, 1.0, 0.0])
-
-        all_params.append((popt_neg, popt_pos))
-    return all_params
-
-def predict_exp_log(X, params_list):
-    """Predict using exp/log params. X[N,1], params_list: list of (p_neg, p_pos)."""
-    Y_pred = np.zeros((len(X), len(params_list)))
-    for i, (p_neg, p_pos) in enumerate(params_list):
-        x = X[:, 0]
-        neg_mask = x < 0
-        pos_mask = x >= 0
-        if np.any(neg_mask):
-            Y_pred[neg_mask, i] = exp_func(x[neg_mask], *p_neg)
-        if np.any(pos_mask):
-            Y_pred[pos_mask, i] = log_func(x[pos_mask], *p_pos)
-    return Y_pred
-
-
-# ===================== Sigmoid fit =====================
-
-def sigmoid(x, L, k, x0, b):
-    """Sigmoid function: y = L / (1 + exp(-k*(x-x0))) + b"""
-    return L / (1 + np.exp(-k * (x - x0))) + b
-
-def fit_sigmoid(X, Y):
-    """Fit sigmoid for each output column. X[N,1], Y[N,n_out]. Returns list of param arrays."""
-    n_out = Y.shape[1]
-    all_params = []
-    for i in range(n_out):
-        x = X[:, 0]
-        y = Y[:, i]
-        # Initial guess
-        y_min, y_max = np.min(y), np.max(y)
-        L0 = y_max - y_min
-        x0_0 = np.median(x)
-        k0 = 10.0
-        b0 = y_min
-        try:
-            popt, _ = curve_fit(sigmoid, x, y, p0=[L0, k0, x0_0, b0], maxfev=10000)
-            all_params.append(popt)
-        except Exception as e:
-            print(f"  Sigmoid fit failed for output {i}: {e}")
-            all_params.append(np.array([L0, k0, x0_0, b0]))
-    return all_params
-
-def predict_sigmoid(X, params_list):
-    """Predict using sigmoid params. X[N,1], params_list: list of [L,k,x0,b]."""
-    Y_pred = np.zeros((len(X), len(params_list)))
-    for i, p in enumerate(params_list):
-        Y_pred[:, i] = sigmoid(X[:, 0], *p)
-    return Y_pred
-
-
-# ===================== PCHIP fit =====================
-
-def fit_pchip(X, Y):
-    """Fit PCHIP for each output column. X[N,1], Y[N,n_out]. Returns list of interpolators."""
-    interpolators = []
-    for i in range(Y.shape[1]):
-        x, y = X[:, 0].copy(), Y[:, i].copy()
-        sort_idx = np.argsort(x)
-        x_sorted, y_sorted = x[sort_idx], y[sort_idx]
-        # Remove duplicate x values
-        keep = np.diff(x_sorted, prepend=x_sorted[0]-1) != 0
-        x_uniq, y_uniq = x_sorted[keep], y_sorted[keep]
-        interpolators.append(PchipInterpolator(x_uniq, y_uniq))
-    return interpolators
-
-def predict_pchip(X, interpolators):
-    """Predict using PCHIP interpolators. X[N,1]."""
-    Y_pred = np.zeros((len(X), len(interpolators)))
-    for i, interp in enumerate(interpolators):
-        Y_pred[:, i] = interp(X[:, 0])
-    return Y_pred
-
-
 # ===================== Print formula =====================
 
 def print_formulas(coefs, labels, output_cols):
@@ -376,78 +388,72 @@ def compute_errors(Y_true, Y_pred, output_cols):
 # ===================== Save coefficients =====================
 
 def save_coefs(fit_results, path):
-    """Save fit results to .bin with per-output metadata."""
+    """Save fit results to .bin. fit_results: list of (inp, out, params, ftype, split_sign)"""
     os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
     with open(path, "wb") as f:
+        total_outputs = 0
+        first_ftype = fit_results[0][3] if fit_results else "sigmoid"
         n_inputs = len(fit_results[0][0]) if fit_results else 1
-        total_outputs = sum(len(out) for _, out, _, _, _ in fit_results)
+        has_split = fit_results[0][4] if fit_results else False
+        for inp, out, params, ftype, split in fit_results:
+            total_outputs += len(out)
 
-        def _type_id(ft):
-            m = {"sigmoid": 0, "poly": 1, "exp_log": 2, "pchip": 3,
-                 "sym_exp": 4, "sym_log": 5, "exp": 6}
-            return m.get(ft, 1)
+        if first_ftype == "pchip":
+            fit_type_id = 3
+            n_params = len(fit_results[0][2][0].x)
+        elif first_ftype == "sym_exp" or first_ftype == "sym_log":
+            fit_type_id = 4 if first_ftype == "sym_exp" else 5
+            n_params = 3
+        elif first_ftype == "sigmoid":
+            fit_type_id = 0
+            n_params = 4
+        elif first_ftype == "exp":
+            fit_type_id = 6
+            n_params = 3
+        elif first_ftype == "exp_log":
+            fit_type_id = 2
+            n_params = 3
+        else:
+            fit_type_id = 1
+            n_params = fit_results[0][2][0].shape[0] if has_split else fit_results[0][2].shape[0]
 
-        # Header: n_inputs, n_outputs
+        # Header
+        f.write(np.int32(fit_type_id).tobytes())
         f.write(np.int32(n_inputs).tobytes())
         f.write(np.int32(total_outputs).tobytes())
+        f.write(np.int32(n_params).tobytes())
+        f.write(np.int32(1 if has_split else 0).tobytes())
 
-        # Per-output metadata: (fit_type_id, n_params, split) per output
-        for _, out, params, ftype, split in fit_results:
-            fid = _type_id(ftype)
-            if ftype == "pchip":
-                npar = len(params[0].x)
-            elif ftype in ("sym_exp", "sym_log"):
-                npar = 3
-            elif ftype == "sigmoid":
-                npar = 4
-            elif ftype == "exp":
-                npar = 5
-            elif ftype == "exp_log":
-                npar = 3
-            else:  # poly
-                npar = params[0].shape[0] if split else params.shape[0]
-            for _ in range(len(out)):
-                f.write(np.int32(fid).tobytes())
-                f.write(np.int32(npar).tobytes())
-                f.write(np.int32(1 if split else 0).tobytes())
-
-        # Per-output params data
-        for _, out, params, ftype, split in fit_results:
-            n_out = len(out)
+        # Params
+        for inp, out, params, ftype, split in fit_results:
             if ftype == "exp":
                 for p in params:
                     f.write(np.array(p, dtype=np.float64).tobytes())
             elif ftype in ("sym_exp", "sym_log"):
-                if split:
-                    # params = [(p_neg_pos, p_pos_pos), (p_neg_neg, p_pos_neg)]
-                    # Combine: p_neg from neg-fit, p_pos from pos-fit → 1 entry per output
-                    combined_neg = np.array(params[1][0], dtype=np.float64)
-                    combined_pos = np.array(params[0][1], dtype=np.float64)
-                    f.write(combined_neg.tobytes())
-                    f.write(combined_pos.tobytes())
-                else:
-                    for p_neg, p_pos in params:
-                        f.write(np.array(p_neg, dtype=np.float64).tobytes())
-                        f.write(np.array(p_pos, dtype=np.float64).tobytes())
+                for p_neg, p_pos in params:
+                    f.write(np.array(p_neg, dtype=np.float64).tobytes())
+                    f.write(np.array(p_pos, dtype=np.float64).tobytes())
             elif ftype == "pchip":
+                # params = list of PchipInterpolator, save (x_knots, y_knots)
                 for interp in params:
                     x = np.array(interp.x, dtype=np.float64)
                     y = np.array(interp(x), dtype=np.float64)
                     f.write(x.tobytes())
                     f.write(y.tobytes())
             elif ftype == "exp_log":
+                # params = [(p_neg, p_pos), ...] per output
                 for p_neg, p_pos in params:
                     f.write(np.array(p_neg, dtype=np.float64).tobytes())
                     f.write(np.array(p_pos, dtype=np.float64).tobytes())
             elif split:
-                # Interleave pos/neg per output to match reader order
-                for i in range(n_out):
+                # params = [params_pos, params_neg]
+                for sign_params in params:
                     if ftype == "sigmoid":
-                        f.write(np.array(params[0][i], dtype=np.float64).tobytes())
-                        f.write(np.array(params[1][i], dtype=np.float64).tobytes())
+                        for p in sign_params:
+                            f.write(np.array(p, dtype=np.float64).tobytes())
                     else:
-                        f.write(np.array(params[0].T[i], dtype=np.float64).tobytes())
-                        f.write(np.array(params[1].T[i], dtype=np.float64).tobytes())
+                        for c in sign_params.T:
+                            f.write(np.array(c, dtype=np.float64).tobytes())
             else:
                 if ftype == "sigmoid":
                     for p in params:
@@ -455,63 +461,63 @@ def save_coefs(fit_results, path):
                 else:
                     for c in params.T:
                         f.write(np.array(c, dtype=np.float64).tobytes())
-    print(f"  Coefs saved: {path} ({os.path.getsize(path)} bytes, {total_outputs} outputs)")
+    print(f"  Coefs saved: {path} ({os.path.getsize(path)} bytes, {total_outputs} outputs, split={has_split})")
+
 
 def load_coefs(path):
-    """Load fit coefs from .bin. Returns (fit_type, n_inputs, params_list, split_sign).
-    Each entry in params_list is a 3-tuple (params, fit_type_str, split_bool)."""
-    _ID_MAP = {0: "sigmoid", 1: "poly", 2: "exp_log", 3: "pchip",
-               4: "sym_exp", 5: "sym_log", 6: "exp"}
-
+    """Load fit coefs from .bin. Returns (fit_type, n_inputs, params_list, split_sign)"""
     with open(path, "rb") as f:
+        fit_type_id = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
         n_inputs = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
         n_outputs = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
+        n_params = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
+        split_sign = int(np.frombuffer(f.read(4), dtype=np.int32)[0]) == 1
 
-        # Read per-output metadata
-        meta = []  # list of (fit_type_str, n_params, split)
-        for _ in range(n_outputs):
-            fid = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
-            npar = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
-            spl = int(np.frombuffer(f.read(4), dtype=np.int32)[0]) == 1
-            meta.append((_ID_MAP.get(fid, "poly"), npar, spl))
+        if fit_type_id == 0:
+            fit_type = "sigmoid"
+        elif fit_type_id == 2:
+            fit_type = "exp_log"
+        elif fit_type_id == 3:
+            fit_type = "pchip"
+        elif fit_type_id == 4:
+            fit_type = "sym_exp"
+        elif fit_type_id == 5:
+            fit_type = "sym_log"
+        else:
+            fit_type = "poly"
 
-        # Read per-output params
-        params_list = []
-        for ft, npar, spl in meta:
-            if ft in ("sym_exp", "sym_log"):
-                p_neg = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                p_pos = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append(((p_neg, p_pos), ft, spl))
-            elif ft == "pchip":
-                from scipy.interpolate import PchipInterpolator
-                x_knots = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                y_knots = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append((PchipInterpolator(x_knots, y_knots), ft, spl))
-            elif ft == "exp_log":
-                p_neg = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                p_pos = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append(((p_neg, p_pos), ft, spl))
-            elif ft == "exp":
-                p = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append((p, ft, spl))
-            elif spl:
-                p_pos = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                p_neg = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append(((p_pos, p_neg), ft, spl))
-            else:
-                p = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append((p, ft, spl))
-
-    first_ft = meta[0][0] if meta else "poly"
-    first_split = meta[0][2] if meta else False
-    return first_ft, n_inputs, params_list, first_split
-
-def _resolve_entry(p, fit_type, split_sign):
-    """If p is a 3-tuple (params, ft, sp) from new load_coefs, use per-entry metadata.
-    Otherwise fall back to the global fit_type/split_sign for old-format params."""
-    if isinstance(p, tuple) and len(p) == 3:
-        return p[0], p[1], p[2]
-    return p, fit_type, split_sign
+        if fit_type in ("sym_exp", "sym_log"):
+            params_list = []
+            for _ in range(n_outputs):
+                p_neg = np.frombuffer(f.read(n_params * 8), dtype=np.float64).copy()
+                p_pos = np.frombuffer(f.read(n_params * 8), dtype=np.float64).copy()
+                params_list.append((p_neg, p_pos))
+        elif fit_type == "pchip":
+            from scipy.interpolate import PchipInterpolator
+            params_list = []
+            for _ in range(n_outputs):
+                x_knots = np.frombuffer(f.read(n_params * 8), dtype=np.float64).copy()
+                y_knots = np.frombuffer(f.read(n_params * 8), dtype=np.float64).copy()
+                params_list.append(PchipInterpolator(x_knots, y_knots))
+        elif fit_type == "exp_log":
+            # exp_log: always split, each output has (p_neg, p_pos)
+            params_list = []
+            for _ in range(n_outputs):
+                p_neg = np.frombuffer(f.read(n_params * 8), dtype=np.float64).copy()
+                p_pos = np.frombuffer(f.read(n_params * 8), dtype=np.float64).copy()
+                params_list.append((p_neg, p_pos))
+        elif split_sign:
+            params_list = []
+            for _ in range(n_outputs):
+                p_pos = np.frombuffer(f.read(n_params * 8), dtype=np.float64).copy()
+                p_neg = np.frombuffer(f.read(n_params * 8), dtype=np.float64).copy()
+                params_list.append((p_pos, p_neg))
+        else:
+            params_list = []
+            for _ in range(n_outputs):
+                p = np.frombuffer(f.read(n_params * 8), dtype=np.float64).copy()
+                params_list.append(p)
+    return fit_type, n_inputs, params_list, split_sign
 
 
 def apply_predict(x_val, params_list, fit_type, split_sign=False):
@@ -519,39 +525,35 @@ def apply_predict(x_val, params_list, fit_type, split_sign=False):
     x = float(x_val) if np.isscalar(x_val) else float(x_val[0])
     results = []
     for p in params_list:
-        params, ft, sp = _resolve_entry(p, fit_type, split_sign)
-        if ft == "pchip":
-            results.append(float(params(x)))
-        elif ft in ("sym_exp", "sym_log"):
-            p_neg, p_pos = params
+        if fit_type == "pchip":
+            results.append(float(p(x)))
+        elif fit_type in ("sym_exp", "sym_log"):
+            p_neg, p_pos = p
             if x < 0:
-                fn = exp_func if ft == "sym_exp" else log_func
+                fn = exp_func if fit_type == "sym_exp" else log_func
                 results.append(float(-fn(-x, *p_neg)))
             else:
-                fn = exp_func if ft == "sym_exp" else log_func
+                fn = exp_func if fit_type == "sym_exp" else log_func
                 results.append(float(fn(x, *p_pos)))
-        elif ft == "exp_log":
-            p_neg, p_pos = params
+        elif fit_type == "exp_log":
+            p_neg, p_pos = p
             if x < 0:
                 results.append(float(exp_func(x, *p_neg)))
             else:
                 results.append(float(log_func(x, *p_pos)))
-        elif ft == "exp":
-            a, b, c, xm, xs = params
-            results.append(float(-exp_func((x - xm) / xs, a, b, c)))
-        elif sp:
-            psel = params[0] if x >= 0 else params[1]
-            if ft == "sigmoid":
-                results.append(float(sigmoid(x, *psel)))
-            else:
-                basis = np.array([x**j for j in range(len(psel))])
-                results.append(float(np.dot(psel, basis)))
-        else:
-            if ft == "sigmoid":
+        elif split_sign:
+            params = p[0] if x >= 0 else p[1]
+            if fit_type == "sigmoid":
                 results.append(float(sigmoid(x, *params)))
             else:
                 basis = np.array([x**j for j in range(len(params))])
                 results.append(float(np.dot(params, basis)))
+        else:
+            if fit_type == "sigmoid":
+                results.append(float(sigmoid(x, *p)))
+            else:
+                basis = np.array([x**j for j in range(len(p))])
+                results.append(float(np.dot(p, basis)))
     return results
 
 
@@ -560,39 +562,35 @@ def apply_predict_multi(x_vals_list, params_list, fit_type, split_sign=False):
     results = []
     for i, p in enumerate(params_list):
         x = float(x_vals_list[i]) if i < len(x_vals_list) else float(x_vals_list[0])
-        params, ft, sp = _resolve_entry(p, fit_type, split_sign)
-        if ft == "pchip":
-            results.append(float(params(x)))
-        elif ft in ("sym_exp", "sym_log"):
-            p_neg, p_pos = params
+        if fit_type == "pchip":
+            results.append(float(p(x)))
+        elif fit_type in ("sym_exp", "sym_log"):
+            p_neg, p_pos = p
             if x < 0:
-                fn = exp_func if ft == "sym_exp" else log_func
+                fn = exp_func if fit_type == "sym_exp" else log_func
                 results.append(float(-fn(-x, *p_neg)))
             else:
-                fn = exp_func if ft == "sym_exp" else log_func
+                fn = exp_func if fit_type == "sym_exp" else log_func
                 results.append(float(fn(x, *p_pos)))
-        elif ft == "exp_log":
-            p_neg, p_pos = params
+        elif fit_type == "exp_log":
+            p_neg, p_pos = p
             if x < 0:
                 results.append(float(exp_func(x, *p_neg)))
             else:
                 results.append(float(log_func(x, *p_pos)))
-        elif ft == "exp":
-            a, b, c, xm, xs = params
-            results.append(float(-exp_func((x - xm) / xs, a, b, c)))
-        elif sp:
-            psel = params[0] if x >= 0 else params[1]
-            if ft == "sigmoid":
-                results.append(float(sigmoid(x, *psel)))
-            else:
-                basis = np.array([x**j for j in range(len(psel))])
-                results.append(float(np.dot(psel, basis)))
-        else:
-            if ft == "sigmoid":
+        elif split_sign:
+            params = p[0] if x >= 0 else p[1]
+            if fit_type == "sigmoid":
                 results.append(float(sigmoid(x, *params)))
             else:
                 basis = np.array([x**j for j in range(len(params))])
                 results.append(float(np.dot(params, basis)))
+        else:
+            if fit_type == "sigmoid":
+                results.append(float(sigmoid(x, *p)))
+            else:
+                basis = np.array([x**j for j in range(len(p))])
+                results.append(float(np.dot(p, basis)))
     return results
 
 
@@ -725,15 +723,7 @@ def get_medians(csv_path, input_cols, output_cols):
     if len(X_all) == 0:
         return X_all, Y_all, np.empty((0, len(input_cols))), np.empty((0, len(output_cols)))
 
-    # Group by output force value similarity
-    if ONE_ON_ONE:
-        # Round to nearest 0.5N, one median per force level
-        Y_round = np.round(Y_all[:,0] * 2) / 2
-        for y_val in np.sort(np.unique(Y_round)):
-            mask = Y_round == y_val
-            X_med.append(np.median(X_all[mask], axis=0))
-            Y_med.append(np.median(Y_all[mask], axis=0))
-        return X_all, Y_all, np.array(X_med), np.array(Y_med)
+    # Group by output force value similarity (±0.5N per axis)
     FORCE_BIN = 0.2
     # Sort by first output column for grouping
     if Y_all.shape[1] > 0:
@@ -751,6 +741,7 @@ def get_medians(csv_path, input_cols, output_cols):
             i = j + 1
 
     return X_all, Y_all, np.array(X_med), np.array(Y_med)
+
 
 def plot_single(ax, x_med, y_med, yi, xi, short_in, short_out, predict_fn=None):
     """Plot one subplot: scatter medians + fitted line."""
@@ -777,13 +768,13 @@ def plot_single(ax, x_med, y_med, yi, xi, short_in, short_out, predict_fn=None):
         else:
             ax.set_xlim(xr.min() - 1000, xr.max() + 1000)
 
+
 def _make_predict_fn(ftype, params, order=POLY_ORDER):
     """Create a predict function for dense x grid. Returns fn(x_1d) -> y_1d for output yi=0."""
     if ftype == "exp":
         def fn(x):
             x = np.atleast_1d(np.asarray(x, dtype=np.float64))
-            a,b,c,xm,xs = params[0]
-            return -exp_func((x - xm) / xs, a, b, c)
+            return exp_func(x, *params[0])
         return fn
     if ftype in ("sym_exp", "sym_log"):
         def fn(x):
@@ -825,6 +816,7 @@ if __name__ == "__main__":
     dim = min(DIM, n_pairs)
 
     print(f"  DIM = {dim}")
+    print(f"  Training CSV: {TRAIN_CSV}")
 
     if dim == 1:
         # Each pair independently
@@ -832,33 +824,35 @@ if __name__ == "__main__":
         for i in range(n_pairs):
             inp = [INPUT_COLS[i]]
             out = [OUTPUT_COLS[i]]
-            out_name = out[0]
-            # 精确匹配完整列名，补全else防止变量未定义
-            if out_name == "delta_Force_Z":
-                train_file = TRAIN_CSV_z
-                ft = FIT_TYPE_FZ
-            elif out_name == "delta_Force_X":
-                train_file = TRAIN_CSV_xy
-                ft = FIT_TYPE_FX
-            elif out_name == "delta_Force_Y":
-                train_file = TRAIN_CSV_xy
-                ft = FIT_TYPE_FY
-            else:
-                train_file = TRAIN_CSV_xy
-                ft = FIT_TYPE_FXY
-    
-            X_train, Y_train = load_csv(train_file, inp, out, valid_only=TRAIN_VALID_ONLY)
-            print(f"\n  --- {out_name} <- {inp[0]} ---")
-    
-            # 第一层优先判断是否开启正负分段 SPLIT_SIGN
-            if SPLIT_SIGN and out_name != "delta_Force_Z":
-                # 分割正负样本掩码
+            X_train, Y_train = load_csv(TRAIN_CSV, inp, out, valid_only=TRAIN_VALID_ONLY)
+            print(f"\n  --- {out[0]} <- {inp[0]} ---")
+
+            ft = FIT_TYPE_FZ if ("Z" in out[0] or "z" in out[0]) else FIT_TYPE
+            if ft == "exp":
+                try: popt,_ = curve_fit(exp_func, X_train[:,0], Y_train[:,0], p0=[1.,0.0001,np.min(Y_train)], maxfev=10000)
+                except: popt = np.array([1.,0.0001,np.min(Y_train)])
+                params = [popt]  # list of one array per output
+                Y_pred = np.array([exp_func(X_train[:,0], *popt)]).T
+                fit_results.append((inp, out, params, "exp", False))
+            elif ft in ("sym_exp", "sym_log"):
+                fn_fit = fit_sym_exp if ft == "sym_exp" else fit_sym_log
+                fn_pred = predict_sym_exp if ft == "sym_exp" else predict_sym_log
+                params = fn_fit(X_train, Y_train)
+                Y_pred = fn_pred(X_train, params)
+                fit_results.append((inp, out, params, ft, True))
+            elif ft == "pchip":
+                params = fit_pchip(X_train, Y_train)
+                Y_pred = predict_pchip(X_train, params)
+                print(f"  PCHIP knots: {len(params[0].x)} points")
+                fit_results.append((inp, out, params, "pchip", False))
+            elif SPLIT_SIGN or ft == "exp_log":
+                # Split by sign of input
                 pos_mask = X_train[:, 0] >= 0
                 neg_mask = ~pos_mask
                 X_pos, Y_pos = X_train[pos_mask], Y_train[pos_mask]
                 X_neg, Y_neg = X_train[neg_mask], Y_train[neg_mask]
                 print(f"  Positive: {len(X_pos)} samples, Negative: {len(X_neg)} samples")
-    
+
                 if ft == "exp_log":
                     params = fit_exp_log(X_train, Y_train)
                     for j, (p_neg, p_pos) in enumerate(params):
@@ -866,27 +860,18 @@ if __name__ == "__main__":
                         print(f"  {out[j]} +: a={p_pos[0]:.4f}, b={p_pos[1]:.4f}, c={p_pos[2]:.4f} (log)")
                     Y_pred = predict_exp_log(X_train, params)
                     fit_results.append((inp, out, params, "exp_log", True))
-                elif ft == "sym_exp":
-                    params_pos = fit_sym_exp(X_pos, Y_pos)[0]
-                    params_neg = fit_sym_exp(X_neg, Y_neg)[0]
+                elif ft == "sigmoid":
+                    params_pos = fit_sigmoid(X_pos, Y_pos)
+                    params_neg = fit_sigmoid(X_neg, Y_neg)
                     params = [params_pos, params_neg]
+                    for j in range(len(out)):
+                        pp, pn = params_pos[j], params_neg[j]
+                        print(f"  {out[j]} +: L={pp[0]:.4f}, k={pp[1]:.4f}, x0={pp[2]:.4f}, b={pp[3]:.4f}")
+                        print(f"  {out[j]} -: L={pn[0]:.4f}, k={pn[1]:.4f}, x0={pn[2]:.4f}, b={pn[3]:.4f}")
                     Y_pred = np.zeros_like(Y_train)
-                    Y_pred[pos_mask] = predict_sym_exp(X_pos, [params_pos])
-                    Y_pred[neg_mask] = predict_sym_exp(X_neg, [params_neg])
-                    fit_results.append((inp, out, params, "sym_exp", True))
-                elif ft == "sym_log":
-                    params_pos = fit_sym_log(X_pos, Y_pos)[0]
-                    params_neg = fit_sym_log(X_neg, Y_neg)[0]
-                    params = [params_pos, params_neg]
-                    Y_pred = np.zeros_like(Y_train)
-                    Y_pred[pos_mask] = predict_sym_log(X_pos, [params_pos])
-                    Y_pred[neg_mask] = predict_sym_log(X_neg, [params_neg])
-                    fit_results.append((inp, out, params, "sym_log", True))
-                elif ft == "pchip":
-                    params = fit_pchip(X_train, Y_train)
-                    Y_pred = predict_pchip(X_train, params)
-                    print(f"  PCHIP knots: {len(params[0].x)} points")
-                    fit_results.append((inp, out, params, "pchip", False))
+                    Y_pred[pos_mask] = predict_sigmoid(X_pos, params_pos)
+                    Y_pred[neg_mask] = predict_sigmoid(X_neg, params_neg)
+                    fit_results.append((inp, out, params, "sigmoid", True))
                 else:
                     coefs_pos = fit_polynomial(X_pos, Y_pos, POLY_ORDER)
                     coefs_neg = fit_polynomial(X_neg, Y_neg, POLY_ORDER)
@@ -898,54 +883,45 @@ if __name__ == "__main__":
                     Y_pred[pos_mask] = predict(X_pos, coefs_pos, POLY_ORDER)
                     Y_pred[neg_mask] = predict(X_neg, coefs_neg, POLY_ORDER)
                     fit_results.append((inp, out, params, "poly", True))
-    
             else:
-                # SPLIT_SIGN=False，不分正负，全局一套参数拟合
                 if ft == "exp":
-                    x_raw = X_train[:,0]; y = -Y_train[:,0]  # 取反
-                    xm, xs = 0.0, 1.0
-                    if np.max(np.abs(x_raw)) > 100:
-                        xm = float(np.mean(x_raw)); xs = float(np.std(x_raw)) or 1.0
-                        x_fit = (x_raw - xm) / xs
-                    else:
-                        x_fit = x_raw
-                    try:
-                        popt,_ = curve_fit(exp_func, x_fit, y, p0=[1.,1.,np.min(y)], maxfev=10000)
-                    except:
-                        popt = np.array([1.,1.,np.min(y)])
-                    params = [(*popt, xm, xs)]
-                    Y_pred = -np.array([exp_func(x_fit, *popt)]).T  # 取反还原
+                    try: popt,_ = curve_fit(exp_func, X_train[:,0], Y_train[:,0], p0=[1.,0.0001,np.min(Y_train)], maxfev=10000)
+                    except: popt = np.array([1.,0.0001,np.min(Y_train)])
+                    params = [popt]; Y_pred = np.array([exp_func(X_train[:,0], *popt)]).T
                     fit_results.append((inp, out, params, "exp", False))
-    
+                elif ft == "sym_exp":
+                    params = fit_sym_exp(X_train, Y_train)
+                    Y_pred = predict_sym_exp(X_train, params)
+                    fit_results.append((inp, out, params, "sym_exp", True))
                 elif ft == "pchip":
                     params = fit_pchip(X_train, Y_train)
                     Y_pred = predict_pchip(X_train, params)
                     print(f"  PCHIP knots: {len(params[0].x)} points")
                     fit_results.append((inp, out, params, "pchip", False))
-    
                 elif ft == "sigmoid":
                     params = fit_sigmoid(X_train, Y_train)
                     Y_pred = predict_sigmoid(X_train, params)
                     for j, p in enumerate(params):
                         print(f"  {out[j]}: L={p[0]:.4f}, k={p[1]:.4f}, x0={p[2]:.4f}, b={p[3]:.4f}")
                     fit_results.append((inp, out, params, "sigmoid", False))
-    
                 else:
                     coefs = fit_polynomial(X_train, Y_train, POLY_ORDER)
                     labels = get_term_labels(inp, POLY_ORDER)
                     print_formulas(coefs, labels, out)
                     Y_pred = predict(X_train, coefs, POLY_ORDER)
                     fit_results.append((inp, out, coefs, "poly", False))
-                compute_errors(Y_train, Y_pred, out)
+
+            compute_errors(Y_train, Y_pred, out)
 
         # Save coefs
         if SAVE_COEFS:
-            coef_path = os.path.join(FIT_PARAM_Save, "fit_coefs.bin")
+            out_dir = os.path.dirname(TRAIN_CSV)
+            coef_path = os.path.join(out_dir, "fit_coefs.bin")
             save_coefs(fit_results, coef_path)
 
         # Write back
-        print(f"  Write back to: {TARGET_CSV_xy}")
-        write_back_csv(TARGET_CSV_xy, INPUT_COLS[:n_pairs], OUTPUT_COLS[:n_pairs], fit_results, POLY_ORDER, 1, WRITE_VALID_ONLY)
+        print(f"  Target CSV: {TARGET_CSV}")
+        write_back_csv(TARGET_CSV, INPUT_COLS[:n_pairs], OUTPUT_COLS[:n_pairs], fit_results, POLY_ORDER, 1, WRITE_VALID_ONLY)
 
         # Plot
         fig, axes = plt.subplots(n_pairs, 1, figsize=(10, 5 * n_pairs), squeeze=False)
@@ -953,12 +929,10 @@ if __name__ == "__main__":
             inp, out, params, ftype, split = fit_results[i]
             short_in = [c.replace("delta_", "").replace("_", "") for c in inp]
             short_out = [c.replace("delta_", "").replace("_", "") for c in out]
-            plot_csv = TRAIN_CSV_z if ("Z" in out[0] or "z" in out[0]) else TARGET_CSV_xy
-            X_all, Y_all, X_med, Y_med = get_medians(plot_csv, inp, out)
+            X_all, Y_all, X_med, Y_med = get_medians(TARGET_CSV, inp, out)
             if len(X_all) > 0:
                 if ftype == "exp":
-                    a,b,c,xm,xs = params[0]
-                    Y_pred = -np.array([exp_func((X_all[:,0]-xm)/xs, a,b,c)]).T
+                    Y_pred = np.array([exp_func(X_all[:,0], *params[0])]).T
                 elif ftype in ("sym_exp", "sym_log"):
                     Y_pred = predict_sym_exp(X_all, params) if ftype == "sym_exp" else predict_sym_log(X_all, params)
                 elif ftype == "pchip":
@@ -983,8 +957,123 @@ if __name__ == "__main__":
                         Y_pred = predict(X_all, params, POLY_ORDER)
                 plot_single(axes[i, 0], X_med, Y_med, 0, 0, short_in, short_out, _make_predict_fn(ftype, params))
         plt.tight_layout()
-        csv_stem = os.path.splitext(os.path.basename(TARGET_CSV_xy))[0]
-        save_path = os.path.join(os.path.dirname(TARGET_CSV_xy), f"{csv_stem}.png")
+        csv_stem = os.path.splitext(os.path.basename(TARGET_CSV))[0]
+        save_path = os.path.join(os.path.dirname(TARGET_CSV), f"fit_{csv_stem}.png")
+        plt.savefig(save_path, dpi=150)
+        plt.close(fig)
+        print(f"  Plot saved: {save_path}")
+
+    else:
+        # DIM=2 or 3: all inputs together
+        inp = INPUT_COLS[:dim]
+        out = OUTPUT_COLS[:dim]
+        X_train, Y_train = load_csv(TRAIN_CSV, inp, out, valid_only=TRAIN_VALID_ONLY)
+        print(f"  Training samples: {len(X_train)}")
+
+        if SPLIT_SIGN:
+            # Split by sign of first input
+            pos_mask = X_train[:, 0] >= 0
+            neg_mask = ~pos_mask
+            X_pos, Y_pos = X_train[pos_mask], Y_train[pos_mask]
+            X_neg, Y_neg = X_train[neg_mask], Y_train[neg_mask]
+            print(f"  Positive: {len(X_pos)} samples, Negative: {len(X_neg)} samples")
+
+            if FIT_TYPE == "sym_exp":
+                params = fit_sym_exp(X_train, Y_train)
+                Y_pred = predict_sym_exp(X_train, params)
+                fit_results = [(inp, out, params, "sym_exp", False)]
+            elif FIT_TYPE == "pchip":
+                params = fit_pchip(X_train, Y_train)
+                Y_pred = predict_pchip(X_train, params)
+                print(f"  PCHIP knots: {len(params[0].x)} points")
+                fit_results = [(inp, out, params, "pchip", False)]
+            elif FIT_TYPE == "exp_log":
+                params = fit_exp_log(X_train, Y_train)
+                Y_pred = predict_exp_log(X_train, params)
+                fit_results = [(inp, out, params, "exp_log", True)]
+            elif FIT_TYPE == "sigmoid":
+                params_pos = fit_sigmoid(X_pos, Y_pos)
+                params_neg = fit_sigmoid(X_neg, Y_neg)
+                params = [params_pos, params_neg]
+                Y_pred = np.zeros_like(Y_train)
+                Y_pred[pos_mask] = predict_sigmoid(X_pos, params_pos)
+                Y_pred[neg_mask] = predict_sigmoid(X_neg, params_neg)
+                fit_results = [(inp, out, params, "sigmoid", True)]
+            else:
+                coefs_pos = fit_polynomial(X_pos, Y_pos, POLY_ORDER)
+                coefs_neg = fit_polynomial(X_neg, Y_neg, POLY_ORDER)
+                params = [coefs_pos, coefs_neg]
+                labels = get_term_labels(inp, POLY_ORDER)
+                print(f"  Positive:"); print_formulas(coefs_pos, labels, out)
+                print(f"  Negative:"); print_formulas(coefs_neg, labels, out)
+                Y_pred = np.zeros_like(Y_train)
+                Y_pred[pos_mask] = predict(X_pos, coefs_pos, POLY_ORDER)
+                Y_pred[neg_mask] = predict(X_neg, coefs_neg, POLY_ORDER)
+                fit_results = [(inp, out, params, "poly", True)]
+        else:
+            if FIT_TYPE == "sym_exp":
+                params = fit_sym_exp(X_train, Y_train)
+                Y_pred = predict_sym_exp(X_train, params)
+                fit_results = [(inp, out, params, "sym_exp", False)]
+            elif FIT_TYPE == "pchip":
+                params = fit_pchip(X_train, Y_train)
+                Y_pred = predict_pchip(X_train, params)
+                print(f"  PCHIP knots: {len(params[0].x)} points")
+                fit_results = [(inp, out, params, "pchip", False)]
+            elif FIT_TYPE == "sigmoid":
+                params = fit_sigmoid(X_train, Y_train)
+                Y_pred = predict_sigmoid(X_train, params)
+                fit_results = [(inp, out, params, "sigmoid", False)]
+            else:
+                coefs = fit_polynomial(X_train, Y_train, POLY_ORDER)
+                labels = get_term_labels(inp, POLY_ORDER)
+                print_formulas(coefs, labels, out)
+                Y_pred = predict(X_train, coefs, POLY_ORDER)
+                fit_results = [(inp, out, coefs, "poly", False)]
+
+        compute_errors(Y_train, Y_pred, out)
+
+        if SAVE_COEFS:
+            out_dir = os.path.dirname(TRAIN_CSV)
+            coef_path = os.path.join(out_dir, "fit_coefs.bin")
+            save_coefs(fit_results, coef_path)
+
+        print(f"  Target CSV: {TARGET_CSV}")
+        write_back_csv(TARGET_CSV, inp, out, fit_results, POLY_ORDER, dim, WRITE_VALID_ONLY)
+
+        # Plot
+        short_in = [c.replace("delta_", "").replace("_", "") for c in inp]
+        short_out = [c.replace("delta_", "").replace("_", "") for c in out]
+        X_all, Y_all, X_med, Y_med = get_medians(TARGET_CSV, inp, out)
+        _, _, params_plot, ftype_plot, split_plot = fit_results[0]
+        if ftype_plot in ("sym_exp", "sym_log"):
+            Y_pred_all = predict_sym_exp(X_all, params_plot) if ftype_plot == "sym_exp" else predict_sym_log(X_all, params_plot)
+        elif ftype_plot == "pchip":
+            Y_pred_all = predict_pchip(X_all, params_plot)
+        elif ftype_plot == "exp_log":
+            Y_pred_all = predict_exp_log(X_all, params_plot)
+        elif split_plot:
+            p_pos, p_neg = params_plot
+            pos_mask_all = X_all[:, 0] >= 0
+            neg_mask_all = ~pos_mask_all
+            Y_pred_all = np.zeros_like(Y_all)
+            if ftype_plot == "sigmoid":
+                Y_pred_all[pos_mask_all] = predict_sigmoid(X_all[pos_mask_all], p_pos)
+                Y_pred_all[neg_mask_all] = predict_sigmoid(X_all[neg_mask_all], p_neg)
+            else:
+                Y_pred_all[pos_mask_all] = predict(X_all[pos_mask_all], p_pos, POLY_ORDER)
+                Y_pred_all[neg_mask_all] = predict(X_all[neg_mask_all], p_neg, POLY_ORDER)
+        else:
+            if ftype_plot == "sigmoid":
+                Y_pred_all = predict_sigmoid(X_all, params_plot)
+            else:
+                Y_pred_all = predict(X_all, params_plot, POLY_ORDER)
+        fig, axes = plt.subplots(dim, 1, figsize=(10, 5 * dim), squeeze=False)
+        for i in range(dim):
+            plot_single(axes[i, 0], X_med, Y_med, i, i, short_in, short_out, _make_predict_fn(ftype_plot, params_plot))
+        plt.tight_layout()
+        csv_stem = os.path.splitext(os.path.basename(TARGET_CSV))[0]
+        save_path = os.path.join(os.path.dirname(TARGET_CSV), f"fit_{csv_stem}.png")
         plt.savefig(save_path, dpi=150)
         plt.close(fig)
         print(f"  Plot saved: {save_path}")

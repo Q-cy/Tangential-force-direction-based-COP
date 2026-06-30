@@ -14,8 +14,9 @@ PLOT_ERR_HISTORY_LEN = 100     # 角度误差历史缓冲区长度
 PLOT_MAG_HISTORY_LEN = 100     # 幅值历史缓冲区长度
 
 def _yrange(data, pad=0.1):
-    if len(data) < 2: return -1, 1
-    mn, mx = min(data), max(data)
+    clean = [v for v in data if v == v]  # filter NaN
+    if len(clean) < 2: return -1, 1
+    mn, mx = min(clean), max(clean)
     r = mx - mn if mx != mn else 1
     return mn - r * pad, mx + r * pad
 
@@ -119,6 +120,7 @@ class RealTimePlot:
         self.full_fz_list, self.full_fx_list, self.full_fy_list = [], [], []
         self.full_cal_angle_list, self.full_cal_mag_list = [], []
         self.full_fx_cal_list, self.full_fy_cal_list = [], []
+        self.full_fz_cal_list = []
 
         self.init_defaults()
         self.init_history()
@@ -145,6 +147,7 @@ class RealTimePlot:
         self._total_press_val = 0.0         # 总压力值
         self._cal_fx_val = None             # 标定力Fx
         self._cal_fy_val = None             # 标定力Fy
+        self._cal_fz_val = None             # 标定力Fz
         self._cal_angle_deg = None          # 标定力角度(度)
         self._cal_mag_val = None            # 标定力幅值
         self._cop_state = 0                 # CoP状态(0=未接触,1=粗略,2=精细)
@@ -162,6 +165,7 @@ class RealTimePlot:
         self.adc_mag_history = deque(maxlen=hist_len)
         self.raw_force_mag_history = deque(maxlen=hist_len)
         self.force_fx_cal_history = deque(maxlen=hist_len)
+        self.force_fz_cal_history = deque(maxlen=hist_len)
         self.force_fy_cal_history = deque(maxlen=hist_len)
 
     # ===== 手工箭头工具 =====
@@ -230,9 +234,9 @@ class RealTimePlot:
             t2r = pg.TextItem("", anchor=(1, 1))
             p2.addItem(t2r)
             setattr(self, f"_t_frc_{['fz','fx','fy'][r]}_r", t2r)
-            if r > 0:  # Fx/Fy have cal line
-                c2c = p2.plot(pen=pg.mkPen('r', width=3, style=QtCore.Qt.DashLine))
-                setattr(self, f"_c_frc_{['fx','fy'][r-1]}_cal", c2c)
+            # All rows have cal line
+            c2c = p2.plot(pen=pg.mkPen('r', width=3, style=QtCore.Qt.DashLine))
+            setattr(self, f"_c_frc_{['fz','fx','fy'][r]}_cal", c2c)
 
         # Angle Error
         self.p_err = self.win.addPlot(row=3, col=0, colspan=2, title="Angle Error")
@@ -332,7 +336,8 @@ class RealTimePlot:
                  press_table_arr, total_press_val, force_total_mag,
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
-                 cal_fx_val=None, cal_fy_val=None, cal_angle_deg=None, cal_mag_val=None,
+                 cal_fx_val=None, cal_fy_val=None, cal_fz_val=None,
+                 cal_angle_deg=None, cal_mag_val=None,
                  cop_state=0):
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
@@ -352,6 +357,7 @@ class RealTimePlot:
             self._total_press_val = total_press_val
             self._cal_fx_val = cal_fx_val
             self._cal_fy_val = cal_fy_val
+            self._cal_fz_val = cal_fz_val
             self._cal_angle_deg = cal_angle_deg
             self._cal_mag_val = cal_mag_val
             self._cop_state = cop_state
@@ -370,13 +376,15 @@ class RealTimePlot:
             if cal_fx_val is not None:
                 self.force_fx_cal_history.append(cal_fx_val)
                 self.force_fy_cal_history.append(cal_fy_val)
+            if cal_fz_val is not None:
+                self.force_fz_cal_history.append(cal_fz_val)
 
     def append_full_data(self, rel_time_ms,
                           pzt_angle_deg, pzt_mag_val, total_press_val,
                           cop_delta_x_filt, cop_delta_y_filt,
                           force_angle_deg, force_mag_val,
                           force_fz_filt, force_fx_filt, force_fy_filt,
-                          cal_angle_deg=None, cal_mag_val=None, cal_fx_val=None, cal_fy_val=None):
+                          cal_angle_deg=None, cal_mag_val=None, cal_fx_val=None, cal_fy_val=None, cal_fz_val=None):
         with self.lock:
             self.full_time_list.append(rel_time_ms)
             self.full_adc_angle_list.append(pzt_angle_deg)
@@ -394,6 +402,8 @@ class RealTimePlot:
                 self.full_cal_mag_list.append(cal_mag_val)
                 self.full_fx_cal_list.append(cal_fx_val if cal_fx_val is not None else float('nan'))
                 self.full_fy_cal_list.append(cal_fy_val if cal_fy_val is not None else float('nan'))
+            if cal_fz_val is not None:
+                self.full_fz_cal_list.append(cal_fz_val)
 
     # ===== 更新 =====
     def update_all(self):
@@ -411,6 +421,7 @@ class RealTimePlot:
             force_fx_hist = list(self.force_fx_history); force_fy_hist = list(self.force_fy_history)
             cal_fx_hist = list(self.force_fx_cal_history)
             cal_fy_hist = list(self.force_fy_cal_history)
+            cal_fz_hist = list(self.force_fz_cal_history)
             err_hist = list(self.angle_error_history)
             press_table_arr = self._press_table_arr.copy()
             cop_curr_x = self._cop_curr_x; cop_curr_y = self._cop_curr_y
@@ -452,8 +463,8 @@ class RealTimePlot:
         self._u1(self._c_pzt_fz, self.p_pzt_fz, pzt_fz_hist, self._t_pzt_fz, "PZT_z", fs=fs)
         self._u1(self._c_pzt_fx, self.p_pzt_fx, cop_dx_hist, self._t_pzt_fx, "PZT_x", fs=fs)
         self._u1(self._c_pzt_fy, self.p_pzt_fy, cop_dy_hist, self._t_pzt_fy, "PZT_y", fs=fs)
-        self._u1(self._c_frc_fz, self.p_frc_fz, force_fz_hist, self._t_frc_fz, "Fz",
-                 color='blue', pzt_val=pzt_fz_hist[-1] if pzt_fz_hist else 0, pzt_label="Cal_Fz", txt_r=self._t_frc_fz_r, fs=fs)
+        self._u2(self._c_frc_fz, self._c_frc_fz_cal, self.p_frc_fz, force_fz_hist, cal_fz_hist,
+                 self._t_frc_fz, "Fz", txt_r=self._t_frc_fz_r, fs=fs)
         self._u2(self._c_frc_fx, self._c_frc_fx_cal, self.p_frc_fx, force_fx_hist, cal_fx_hist,
                  self._t_frc_fx, "Fx", txt_r=self._t_frc_fx_r, fs=fs)
         self._u2(self._c_frc_fy, self._c_frc_fy_cal, self.p_frc_fy, force_fy_hist, cal_fy_hist,
@@ -594,6 +605,9 @@ class RealTimePlot:
         aR2.set_title("Mag: Meas vs Cal"); aR2.grid(True, alpha=0.3)
         if has_cal: aR2.legend(fontsize=8)
         _p(aR3, self.full_fz_list, 'r-', 'Fz'); aR3.set_title("Fz: Measured"); aR3.grid(True, alpha=0.3)
+        has_cal_fz = self.full_fz_cal_list and len(self.full_fz_cal_list) == len(t)
+        if has_cal_fz: _p(aR3, self.full_fz_cal_list, 'g--', 'Fz_cal')
+        if has_cal_fz: aR3.legend(fontsize=8)
         _p(aR4, self.full_fx_list, 'r-', 'Measured')
         if has_cal: _p(aR4, self.full_fx_cal_list, 'g--', 'Calibrated')
         aR4.set_title("Fx: Meas vs Cal"); aR4.grid(True, alpha=0.3)

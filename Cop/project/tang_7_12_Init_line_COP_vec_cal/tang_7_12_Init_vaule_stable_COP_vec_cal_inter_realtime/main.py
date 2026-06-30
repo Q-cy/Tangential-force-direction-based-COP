@@ -107,7 +107,7 @@ def data_loop():
     # 加载标定模型（查找表 + 拟合）
     cal_bin_path = os.path.join(MAIN_SAVE_DIR, "cal_lookup.bin")
     cal_fit_path = os.path.join(MAIN_SAVE_DIR, "cal_fit.bin")
-    fit_coefs_path = os.path.join(MAIN_SAVE_DIR, "fit_coefs.bin")
+    fit_coefs_path = "/home/qcy/Project/data/2.PZT_tangential/weight/png/fit_coefs.bin"
     cal_lut_ready_flag = False
     cal_fit_ready_flag = False
     cal_pts_arr = cal_fz_arr = cal_fx_arr = cal_fy_arr = None
@@ -140,7 +140,8 @@ def data_loop():
         try:
             fit_type, _, fit_params_list, fit_split_sign = fit.load_coefs(fit_coefs_path)
             cal_fit_ready_flag = True
-            print(f"📐 fit模型已加载: {fit_coefs_path} (type={fit_type}, split={fit_split_sign})")
+            type_summary = ", ".join(f"{p[1]}{'(split)' if p[2] else ''}" for p in fit_params_list)
+            print(f"📐 fit模型已加载: {fit_coefs_path} (outputs: {type_summary})")
         except Exception as e:
             print(f"⚠️ fit模型加载失败: {e}")
             fit_split_sign = False
@@ -156,6 +157,7 @@ def data_loop():
 
     _NAN6 = [float('nan')] * 6  # 力传感器占位
     _prev_refined = False       # COP精修状态（用于检测跳变）
+    _prev_contact = False       # COP接触状态（用于检测力卸载）
 
     while not g_main_stop_flag.is_set():
         loop_start_s = time.perf_counter()
@@ -182,6 +184,24 @@ def data_loop():
             # COP精修完成后重新归零 Fx/Fy（Fz不变，10帧平均）
             if MAIN_REFINE_REZERO_FORCE and has_force:
                 if COP.g_cop_post_refined_flag and not _prev_refined:
+                    def _rezero():
+                        vals = []
+                        for _ in range(10):
+                            d = sensor_force.read()
+                            if d:
+                                vals.append(d)
+                            time.sleep(0.001)
+                        if vals:
+                            avg = np.mean(vals, axis=0)
+                            sensor_force.zero_data[0] += avg[0]
+                            sensor_force.zero_data[1] += avg[1]
+                            print("🔄 COP精修完成，Fx/Fy已归零")
+                    threading.Thread(target=_rezero, daemon=True).start()
+            _prev_refined = COP.g_cop_post_refined_flag
+
+            # 力卸载后COP重置 → 六维力归零
+            if has_force and _prev_contact and not COP.g_cop_contact_init_flag:
+                def _rezero_unload():
                     vals = []
                     for _ in range(10):
                         d = sensor_force.read()
@@ -190,10 +210,11 @@ def data_loop():
                         time.sleep(0.001)
                     if vals:
                         avg = np.mean(vals, axis=0)
-                        sensor_force.zero_data[0] = avg[0]  # Fx
-                        sensor_force.zero_data[1] = avg[1]  # Fy
-                    print("🔄 COP精修完成，Fx/Fy已归零")
-            _prev_refined = COP.g_cop_post_refined_flag
+                        sensor_force.zero_data[0] += avg[0]
+                        sensor_force.zero_data[1] += avg[1]
+                        print("🔄 力卸载，Fx/Fy已归零")
+                threading.Thread(target=_rezero_unload, daemon=True).start()
+            _prev_contact = COP.g_cop_contact_init_flag
 
             buf_cop_delta_x.append(cop_delta_x)
             buf_cop_delta_y.append(cop_delta_y)
@@ -228,7 +249,7 @@ def data_loop():
             force_ts_out = float('nan')
 
         # ---- 标定 ----
-        cal_fx_val = cal_fy_val = cal_angle_deg = cal_mag_val = None
+        cal_fx_val = cal_fy_val = cal_fz_val = cal_angle_deg = cal_mag_val = None
         if press_item is not None:
             do_fit = MAIN_CAL_MODE == "fit" and cal_fit_ready_flag
             do_lut = MAIN_CAL_MODE == "lookup" and cal_lut_ready_flag
@@ -238,11 +259,11 @@ def data_loop():
             if MAIN_CAL_DIM == "3D":
                 query = [total_press_val, cop_delta_x_filt, cop_delta_y_filt]
                 if do_fit and fit_params_list is not None:
-                    # 3D: Fz←adc_sum, Fx←CoPX, Fy←CoPY
+                    # 3D: params order = [Fx←CoPX, Fy←CoPY, Fz←adc_sum]
                     x_inputs = [cop_delta_x_filt, cop_delta_y_filt, total_press_val]
                     results = fit.apply_predict_multi(x_inputs, fit_params_list, fit_type, fit_split_sign)
                     if len(results) >= 3:
-                        cal_fz_val, cal_fx_val, cal_fy_val = results[0], results[1], results[2]
+                        cal_fx_val, cal_fy_val, cal_fz_val = results[0], results[1], results[2]
                     elif len(results) >= 2:
                         cal_fx_val, cal_fy_val = results[0], results[1]
                 elif do_fit:
@@ -256,7 +277,7 @@ def data_loop():
                         x_inputs = [cop_delta_x_filt, cop_delta_y_filt, total_press_val]
                         results = fit.apply_predict_multi(x_inputs, fit_params_list, fit_type, fit_split_sign)
                         if len(results) >= 3:
-                            cal_fz_val, cal_fx_val, cal_fy_val = results[0], results[1], results[2]
+                            cal_fx_val, cal_fy_val, cal_fz_val = results[0], results[1], results[2]
                         elif len(results) >= 2:
                             cal_fx_val, cal_fy_val = results[0], results[1]
                     elif cal_fit_ready_flag:
@@ -323,7 +344,7 @@ def data_loop():
             cop_curr_x, cop_curr_y, cop_base_x, cop_base_y,
             cop_delta_x_filt, cop_delta_y_filt,
             force_fx_filt, force_fy_filt, force_fz_filt,
-            cal_fx_val, cal_fy_val, cal_angle_deg, cal_mag_val,
+            cal_fx_val, cal_fy_val, cal_fz_val, cal_angle_deg, cal_mag_val,
             cop_state=cop_state,
         )
         if COP.g_cop_contact_init_flag:
@@ -333,7 +354,7 @@ def data_loop():
                 cop_delta_x_filt, cop_delta_y_filt,
                 force_angle_deg, force_mag_val,
                 force_fz_filt, force_fx_filt, force_fy_filt,
-                cal_angle_deg, cal_mag_val, cal_fx_val, cal_fy_val)
+                cal_angle_deg, cal_mag_val, cal_fx_val, cal_fy_val, cal_fz_val)
 
         elapsed = time.perf_counter() - loop_start_s
         time.sleep(max(0, 1/MAIN_TARGET_FPS - elapsed))
@@ -365,4 +386,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

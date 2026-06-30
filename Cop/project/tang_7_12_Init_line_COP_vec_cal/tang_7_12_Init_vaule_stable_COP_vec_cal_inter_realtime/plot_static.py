@@ -48,7 +48,7 @@ CSV_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
 #   关键词
 #     "latest:N" → 最新的 N 个文件
 #     "all"      → 全部文件
-CSV_PICK = "COP_0615_7.csv"
+CSV_PICK = "COP_0611_3.csv"
 
 # valid 分段显示：True=valid!=0 深色粗线(valid=0 浅色淡化)，False=统一普通样式
 HIGHLIGHT_VALID = True
