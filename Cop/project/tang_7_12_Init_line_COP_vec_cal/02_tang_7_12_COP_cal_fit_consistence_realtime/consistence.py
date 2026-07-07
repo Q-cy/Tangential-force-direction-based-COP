@@ -189,7 +189,7 @@ if __name__ == "__main__":
     data_dir = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
     out_dir = "/home/qcy/Project/data/2.PZT_tangential/weight/png"
     out_path = os.path.join(out_dir, "consistence_coeffs.npy")
-    csv_path = os.path.join(data_dir, "COP_test_0630_55.csv")   #55
+    csv_path = os.path.join(data_dir, "COP_test_0702_6.csv")   #55
 
     if CALIB_MODE == 1:
         coeffs = calibrate_max_range(csv_path)

@@ -21,9 +21,11 @@ MAIN_SAVE_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"  # 数据�
 MAIN_CAL_MODE = "fit"                       # "lookup"=最近邻查表, "discrete"=双线性插值, "fit"=拟合, "auto"=优先拟合回退查表
 MAIN_CAL_DIM = "3D"                         # "2D"=仅切向力(Fx,Fy), "3D"=三维力(Fz,Fx,Fy)
 MAIN_REFINE_REZERO_FORCE = True             # True=COP二次精修后重新置零六维力
+fit_coefs_path = "/home/qcy/Project/data/2.PZT_tangential/weight/png/fit_coefs.bin"  # fit 模型路径
 
 realtime = importlib.import_module(MAIN_REALTIME_MODULE)
-MAIN_TARGET_FPS = 100                      # 目标采集帧率
+MAIN_TARGET_FPS = 100                      # 目标采集帧率(主循环)
+MAIN_READ_INTERVAL_S = 0.001               # 采集线程读取间隔(秒)，0.01=100Hz
 MAIN_MAX_TIME_DIFF_S = 0.015               # 压力-力传感器最大时间匹配差(秒)
 g_main_stop_flag = threading.Event()       # 全局停止信号
 g_main_plot = None                         # 绘图对象引用
@@ -37,7 +39,7 @@ class PressureThread(threading.Thread):
     def run(self):
         while not g_main_stop_flag.is_set():
             ts = time.perf_counter()
-            
+
             raw = self.s.read_data()
             if raw:
                 try:
@@ -45,7 +47,7 @@ class PressureThread(threading.Thread):
                     self.buf.append({"t":ts,"data":d})
                 except:
                     pass
-            time.sleep(0.001)
+            time.sleep(MAIN_READ_INTERVAL_S)
 
 class ForceThread(threading.Thread):
     def __init__(self, sensor, buf):
@@ -104,14 +106,10 @@ def data_loop():
     print("🎨 绘图已打开")
     start_time_s = time.perf_counter()
 
-    # 加载标定模型（查找表 + 拟合）
+    # 加载标定模型（查找表 + fit）
     cal_bin_path = os.path.join(MAIN_SAVE_DIR, "cal_lookup.bin")
-    cal_fit_path = os.path.join(MAIN_SAVE_DIR, "cal_fit.bin")
-    fit_coefs_path = "/home/qcy/Project/data/2.PZT_tangential/weight/png/fit_coefs.bin"
     cal_lut_ready_flag = False
-    cal_fit_ready_flag = False
     cal_pts_arr = cal_fz_arr = cal_fx_arr = cal_fy_arr = None
-    cal_coefs = None
     disc_dx_grid = disc_dy_grid = disc_fx_grid = disc_fy_grid = None
     fit_type = None
     fit_params_list = None
@@ -129,24 +127,64 @@ def data_loop():
             print(f"📐 查找表已加载: {cal_bin_path}")
         except Exception as e:
             print(f"⚠️ 查找表加载失败: {e}")
-    if os.path.exists(cal_fit_path):
-        try:
-            cal_coefs = calibrate.load_fit_model(cal_fit_path, dim=MAIN_CAL_DIM)
-            cal_fit_ready_flag = True
-            print(f"📐 拟合模型已加载: {cal_fit_path}")
-        except Exception as e:
-            print(f"⚠️ 拟合模型加载失败: {e}")
     if MAIN_CAL_MODE == "fit" and os.path.exists(fit_coefs_path):
         try:
             fit_type, _, fit_params_list, fit_split_sign = fit.load_coefs(fit_coefs_path)
-            cal_fit_ready_flag = True
             type_summary = ", ".join(f"{p[1]}{'(split)' if p[2] else ''}" for p in fit_params_list)
             print(f"📐 fit模型已加载: {fit_coefs_path} (outputs: {type_summary})")
         except Exception as e:
             print(f"⚠️ fit模型加载失败: {e}")
             fit_split_sign = False
-    if not cal_lut_ready_flag and not cal_fit_ready_flag:
+    if not cal_lut_ready_flag and fit_params_list is None:
         print("💡 未找到标定文件")
+
+    # ==================== 标定引擎（fit 引擎 vs calibrate 引擎） ====================
+    def _calibrate_select_engine():
+        """选择标定引擎：fit / calibrate / None
+        决策树：MAIN_CAL_MODE → 模型就绪状态 → fit_params_list 优先级
+        """
+        if MAIN_CAL_MODE == "fit":
+            if fit_params_list is not None:        return "fit"
+            if cal_lut_ready_flag:                 return "calibrate"
+            return None
+        if MAIN_CAL_MODE == "lookup":
+            return "calibrate" if cal_lut_ready_flag else None
+        if MAIN_CAL_MODE == "discrete":
+            return "calibrate" if cal_lut_ready_flag else None
+        if MAIN_CAL_MODE == "auto":
+            if fit_params_list is not None:        return "fit"
+            if cal_lut_ready_flag:                 return "calibrate"
+            return None
+        return None
+
+    def _calibrate_apply(engine, dim, total_press, dx, dy):
+        """根据引擎执行标定，返回 (fx, fy, fz)"""
+        if engine == "fit":
+            if dim == "3D":
+                x_inputs = [dx, dy, total_press]
+                results = fit.apply_predict_multi(x_inputs, fit_params_list, fit_type, fit_split_sign)
+                if len(results) >= 3: return results[0], results[1], results[2]
+                if len(results) >= 2: return results[0], results[1], None
+                return None, None, None
+            x_inputs = [dx, dy]
+            results = fit.apply_predict_multi(x_inputs, fit_params_list, fit_type, fit_split_sign)
+            if len(results) >= 2: return results[0], results[1], None
+            return None, None, None
+        if engine == "calibrate":
+            if dim == "3D":
+                query = [total_press, dx, dy]
+                if MAIN_CAL_MODE == "lookup":
+                    return calibrate.apply(query, cal_pts_arr, cal_fx_arr, cal_fy_arr, fz_vals=cal_fz_arr)
+                if MAIN_CAL_MODE == "discrete":
+                    fx, fy = calibrate.apply_discrete(dx, dy, disc_dx_grid, disc_dy_grid, disc_fx_grid, disc_fy_grid)
+                    return fx, fy, None
+            else:
+                query = [dx, dy]
+                if MAIN_CAL_MODE == "lookup":
+                    return calibrate.apply(query, cal_pts_arr, cal_fx_arr, cal_fy_arr) + (None,)
+                if MAIN_CAL_MODE == "discrete":
+                    return calibrate.apply_discrete(dx, dy, disc_dx_grid, disc_dy_grid, disc_fx_grid, disc_fy_grid) + (None,)
+        return None, None, None
 
     median_filt_window = 5
     buf_cop_delta_x = deque(maxlen=median_filt_window)
@@ -251,65 +289,12 @@ def data_loop():
         # ---- 标定 ----
         cal_fx_val = cal_fy_val = cal_fz_val = cal_angle_deg = cal_mag_val = None
         if press_item is not None:
-            do_fit = MAIN_CAL_MODE == "fit" and cal_fit_ready_flag
-            do_lut = MAIN_CAL_MODE == "lookup" and cal_lut_ready_flag
-            do_discrete = MAIN_CAL_MODE == "discrete" and cal_lut_ready_flag
-            do_auto = MAIN_CAL_MODE == "auto"
-
-            if MAIN_CAL_DIM == "3D":
-                query = [total_press_val, cop_delta_x_filt, cop_delta_y_filt]
-                if do_fit and fit_params_list is not None:
-                    # 3D: params order = [Fx←CoPX, Fy←CoPY, Fz←adc_sum]
-                    x_inputs = [cop_delta_x_filt, cop_delta_y_filt, total_press_val]
-                    results = fit.apply_predict_multi(x_inputs, fit_params_list, fit_type, fit_split_sign)
-                    if len(results) >= 3:
-                        cal_fx_val, cal_fy_val, cal_fz_val = results[0], results[1], results[2]
-                    elif len(results) >= 2:
-                        cal_fx_val, cal_fy_val = results[0], results[1]
-                elif do_fit:
-                    cal_fz_val, cal_fx_val, cal_fy_val = calibrate.apply_fit(query, cal_coefs, dim="3D")
-                elif do_lut:
-                    cal_fz_val, cal_fx_val, cal_fy_val = calibrate.apply(query, cal_pts_arr, cal_fx_arr, cal_fy_arr, fz_vals=cal_fz_arr)
-                elif do_discrete:
-                    cal_fx_val, cal_fy_val = calibrate.apply_discrete(cop_delta_x_filt, cop_delta_y_filt, disc_dx_grid, disc_dy_grid, disc_fx_grid, disc_fy_grid)
-                elif do_auto:
-                    if fit_params_list is not None:
-                        x_inputs = [cop_delta_x_filt, cop_delta_y_filt, total_press_val]
-                        results = fit.apply_predict_multi(x_inputs, fit_params_list, fit_type, fit_split_sign)
-                        if len(results) >= 3:
-                            cal_fx_val, cal_fy_val, cal_fz_val = results[0], results[1], results[2]
-                        elif len(results) >= 2:
-                            cal_fx_val, cal_fy_val = results[0], results[1]
-                    elif cal_fit_ready_flag:
-                        cal_fz_val, cal_fx_val, cal_fy_val = calibrate.apply_fit(query, cal_coefs, dim="3D")
-                    elif cal_lut_ready_flag:
-                        cal_fz_val, cal_fx_val, cal_fy_val = calibrate.apply(query, cal_pts_arr, cal_fx_arr, cal_fy_arr, fz_vals=cal_fz_arr)
-                if cal_fx_val is not None:
-                    cal_angle_deg, cal_mag_val = angle.compute_vector_angle(cal_fx_val, cal_fy_val)
-            else:
-                query = [cop_delta_x_filt, cop_delta_y_filt]
-                if do_fit and fit_params_list is not None:
-                    # 2D: Fx←CoPX, Fy←CoPY
-                    x_inputs = [cop_delta_x_filt, cop_delta_y_filt]
-                    results = fit.apply_predict_multi(x_inputs, fit_params_list, fit_type, fit_split_sign)
-                    cal_fx_val, cal_fy_val = (results[0], results[1]) if len(results) >= 2 else (None, None)
-                elif do_fit:
-                    cal_fx_val, cal_fy_val = calibrate.apply_fit(query, cal_coefs, dim="2D")
-                elif do_lut:
-                    cal_fx_val, cal_fy_val = calibrate.apply(query, cal_pts_arr, cal_fx_arr, cal_fy_arr)
-                elif do_discrete:
-                    cal_fx_val, cal_fy_val = calibrate.apply_discrete(cop_delta_x_filt, cop_delta_y_filt, disc_dx_grid, disc_dy_grid, disc_fx_grid, disc_fy_grid)
-                elif do_auto:
-                    if fit_params_list is not None:
-                        x_inputs = [cop_delta_x_filt, cop_delta_y_filt]
-                        results = fit.apply_predict_multi(x_inputs, fit_params_list, fit_type, fit_split_sign)
-                        cal_fx_val, cal_fy_val = (results[0], results[1]) if len(results) >= 2 else (None, None)
-                    elif cal_fit_ready_flag:
-                        cal_fx_val, cal_fy_val = calibrate.apply_fit(query, cal_coefs, dim="2D")
-                    elif cal_lut_ready_flag:
-                        cal_fx_val, cal_fy_val = calibrate.apply(query, cal_pts_arr, cal_fx_arr, cal_fy_arr)
-                if cal_fx_val is not None:
-                    cal_angle_deg, cal_mag_val = angle.compute_vector_angle(cal_fx_val, cal_fy_val)
+            engine = _calibrate_select_engine()
+            if engine is not None:
+                cal_fx_val, cal_fy_val, cal_fz_val = _calibrate_apply(
+                    engine, MAIN_CAL_DIM, total_press_val, cop_delta_x_filt, cop_delta_y_filt)
+            if cal_fx_val is not None:
+                cal_angle_deg, cal_mag_val = angle.compute_vector_angle(cal_fx_val, cal_fy_val)
 
         # ---- CSV ----
         press_ts = press_item["t"] if press_item is not None else float('nan')
