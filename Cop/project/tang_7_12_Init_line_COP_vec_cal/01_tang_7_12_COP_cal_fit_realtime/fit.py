@@ -59,6 +59,10 @@ def log_func(x, a, b, c):
     """Logarithmic: y = a * ln(b * x + 1) + c"""
     return a * np.log(b * x + 1) + c
 
+def log_func_o(x, a, b):
+    """Origin-passing log: y = a * ln(b * x + 1), zero at x=0."""
+    return a * np.log(b * x + 1)
+
 def exp_func(x, a, b, c):
     """Exponential: y = a * exp(b * x) + c"""
     return a * np.exp(b * x) + c
@@ -196,15 +200,17 @@ def fit_sym_log(X, Y):
     for i in range(n_out):
         y = Y[:, i]; xi = x
         pos_mask = xi >= 0; neg_mask = xi < 0
-        if np.sum(pos_mask) > 3:
-            try: popt_pos, _ = curve_fit(log_func, xi[pos_mask], y[pos_mask],
-                                          p0=[1.0, 1.0, np.min(y[pos_mask])], maxfev=10000)
-            except: popt_pos = np.array([1.0, 1.0, np.min(y[pos_mask])])
+        if np.sum(pos_mask) >= 2:
+            try:
+                ab, _ = curve_fit(log_func_o, xi[pos_mask], y[pos_mask], p0=[1.0, 1.0], maxfev=10000)
+                popt_pos = np.array([ab[0], ab[1], 0.0])
+            except: popt_pos = np.array([1.0, 1.0, 0.0])
         else: popt_pos = np.array([1.0, 1.0, 0.0])
-        if np.sum(neg_mask) > 3:
-            try: popt_neg, _ = curve_fit(log_func, -xi[neg_mask], -y[neg_mask],
-                                          p0=[1.0, 1.0, np.min(-y[neg_mask])], maxfev=10000)
-            except: popt_neg = np.array([1.0, 1.0, np.min(-y[neg_mask])])
+        if np.sum(neg_mask) >= 2:
+            try:
+                ab, _ = curve_fit(log_func_o, -xi[neg_mask], -y[neg_mask], p0=[1.0, 1.0], maxfev=10000)
+                popt_neg = np.array([ab[0], ab[1], 0.0])
+            except: popt_neg = np.array([1.0, 1.0, 0.0])
         else: popt_neg = popt_pos.copy()
         all_params.append((popt_neg, popt_pos))
         print(f"  {i} +: a={popt_pos[0]:.4f}, b={popt_pos[1]:.4f}, c={popt_pos[2]:.4f}")
@@ -418,17 +424,9 @@ def save_coefs(fit_results, path):
                 for p in params:
                     f.write(np.array(p, dtype=np.float64).tobytes())
             elif ftype in ("sym_exp", "sym_log"):
-                if split:
-                    # params = [(p_neg_pos, p_pos_pos), (p_neg_neg, p_pos_neg)]
-                    # Combine: p_neg from neg-fit, p_pos from pos-fit → 1 entry per output
-                    combined_neg = np.array(params[1][0], dtype=np.float64)
-                    combined_pos = np.array(params[0][1], dtype=np.float64)
-                    f.write(combined_neg.tobytes())
-                    f.write(combined_pos.tobytes())
-                else:
-                    for p_neg, p_pos in params:
-                        f.write(np.array(p_neg, dtype=np.float64).tobytes())
-                        f.write(np.array(p_pos, dtype=np.float64).tobytes())
+                for p_neg, p_pos in params:
+                    f.write(np.array(p_neg, dtype=np.float64).tobytes())
+                    f.write(np.array(p_pos, dtype=np.float64).tobytes())
             elif ftype == "pchip":
                 for interp in params:
                     x = np.array(interp.x, dtype=np.float64)
@@ -628,6 +626,9 @@ def write_back_csv(csv_path, input_cols, output_cols, fit_results, order, dim, w
                             pred_val = float(-fn(-x_val, *p_neg))
                         else:
                             pred_val = float(fn(x_val, *p_pos))
+                    elif ftype == "exp":
+                        a, b, c, xm, xs = params[0]
+                        pred_val = float(-exp_func((x_val - xm) / xs, a, b, c))
                     elif ftype == "pchip":
                         pred_val = float(params[0](x_val))
                     elif ftype == "exp_log":
@@ -867,21 +868,14 @@ if __name__ == "__main__":
                     Y_pred = predict_exp_log(X_train, params)
                     fit_results.append((inp, out, params, "exp_log", True))
                 elif ft == "sym_exp":
-                    params_pos = fit_sym_exp(X_pos, Y_pos)[0]
-                    params_neg = fit_sym_exp(X_neg, Y_neg)[0]
-                    params = [params_pos, params_neg]
-                    Y_pred = np.zeros_like(Y_train)
-                    Y_pred[pos_mask] = predict_sym_exp(X_pos, [params_pos])
-                    Y_pred[neg_mask] = predict_sym_exp(X_neg, [params_neg])
-                    fit_results.append((inp, out, params, "sym_exp", True))
+                    params = fit_sym_exp(X_train, Y_train)
+                    Y_pred = predict_sym_exp(X_train, params)
+                    fit_results.append((inp, out, params, "sym_exp", False))
                 elif ft == "sym_log":
-                    params_pos = fit_sym_log(X_pos, Y_pos)[0]
-                    params_neg = fit_sym_log(X_neg, Y_neg)[0]
-                    params = [params_pos, params_neg]
-                    Y_pred = np.zeros_like(Y_train)
-                    Y_pred[pos_mask] = predict_sym_log(X_pos, [params_pos])
-                    Y_pred[neg_mask] = predict_sym_log(X_neg, [params_neg])
-                    fit_results.append((inp, out, params, "sym_log", True))
+                    _, _, X_med, Y_med = get_medians(train_file, inp, out)
+                    params = fit_sym_log(X_med, Y_med)
+                    Y_pred = predict_sym_log(X_med, params)
+                    fit_results.append((inp, out, params, "sym_log", False))
                 elif ft == "pchip":
                     params = fit_pchip(X_train, Y_train)
                     Y_pred = predict_pchip(X_train, params)

@@ -27,6 +27,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+from angle import angle_difference
+
 
 # ===================================================================
 # 配置区：直接改这里的变量，然后 python plot_static.py 即可出图
@@ -48,7 +50,7 @@ CSV_DIR = "/home/qcy/Project/data/2.PZT_tangential/weight/test"
 #   关键词
 #     "latest:N" → 最新的 N 个文件
 #     "all"      → 全部文件
-CSV_PICK = "COP_0611_3.csv"
+CSV_PICK = "COP_0708_5.csv"
 
 # valid 分段显示：True=valid!=0 深色粗线(valid=0 浅色淡化)，False=统一普通样式
 HIGHLIGHT_VALID = True
@@ -111,6 +113,8 @@ _COLUMN_NAMES = [
 ]
 
 _NAME_TO_IDX = {name: idx for idx, name in enumerate(_COLUMN_NAMES)}
+
+_ANGLE_COLUMNS = {"ADC_angle", "Force_angle", "Force_cal_angle"}
 
 
 def _resolve_column(col, header: list) -> int:
@@ -213,7 +217,7 @@ def load_csv(path: str):
     return header, data
 
 
-def _compute_errors(ref_vals: np.ndarray, pred_vals: np.ndarray) -> dict:
+def _compute_errors(ref_vals: np.ndarray, pred_vals: np.ndarray, is_angle: bool = False) -> dict:
     """计算参考值和预测值之间的各项误差指标"""
     mask = ~np.isnan(ref_vals) & ~np.isnan(pred_vals)
     ref = ref_vals[mask]
@@ -221,8 +225,12 @@ def _compute_errors(ref_vals: np.ndarray, pred_vals: np.ndarray) -> dict:
     if len(ref) < 2:
         return {"count": len(ref), "error": "数据点不足"}
 
-    errors = pred - ref
-    abs_errors = np.abs(errors)
+    if is_angle:
+        abs_errors = np.array([angle_difference(r, p) for r, p in zip(ref, pred)])
+        errors = np.sign(pred - ref) * abs_errors
+    else:
+        errors = pred - ref
+        abs_errors = np.abs(errors)
 
     # R²
     ss_res = np.sum(errors ** 2)
@@ -397,7 +405,11 @@ def plot_static(csv_paths: list, plot_cols: list, x_col, row_start=None, row_end
                 if len(ref_a) < 2:
                     continue
 
-                abs_errs = np.abs(pred_a - ref_a)
+                is_angle = header[ref_idx] in _ANGLE_COLUMNS or header[ci] in _ANGLE_COLUMNS
+                if is_angle:
+                    abs_errs = np.array([angle_difference(r, p) for r, p in zip(ref_a, pred_a)])
+                else:
+                    abs_errs = np.abs(pred_a - ref_a)
                 min_i = int(np.argmin(abs_errs)); max_i = int(np.argmax(abs_errs))
                 y_span = np.ptp(pred_a)
 
@@ -414,7 +426,7 @@ def plot_static(csv_paths: list, plot_cols: list, x_col, row_start=None, row_end
                            fontsize=6, color=col_color, ha='center', va='bottom')
 
                 # 曲线末端标 MAE / MAPE
-                results = _compute_errors(ref_a, pred_a)
+                results = _compute_errors(ref_a, pred_a, is_angle=is_angle)
                 tag = f"{fname}:{header[ci]}" if n_files > 1 else header[ci]
                 _print_error_report(results, header[ref_idx], tag)
                 all_error_results.append({"pred": tag, "ref": header[ref_idx], "results": results})
@@ -567,7 +579,7 @@ def plot_full_analysis(csv_path: str, save_path=None, row_start=None, row_end=No
     if has_cal_angle:
         aR1.legend(fontsize=8)
         _vm = v_mask & (np.abs(_force_filters.get("Force_angle", np.ones(len(t)))) >= FORCE_MIN) if FORCE_MIN > 0 else v_mask
-        err = _compute_errors(force_angle[_vm], force_cal_angle[_vm])
+        err = _compute_errors(force_angle[_vm], force_cal_angle[_vm], is_angle=True)
         if "error" not in err:
             aR1.annotate(f"MAE={err['MAE']:.2f}° MAPE={err['MAPE_%']:.1f}% R²={err['R2']:.3f}",
                         xy=(0.02, 0.95), xycoords='axes fraction', fontsize=7,
