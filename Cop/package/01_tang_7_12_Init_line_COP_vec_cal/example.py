@@ -21,5 +21,5 @@ if __name__ == "__main__":
     print(f"sensor_a (get_angle): angle={a_angle:.2f}°")
     print(f"sensor_b (get_all): angle={b_angle:.2f}° dx={b_dx:+.2f} dy={b_dy:+.2f}")
 
-    # 3) 重置初始 COP
+    # 3) 重置初始 COP, 夹紧后调用
     sensor_a.reset_origin()
