@@ -6,12 +6,15 @@ from collections import deque
 class PZTSensorAngle:
     def __init__(self, rows: int = 12, cols: int = 7,
                  k: float = 5, collect_frames: int = 20,
-                 stability_frames: int = 5):
+                 stability_frames: int = 5,
+                 reset_at_frame: int = 0):
         self.rows = rows
         self.cols = cols
         self.k = k
         self.collect_frames = collect_frames
         self.stability_frames = stability_frames
+        self._reset_at_frame = reset_at_frame
+        self._frame_count = 0
 
         self._buf = deque(maxlen=collect_frames)
         self._thresh = None
@@ -53,6 +56,10 @@ class PZTSensorAngle:
                     self._thresh = self.k * float(np.mean(self._buf))
 
     def _compute_cop(self, raw_frame) -> tuple[float, float]:
+        self._frame_count += 1
+        if self._reset_at_frame > 0 and self._frame_count == self._reset_at_frame:
+            self.reset_origin()
+
         rows, cols = self.rows, self.cols
         frame_flat = np.asarray(raw_frame, dtype=np.float32).flatten()
         frame2d = frame_flat.reshape(rows, cols)
@@ -82,12 +89,14 @@ class PZTSensorAngle:
         delta_x = 0.0
         delta_y = 0.0
         if not self._contact_init:
-            self._origin_x = cop_x
-            self._origin_y = cop_y
-            self._contact_init = True
-        else:
-            delta_x = cop_x - self._origin_x
-            delta_y = cop_y - self._origin_y
+            if self._thresh is not None and total_pressure > self._thresh:
+                self._origin_x = cop_x
+                self._origin_y = cop_y
+                self._contact_init = True
+            return 0.0, 0.0
+
+        delta_x = cop_x - self._origin_x
+        delta_y = cop_y - self._origin_y
         return delta_x, delta_y
 
     @staticmethod

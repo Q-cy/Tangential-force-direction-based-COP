@@ -1,3 +1,9 @@
+"""压阻传感器 CoP 角度估计（PZTSensorAngle 类，支持多 sensor 实例）
+
+动态阈值版：启动期（前 collect_frames 帧）不做低压判断；
+缓冲满后用 K × mean(buffer) 作低压阈值。
+"""
+
 import numpy as np
 import threading
 from collections import deque
@@ -8,12 +14,27 @@ class PZTSensorAngle:
 
     def __init__(self, rows: int = 12, cols: int = 7,
                  k: float = 5, collect_frames: int = 20,
-                 stability_frames: int = 5):
+                 stability_frames: int = 5,
+                 reset_at_frame: int = 0):
+        """
+        构造一个 PZTSensorAngle 角度估计实例。
+
+        :param rows: 传感器阵列行数（默认 12）。
+        :param cols: 传感器阵列列数（默认 7），输入 ADC 序列长度 = rows * cols。
+        :param k: 动态低压阈值倍数：thresh = k × mean(前 collect_frames 帧总压力)。
+                   值越大，越难被判定为"低压"。
+        :param collect_frames: 学习动态阈值用的样本窗口大小（默认 20 帧）。
+        :param stability_frames: 阈值确定后，连续多少帧低压自动 reset_origin（默认 5）。
+        :param reset_at_frame: 在第 N 帧自动调一次 reset_origin() 后重新锁新 origin；
+                                0 = 禁用自动 reset（默认）。
+        """
         self.rows = rows
         self.cols = cols
         self.k = k
         self.collect_frames = collect_frames
         self.stability_frames = stability_frames
+        self._reset_at_frame = reset_at_frame
+        self._frame_count = 0
 
         self._buf = deque(maxlen=collect_frames)
         self._thresh = None
@@ -28,7 +49,7 @@ class PZTSensorAngle:
 
     def get_all(self, adc_data) -> tuple[float, float, float]:
         """
-        输入 rows*cols 个 ADC 值，一次性输出 (angle, dx, dy) 三件套。
+        输入 rows*cols 个 ADC 值，一次性输出 (angle, dx, dy)。
 
         :param adc_data: list/np.array，长度为 rows*cols 的 ADC 原始数据
         :return: (angle, dx, dy)
@@ -42,7 +63,7 @@ class PZTSensorAngle:
             raise ValueError(f"ADC数据长度必须为{expected}")
 
         dx, dy = self._compute_cop(adc_data)
-        angle = self._compute_cop_angle(dx, dy)
+        angle = self._compute_cop_angle_ccw90(dx, dy)
         return angle, dx, dy
 
     def get_angle(self, adc_data) -> float:
@@ -67,6 +88,10 @@ class PZTSensorAngle:
                     self._thresh = self.k * float(np.mean(self._buf))
 
     def _compute_cop(self, raw_frame) -> tuple[float, float]:
+        self._frame_count += 1
+        if self._reset_at_frame > 0 and self._frame_count == self._reset_at_frame:
+            self.reset_origin()
+
         rows, cols = self.rows, self.cols
         frame_flat = np.asarray(raw_frame, dtype=np.float32).flatten()
         frame2d = frame_flat.reshape(rows, cols)
@@ -97,12 +122,15 @@ class PZTSensorAngle:
         delta_x = 0.0
         delta_y = 0.0
         if not self._contact_init:
-            self._origin_x = cop_x
-            self._origin_y = cop_y
-            self._contact_init = True
-        else:
-            delta_x = cop_x - self._origin_x
-            delta_y = cop_y - self._origin_y
+            # 首次接触：仅当阈值已知 + 当前压力 > 阈值 时锁 origin；否则维持未锁状态，返回 (0, 0)
+            if self._thresh is not None and total_pressure > self._thresh:
+                self._origin_x = cop_x
+                self._origin_y = cop_y
+                self._contact_init = True
+            return 0.0, 0.0
+
+        delta_x = cop_x - self._origin_x
+        delta_y = cop_y - self._origin_y
         return delta_x, delta_y
 
     @staticmethod
@@ -116,3 +144,7 @@ class PZTSensorAngle:
     @staticmethod
     def _compute_cop_angle(px: float, py: float) -> float:
         return PZTSensorAngle._compute_angle(px, -py)
+
+    @staticmethod
+    def _compute_cop_angle_ccw90(px: float, py: float) -> float:
+        return PZTSensorAngle._compute_angle(-py, px)

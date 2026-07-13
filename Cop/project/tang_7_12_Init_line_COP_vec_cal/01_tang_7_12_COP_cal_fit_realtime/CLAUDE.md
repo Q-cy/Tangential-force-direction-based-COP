@@ -9,11 +9,11 @@
 
 ## 架构分层
 
-PZT_Hall/PZT_Hall/
+tang_7_12_Init_line_COP_vec_cal/01_tang_7_12_COP_cal_fit_realtime/
 ├── main.py          #主函数，
 ├── realtime.py      #用于实时显示各种数据
 ├── data.py          #用于读取各种数据
-├── fit.py     #用于标定数据
+├── fit.py           #用于标定数据
 ├── angle.py         #用于计算角度
 ├── COP.py           #用于计算COP(Center of Pressure)
 ├── table.py         #用于保存数据至csv文件
@@ -25,7 +25,7 @@ PZT_Hall/PZT_Hall/
 
 ## 编码规范
 ### 命名约定
-
+函数命名：模块名.功能名，如
 
 ### 代码风格
 - 把各个功能封装成函数，在各个主函数中都只是调用函数
