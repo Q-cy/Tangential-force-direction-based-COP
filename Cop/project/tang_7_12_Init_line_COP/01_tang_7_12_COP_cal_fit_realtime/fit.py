@@ -9,8 +9,8 @@ from scipy.interpolate import PchipInterpolator
 
 
 # ===================== Config =====================
-TRAIN_CSV_xy = "/home/qcy/Project/data/2.PZT_tangential/weight/test/COP_0615_6.csv"
-TARGET_CSV_xy = "/home/qcy/Project/data/2.PZT_tangential/weight/test/COP_0615_6.csv"
+TRAIN_CSV_xy = "/home/qcy/Project/data/2.PZT_tangential/weight/test/COP_0713_1.csv"
+TARGET_CSV_xy = "/home/qcy/Project/data/2.PZT_tangential/weight/test/COP_0713_1.csv"
 TRAIN_CSV_z = "/home/qcy/Project/data/2.PZT_tangential/weight/concat/concat_5_10_15.csv"
 TARGET_CSV_z = "/home/qcy/Project/data/2.PZT_tangential/weight/concat/concat_5_10_15.csv"
 FIT_PARAM_Save = "/home/qcy/Project/data/2.PZT_tangential/weight/png"

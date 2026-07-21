@@ -9,7 +9,7 @@ class PZTSensorAngle:
     """压阻传感器：12×7（默认）PZT 阵列的 CoP 角度估计"""
 
     def __init__(self, rows: int = 12, cols: int = 7,
-                 threshold_factor: float = 5, collect_frames: int = 0,
+                 threshold_factor: float = 5, collect_frames: int = 20,
                  stability_frames: int = 5,
                  reset_at_frame: int = 0,
                  refine_cnt: int = 10,
@@ -115,16 +115,15 @@ class PZTSensorAngle:
 
     def _update_dynamic_threshold(self, total_pressure: float) -> None:
         with self._lock:
-            # collect_frames=0: 跳过历史累积, _thresh 直接 = 0
-            # (低压判定 `total_pressure < 0` 永不触发, 几乎所有帧都视为"非低")
             if self.collect_frames <= 0:
                 if self._thresh is None:
-                    self._thresh = 0
+                    self._thresh = 10
                 return
             if self._thresh is None:
                 self._pressure_history.append(total_pressure)
                 if len(self._pressure_history) >= self.collect_frames:
-                    self._thresh = self.threshold_factor * float(np.mean(self._pressure_history))
+                    computed = self.threshold_factor * float(np.mean(self._pressure_history))
+                    self._thresh = computed if computed > 0 else 10
 
     def _compute_delta_cop(self, raw_frame) -> tuple[float, float]:
         self._frame_count += 1

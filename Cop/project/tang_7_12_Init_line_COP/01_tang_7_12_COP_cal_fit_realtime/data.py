@@ -14,7 +14,7 @@ from eskin_ffi import EskinDevice
 DATA_BAUDRATE_FORCE = 460800  # 六维力传感器串口波特率
 
 # 固定串口路径
-PRESSURE_SENSOR_PORT = "/dev/ttyUSB0"   # 压阻(vendor SDK)
+PRESSURE_SENSOR_PORT = "/dev/ttyUSB2"   # 压阻(vendor SDK)
 FORCE_SENSOR_PORT = "/dev/ttyUSB1"      # 六维力(pyserial)
 
 # ===================== 压力传感器 =====================
