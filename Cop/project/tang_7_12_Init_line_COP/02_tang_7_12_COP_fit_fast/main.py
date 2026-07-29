@@ -8,12 +8,12 @@ import threading
 from pyqtgraph.Qt import QtWidgets
 import sys
 
-from angle import compute_PZT_angle, compute_6Dforce_angle, compute_vector_angle
-from COP import compute_pressure_direction, g_cop_post_refined_flag, g_cop_contact_init_flag
 from data import PressureSensor, SixAxisForceSensor, TimestampedBuffer
 from realtime import RealTimePlot
 from table import auto_get_csv_path, init_csv_file, build_csv_row
 from calibrate import load_lookup, build_discrete_grid, apply as cal_apply, apply_discrete
+import tang_7_12_InitCOP_realtime_other_package as pzt
+from tang_7_12_InitCOP_realtime_package_note import PZTSensorAngle
 
 # ===================== 配置 =====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -193,6 +193,8 @@ def data_loop():
     buf_force_fy = deque(maxlen=median_filt_window)
     buf_force_fz = deque(maxlen=median_filt_window)
 
+    cop_sensor = PZTSensorAngle()  # 每帧唯一推进 CoP 状态的入口
+
     _NAN6 = [float('nan')] * 6  # 力传感器占位
     _prev_refined = False       # COP精修状态（用于检测跳变）
     _prev_contact = False       # COP接触状态（用于检测力卸载）
@@ -213,17 +215,25 @@ def data_loop():
 
         # ---- 计算 PZT / CoP ----
         if press_item is not None:
-            cop_res = compute_pressure_direction(press_item["data"])
             base_sub_arr = np.array(press_item["data"])
-            cop_curr_x, cop_curr_y = cop_res[0], cop_res[1]
-            cop_delta_x, cop_delta_y = cop_res[6], cop_res[7]
-            cop_base_x, cop_base_y = cop_res[8], cop_res[9]
-            cop_state = cop_res[10]
-            total_press_val = np.sum(press_item["data"])
+            pzt_angle_deg, cop_delta_x, cop_delta_y, cop_curr_x, cop_curr_y = cop_sensor.get_all(base_sub_arr)
+            origin_x, origin_y = cop_sensor.get_origin()
+            cop_state = cop_sensor.get_state()
+            cop_base_x = cop_curr_x if origin_x is None else origin_x
+            cop_base_y = cop_curr_y if origin_y is None else origin_y
+            gradient_arr = cop_sensor.get_gradient(base_sub_arr)
+            contact_init = cop_state > 0
+            refined = cop_state == 2
+            total_press_val = float(np.sum(press_item["data"]))
+            pzt_table_angle_deg = (-pzt_angle_deg) % 360.0
+
+            print(f"frame {rel_time_ms}ms: angle={pzt_angle_deg:.1f}°, "
+                  f"dx={cop_delta_x:+.2f}, dy={cop_delta_y:+.2f}, "
+                  f"cop=({cop_curr_x:.2f},{cop_curr_y:.2f})")
 
             # COP精修完成后重新归零 Fx/Fy（Fz不变，10帧平均）
             if MAIN_REFINE_REZERO_FORCE and has_force:
-                if g_cop_post_refined_flag and not _prev_refined:
+                if refined and not _prev_refined:
                     def _rezero():
                         vals = []
                         for _ in range(10):
@@ -237,10 +247,10 @@ def data_loop():
                             sensor_force.zero_data[1] += avg[1]
                             print("🔄 COP精修完成，Fx/Fy已归零")
                     threading.Thread(target=_rezero, daemon=True).start()
-            _prev_refined = g_cop_post_refined_flag
+            _prev_refined = refined
 
             # 力卸载后COP重置 → 六维力归零
-            if has_force and _prev_contact and not g_cop_contact_init_flag:
+            if has_force and _prev_contact and not contact_init:
                 def _rezero_unload():
                     vals = []
                     for _ in range(10):
@@ -254,20 +264,22 @@ def data_loop():
                         sensor_force.zero_data[1] += avg[1]
                         print("🔄 力卸载，Fx/Fy已归零")
                 threading.Thread(target=_rezero_unload, daemon=True).start()
-            _prev_contact = g_cop_contact_init_flag
+            _prev_contact = contact_init
 
             buf_cop_delta_x.append(cop_delta_x)
             buf_cop_delta_y.append(cop_delta_y)
-            cop_delta_x_filt = np.median(buf_cop_delta_x)
-            cop_delta_y_filt = np.median(buf_cop_delta_y)
-            pzt_angle_deg, pzt_mag_val = compute_PZT_angle(cop_delta_x_filt, cop_delta_y_filt)
+            cop_delta_x_filt = float(np.median(buf_cop_delta_x))
+            cop_delta_y_filt = float(np.median(buf_cop_delta_y))
         else:
             base_sub_arr = np.zeros(84)
             cop_curr_x = cop_curr_y = cop_delta_x = cop_delta_y = cop_base_x = cop_base_y = float('nan')
             cop_delta_x_filt = cop_delta_y_filt = 0.0
-            pzt_angle_deg = pzt_mag_val = 0.0
+            pzt_angle_deg = 0.0
             total_press_val = 0.0
             cop_state = 0
+            contact_init = False
+            refined = False
+            gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)
 
         # ---- 计算 Force ----
         if force_item is not None:
@@ -278,23 +290,23 @@ def data_loop():
             force_fx_filt = np.median(buf_force_fx)
             force_fy_filt = np.median(buf_force_fy)
             force_fz_filt = np.median(buf_force_fz)
-            force_angle_deg, force_mag_val = compute_6Dforce_angle(force_fx_filt, force_fy_filt)
+            force_angle_deg = pzt.compute_6Dforce_angle(force_fx_filt, force_fy_filt)
             force_data_out = force_item["data"]
         else:
             force_fx_val = force_fy_val = force_fz_val = float('nan')
             force_fx_filt = force_fy_filt = force_fz_filt = float('nan')
-            force_angle_deg = force_mag_val = float('nan')
+            force_angle_deg = float('nan')
             force_data_out = _NAN6
 
         # ---- 标定 ----
-        cal_fx_val = cal_fy_val = cal_fz_val = cal_angle_deg = cal_mag_val = None
+        cal_fx_val = cal_fy_val = cal_fz_val = cal_angle_deg = None
         if press_item is not None:
             engine = _calibrate_select_engine()
             if engine is not None:
                 cal_fx_val, cal_fy_val, cal_fz_val = _calibrate_apply(
                     engine, MAIN_CAL_DIM, total_press_val, cop_delta_x_filt, cop_delta_y_filt)
             if cal_fx_val is not None:
-                cal_angle_deg, cal_mag_val = compute_vector_angle(cal_fx_val, cal_fy_val)
+                cal_angle_deg = pzt.compute_vector_angle(cal_fx_val, cal_fy_val)
 
         # ---- CSV ----
         press_ts = press_item["t"] if press_item is not None else None
@@ -313,12 +325,9 @@ def data_loop():
             delta_force_y=force_fy_filt,
             delta_force_z=force_fz_filt,
             adc_angle=pzt_angle_deg,
-            adc_mag=pzt_mag_val,
             force_angle=force_angle_deg,
-            force_mag=force_mag_val,
             fx_cal=cal_fx_val,
             fy_cal=cal_fy_val,
-            force_cal_mag=cal_mag_val,
             force_cal_angle=cal_angle_deg,
             cop_state=cop_state,
             adc_sum=total_press_val,
@@ -329,22 +338,26 @@ def data_loop():
         now = time.perf_counter()
         if now - _last_plot_t >= PLOT_INTERVAL_S:
             g_main_plot.set_data(
-                pzt_angle_deg, pzt_mag_val, force_angle_deg, force_mag_val,
-                base_sub_arr, total_press_val, force_mag_val,
+                pzt_angle_deg, force_angle_deg,
+                base_sub_arr, total_press_val,
                 cop_curr_x, cop_curr_y, cop_base_x, cop_base_y,
                 cop_delta_x_filt, cop_delta_y_filt,
                 force_fx_filt, force_fy_filt, force_fz_filt,
-                cal_fx_val, cal_fy_val, cal_fz_val, cal_angle_deg, cal_mag_val,
+                cal_fx_val, cal_fy_val, cal_fz_val, cal_angle_deg,
                 cop_state=cop_state,
+                gradient=gradient_arr,
+                contact_init=contact_init,
+                refined=refined,
+                pzt_table_angle_deg=pzt_table_angle_deg,
             )
-            if g_cop_contact_init_flag:
+            if contact_init:
                 g_main_plot.append_full_data(
                     rel_time_ms,
-                    pzt_angle_deg, pzt_mag_val, total_press_val,
+                    pzt_angle_deg, total_press_val,
                     cop_delta_x_filt, cop_delta_y_filt,
-                    force_angle_deg, force_mag_val,
+                    force_angle_deg,
                     force_fz_filt, force_fx_filt, force_fy_filt,
-                    cal_angle_deg, cal_mag_val, cal_fx_val, cal_fy_val, cal_fz_val)
+                    cal_angle_deg, cal_fx_val, cal_fy_val, cal_fz_val)
             _last_plot_t = now
 
         elapsed = time.perf_counter() - loop_start_s
@@ -373,7 +386,7 @@ def main():
 
     g_main_stop_flag.set()
     data_thread.join(timeout=2)
-    g_main_plot.plot_full_magnitude_curve(MAIN_SAVE_DIR)
+    g_main_plot.plot_full_analysis(MAIN_SAVE_DIR)
 
 if __name__ == "__main__":
     main()

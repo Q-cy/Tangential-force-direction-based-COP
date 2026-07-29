@@ -218,11 +218,10 @@ def offline_calibrate_csv(train_csv: str, target_csv: str, dim: str = "2D", data
 
     # 找 Fx_cal, Fy_cal 列索引
     if "Fx_cal" not in header:
-        header.extend(["Fx_cal", "Fy_cal", "Force_cal_mag", "Force_cal_angle"])
+        header.extend(["Fx_cal", "Fy_cal", "Force_cal_angle"])
         for row in rows:
             row["Fx_cal"] = ""
             row["Fy_cal"] = ""
-            row["Force_cal_mag"] = ""
             row["Force_cal_angle"] = ""
 
     # discrete 模式：构建规则网格
@@ -253,7 +252,6 @@ def offline_calibrate_csv(train_csv: str, target_csv: str, dim: str = "2D", data
 
         row["Fx_cal"] = f"{cal_fx:.6f}"
         row["Fy_cal"] = f"{cal_fy:.6f}"
-        row["Force_cal_mag"] = f"{cal_mag:.6f}"
         row["Force_cal_angle"] = f"{cal_angle:.6f}"
         cnt += 1
 

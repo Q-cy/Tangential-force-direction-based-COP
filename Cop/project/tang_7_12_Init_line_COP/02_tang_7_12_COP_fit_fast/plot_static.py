@@ -3,7 +3,7 @@
 
 两种用法：
   1. 直接改下面「配置区」的变量，然后运行：python plot_static.py
-  2. CLI 传参覆盖配置：python plot_static.py -f data_2.csv -c rel_ms,ADC_mag -r 100:500
+  2. CLI 传参覆盖配置：python plot_static.py -f data_2.csv -c rel_ms,ADC_angle -r 100:500
 
 CLI 参数：
   -f CSV 文件路径
@@ -27,7 +27,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from angle import angle_difference
+from tang_7_12_InitCOP_realtime_other_package import angle_difference
 
 
 # ===================================================================
@@ -107,8 +107,8 @@ _COLUMN_NAMES = [
     "press_t", "force_t", "dt",
     "delta_CoP_X", "delta_CoP_Y",
     "delta_Force_X", "delta_Force_Y", "delta_Force_Z",
-    "ADC_angle", "ADC_mag", "Force_angle", "Force_mag",
-    "Fx_cal", "Fy_cal", "Force_cal_mag", "Force_cal_angle",
+    "ADC_angle", "Force_angle",
+    "Fx_cal", "Fy_cal", "Force_cal_angle",
     "CoP_state", "valid",
 ]
 
@@ -486,16 +486,13 @@ def plot_full_analysis(csv_path: str, save_path=None, row_start=None, row_end=No
 
     # 左列数据
     adc_angle = _col("ADC_angle")
-    adc_mag = _col("ADC_mag")
     adc_sum = _col("adc_sum")
     cop_dx = _col("delta_CoP_X")
     cop_dy = _col("delta_CoP_Y")
 
     # 右列数据
     force_angle = _col("Force_angle")
-    force_mag = _col("Force_mag")
     force_cal_angle = _col("Force_cal_angle")
-    force_cal_mag = _col("Force_cal_mag")
     force_fz = _col("delta_Force_Z")
     force_fx = _col("delta_Force_X")
     force_fy = _col("delta_Force_Y")
@@ -503,7 +500,6 @@ def plot_full_analysis(csv_path: str, save_path=None, row_start=None, row_end=No
     fy_cal = _col("Fy_cal")
 
     has_cal_angle = force_cal_angle is not None
-    has_cal_mag = force_cal_mag is not None
     has_fx_cal = fx_cal is not None
     has_fy_cal = fy_cal is not None
 
@@ -517,13 +513,13 @@ def plot_full_analysis(csv_path: str, save_path=None, row_start=None, row_end=No
     if FORCE_MIN > 0:
         # 用各子图的参考列过滤小力值
         _force_filters = {}
-        for name in ("Force_angle", "Force_mag", "delta_Force_X", "delta_Force_Y"):
+        for name in ("Force_angle", "delta_Force_X", "delta_Force_Y"):
             col = _col(name)
             if col is not None:
                 _force_filters[name] = col
 
-    fig, axes = plt.subplots(5, 2, figsize=(18, 24))
-    (aL1, aR1), (aL2, aR2), (aL3, aR3), (aL4, aR4), (aL5, aR5) = axes
+    fig, axes = plt.subplots(4, 2, figsize=(18, 20))
+    (aL1, aR1), (aL2, aR2), (aL3, aR3), (aL4, aR4) = axes
 
     def _p(ax, d, c, lbl, first_valid_only=False):
         if d is None or len(d) != len(t):
@@ -565,12 +561,11 @@ def plot_full_analysis(csv_path: str, save_path=None, row_start=None, row_end=No
 
     # 左列：PZT
     _p(aL1, adc_angle, 'b-', 'PZT Angle'); aL1.set_title("PZT Angle"); aL1.grid(True, alpha=0.3)
-    _p(aL2, adc_mag, 'b-', 'PZT Mag'); aL2.set_title("PZT Mag"); aL2.grid(True, alpha=0.3)
     if adc_sum is not None:
-        _p(aL3, adc_sum, 'b-', 'PZT Fz')
-    aL3.set_title("PZT Fz"); aL3.grid(True, alpha=0.3)
-    _p(aL4, cop_dx, 'b-', 'PZT Fx'); aL4.set_title("PZT Fx"); aL4.grid(True, alpha=0.3)
-    _p(aL5, cop_dy, 'c-', 'PZT Fy'); aL5.set_title("PZT Fy"); aL5.grid(True, alpha=0.3)
+        _p(aL2, adc_sum, 'b-', 'PZT Fz')
+    aL2.set_title("PZT Fz"); aL2.grid(True, alpha=0.3)
+    _p(aL3, cop_dx, 'b-', 'PZT Fx'); aL3.set_title("PZT Fx"); aL3.grid(True, alpha=0.3)
+    _p(aL4, cop_dy, 'c-', 'PZT Fy'); aL4.set_title("PZT Fy"); aL4.grid(True, alpha=0.3)
 
     # 右列：Force（含误差计算）
     _p(aR1, force_angle, 'r-', 'Measured')
@@ -586,43 +581,30 @@ def plot_full_analysis(csv_path: str, save_path=None, row_start=None, row_end=No
                         bbox=dict(boxstyle='round,pad=0.2', facecolor='wheat', alpha=0.7))
             all_error_results.append({"pred": "Force_cal_angle", "ref": "Force_angle", "results": err})
 
-    _p(aR2, force_mag, 'r-', 'Measured')
-    if has_cal_mag: _p(aR2, force_cal_mag, 'g--', 'Calibrated')
-    aR2.set_title("Mag: Meas vs Cal"); aR2.grid(True, alpha=0.3)
-    if has_cal_mag:
-        aR2.legend(fontsize=8)
-        _vm = v_mask & (np.abs(_force_filters.get("Force_mag", np.ones(len(t)))) >= FORCE_MIN) if FORCE_MIN > 0 else v_mask
-        err = _compute_errors(force_mag[_vm], force_cal_mag[_vm])
-        if "error" not in err:
-            aR2.annotate(f"MAE={err['MAE']:.4f} MAPE={err['MAPE_%']:.1f}% R²={err['R2']:.3f}",
-                        xy=(0.02, 0.95), xycoords='axes fraction', fontsize=7,
-                        bbox=dict(boxstyle='round,pad=0.2', facecolor='wheat', alpha=0.7))
-            all_error_results.append({"pred": "Force_cal_mag", "ref": "Force_mag", "results": err})
+    _p(aR2, force_fz, 'r-', 'Fz'); aR2.set_title("Fz: Measured"); aR2.grid(True, alpha=0.3)
 
-    _p(aR3, force_fz, 'r-', 'Fz'); aR3.set_title("Fz: Measured"); aR3.grid(True, alpha=0.3)
-
-    _p(aR4, force_fx, 'r-', 'Measured')
-    if has_fx_cal: _p(aR4, fx_cal, 'g--', 'Calibrated')
-    aR4.set_title("Fx: Meas vs Cal"); aR4.grid(True, alpha=0.3)
+    _p(aR3, force_fx, 'r-', 'Measured')
+    if has_fx_cal: _p(aR3, fx_cal, 'g--', 'Calibrated')
+    aR3.set_title("Fx: Meas vs Cal"); aR3.grid(True, alpha=0.3)
     if has_fx_cal:
-        aR4.legend(fontsize=8)
+        aR3.legend(fontsize=8)
         _vm = v_mask & (np.abs(_force_filters.get("delta_Force_X", np.ones(len(t)))) >= FORCE_MIN) if FORCE_MIN > 0 else v_mask
         err = _compute_errors(force_fx[_vm], fx_cal[_vm])
         if "error" not in err:
-            aR4.annotate(f"MAE={err['MAE']:.4f} MAPE={err['MAPE_%']:.1f}% R²={err['R2']:.3f}",
+            aR3.annotate(f"MAE={err['MAE']:.4f} MAPE={err['MAPE_%']:.1f}% R²={err['R2']:.3f}",
                         xy=(0.02, 0.95), xycoords='axes fraction', fontsize=7,
                         bbox=dict(boxstyle='round,pad=0.2', facecolor='wheat', alpha=0.7))
             all_error_results.append({"pred": "Fx_cal", "ref": "delta_Force_X", "results": err})
 
-    _p(aR5, force_fy, 'r-', 'Measured')
-    if has_fy_cal: _p(aR5, fy_cal, 'c--', 'Calibrated')
-    aR5.set_title("Fy: Meas vs Cal"); aR5.grid(True, alpha=0.3)
+    _p(aR4, force_fy, 'r-', 'Measured')
+    if has_fy_cal: _p(aR4, fy_cal, 'c--', 'Calibrated')
+    aR4.set_title("Fy: Meas vs Cal"); aR4.grid(True, alpha=0.3)
     if has_fy_cal:
-        aR5.legend(fontsize=8)
+        aR4.legend(fontsize=8)
         _vm = v_mask & (np.abs(_force_filters.get("delta_Force_Y", np.ones(len(t)))) >= FORCE_MIN) if FORCE_MIN > 0 else v_mask
         err = _compute_errors(force_fy[_vm], fy_cal[_vm])
         if "error" not in err:
-            aR5.annotate(f"MAE={err['MAE']:.4f} MAPE={err['MAPE_%']:.1f}% R²={err['R2']:.3f}",
+            aR4.annotate(f"MAE={err['MAE']:.4f} MAPE={err['MAPE_%']:.1f}% R²={err['R2']:.3f}",
                         xy=(0.02, 0.95), xycoords='axes fraction', fontsize=7,
                         bbox=dict(boxstyle='round,pad=0.2', facecolor='wheat', alpha=0.7))
             all_error_results.append({"pred": "Fy_cal", "ref": "delta_Force_Y", "results": err})

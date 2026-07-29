@@ -603,7 +603,7 @@ def write_back_csv(csv_path, input_cols, output_cols, fit_results, order, dim, w
         header = [name.strip() for name in reader.fieldnames]
         rows = list(reader)
 
-    for col in ["Fx_cal", "Fy_cal", "Force_cal_mag", "Force_cal_angle"]:
+    for col in ["Fx_cal", "Fy_cal", "Force_cal_angle"]:
         if col not in header:
             header.append(col)
             for row in rows:
@@ -686,7 +686,6 @@ def write_back_csv(csv_path, input_cols, output_cols, fit_results, order, dim, w
 
         row["Fx_cal"] = f"{cal_fx:.6f}"
         row["Fy_cal"] = f"{cal_fy:.6f}"
-        row["Force_cal_mag"] = f"{cal_mag:.6f}"
         row["Force_cal_angle"] = f"{cal_angle:.6f}"
         cnt += 1
 

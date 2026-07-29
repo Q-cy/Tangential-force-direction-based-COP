@@ -27,10 +27,10 @@ TABLE_CSV_HEADER = [  # CSV 文件表头（84通道 + 时间戳 + 力/角度/标
     "delta_CoP_X", "delta_CoP_Y",
     # 新增 Force 分量
     "delta_Force_X", "delta_Force_Y", "delta_Force_Z",
-    # 角度和幅值
-    "ADC_angle", "ADC_mag", "Force_angle", "Force_mag",
+    # 角度
+    "ADC_angle", "Force_angle",
     # 标定后的切向力
-    "Fx_cal", "Fy_cal", "Force_cal_mag", "Force_cal_angle",
+    "Fx_cal", "Fy_cal", "Force_cal_angle",
     # 接触状态
     "CoP_state"
 ]
@@ -73,12 +73,9 @@ def build_csv_row(
     delta_force_y: float,
     delta_force_z: float,
     adc_angle: float,        # ADC角度
-    adc_mag: float,          # ADC幅值
     force_angle: float,      # 力传感器角度
-    force_mag: float,        # 力传感器幅值
     fx_cal: float = None,    # 标定后切向力 X (N)
     fy_cal: float = None,    # 标定后切向力 Y (N)
-    force_cal_mag: float = None,   # 标定后幅值 (N)
     force_cal_angle: float = None, # 标定后角度 (deg)
     cop_state: int = 0,            # 接触状态: 0=未接触, 1=等待稳定, 2=测量中
     adc_sum: float = 0.0,          # ADC 84通道之和
@@ -106,12 +103,9 @@ def build_csv_row(
         delta_force_y,
         delta_force_z,
         adc_angle,               # ADC_angle：PZT计算的角度
-        adc_mag,                 # ADC_mag：CoP偏移幅值
         force_angle,             # Force_angle：力传感器计算的角度
-        force_mag,               # Force_mag：力传感器幅值
         fx_cal if fx_cal is not None else float('nan'),
         fy_cal if fy_cal is not None else float('nan'),
-        force_cal_mag if force_cal_mag is not None else float('nan'),
         force_cal_angle if force_cal_angle is not None else float('nan'),
         cop_state,
     ]

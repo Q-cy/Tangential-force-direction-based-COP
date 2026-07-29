@@ -3,15 +3,15 @@ import numpy as np
 from collections import deque
 import threading
 import time
+import os
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui
-import COP as COP
 
 pg.setConfigOptions(antialias=True, background='w', foreground='k')
 
 PLOT_TIMER_INTERVAL_MS = 10    # 绘图定时器刷新间隔(毫秒)
 PLOT_ERR_HISTORY_LEN = 100     # 角度误差历史缓冲区长度
-PLOT_MAG_HISTORY_LEN = 100     # 幅值历史缓冲区长度
+PLOT_HISTORY_LEN = 100         # 时序曲线历史缓冲区长度
 
 def _yrange(data, pad=0.1):
     clean = [v for v in data if v == v]  # filter NaN
@@ -38,7 +38,7 @@ class CellGridItem(pg.GraphicsObject):
         p.setRenderHint(p.RenderHint.Antialiasing, False)
         w = self.cols
         h = self.rows
-        # 画色块
+        # 画色块（数据 Y = r，与视图一致）
         for r in range(h):
             for c in range(w):
                 v = self.data[r, c]
@@ -114,12 +114,12 @@ class RealTimePlot:
 
         # === 全程存储 ===
         self.full_time_list = []
-        self.full_adc_angle_list, self.full_adc_mag_list = [], []
+        self.full_adc_angle_list = []
         self.full_total_pressure_list = []
         self.full_adc_dx_list, self.full_adc_dy_list = [], []
-        self.full_force_angle_list, self.full_force_mag_list = [], []
+        self.full_force_angle_list = []
         self.full_fz_list, self.full_fx_list, self.full_fy_list = [], [], []
-        self.full_cal_angle_list, self.full_cal_mag_list = [], []
+        self.full_cal_angle_list = []
         self.full_fx_cal_list, self.full_fy_cal_list = [], []
         self.full_fz_cal_list = []
 
@@ -132,9 +132,7 @@ class RealTimePlot:
 
     def init_defaults(self):
         self._pzt_angle_deg = 0.0           # PZT方向角度(度)
-        self._pzt_mag_val = 0.0             # PZT幅值
         self._force_angle_deg = 0.0         # 六维力方向角度(度)
-        self._force_mag_val = 0.0           # 六维力幅值
         self._press_table_arr = np.zeros((12, 7))  # 压力表数据(12×7)
         self._cop_curr_x = 0.0              # 当前CoP X
         self._cop_curr_y = 0.0              # 当前CoP Y
@@ -150,11 +148,13 @@ class RealTimePlot:
         self._cal_fy_val = None             # 标定力Fy
         self._cal_fz_val = None             # 标定力Fz
         self._cal_angle_deg = None          # 标定力角度(度)
-        self._cal_mag_val = None            # 标定力幅值
         self._cop_state = 0                 # CoP状态(0=未接触,1=粗略,2=精细)
+        self._gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)  # 压力梯度(每帧由 main 传入)
+        self._contact_init = False
+        self._pzt_table_angle_deg = None     # Pressure Table 专用角度（invertY 视图）
 
     def init_history(self):
-        hist_len = PLOT_MAG_HISTORY_LEN
+        hist_len = PLOT_HISTORY_LEN
         err_len = PLOT_ERR_HISTORY_LEN
         self.angle_error_history = deque(maxlen=err_len)
         self.pzt_fz_history = deque(maxlen=hist_len)
@@ -163,8 +163,6 @@ class RealTimePlot:
         self.force_fz_history = deque(maxlen=hist_len)
         self.force_fx_history = deque(maxlen=hist_len)
         self.force_fy_history = deque(maxlen=hist_len)
-        self.adc_mag_history = deque(maxlen=hist_len)
-        self.raw_force_mag_history = deque(maxlen=hist_len)
         self.force_fx_cal_history = deque(maxlen=hist_len)
         self.force_fz_cal_history = deque(maxlen=hist_len)
         self.force_fy_cal_history = deque(maxlen=hist_len)
@@ -262,7 +260,7 @@ class RealTimePlot:
         self._dir_txt_frc = pg.TextItem("", anchor=(0, 1))
         self.p_dir.addItem(self._dir_txt_frc)
 
-        self.p_mag = self.win.addPlot(row=0, col=3, title="Magnitude")
+        self.p_mag = self.win.addPlot(row=0, col=3, title="Pressure Snapshot")
         self.p_mag.hideAxis('left'); self.p_mag.hideAxis('bottom')
         self.p_mag.setXRange(-0.8, 0.8); self.p_mag.setYRange(-0.8, 0.8); self.p_mag.setAspectLocked()
         self._mag_pzt = self._make_arrow_parts(self.p_mag)
@@ -333,18 +331,20 @@ class RealTimePlot:
         self.win.show()
 
     # ===== 数据接口 =====
-    def set_data(self, pzt_angle_deg, pzt_mag_val, force_angle_deg, force_mag_val,
-                 press_table_arr, total_press_val, force_total_mag,
+    def set_data(self, pzt_angle_deg, force_angle_deg,
+                 press_table_arr, total_press_val,
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
                  cal_fx_val=None, cal_fy_val=None, cal_fz_val=None,
-                 cal_angle_deg=None, cal_mag_val=None,
-                 cop_state=0):
+                 cal_angle_deg=None,
+                 cop_state=0,
+                 gradient=None,
+                 contact_init=False,
+                 refined=False,
+                 pzt_table_angle_deg=None):
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
-            self._pzt_mag_val = pzt_mag_val
             self._force_angle_deg = force_angle_deg
-            self._force_mag_val = force_mag_val
             self._press_table_arr = press_table_arr.reshape(self.rows, self.cols)
             self._cop_curr_x = cop_curr_x
             self._cop_curr_y = cop_curr_y
@@ -360,14 +360,15 @@ class RealTimePlot:
             self._cal_fy_val = cal_fy_val
             self._cal_fz_val = cal_fz_val
             self._cal_angle_deg = cal_angle_deg
-            self._cal_mag_val = cal_mag_val
             self._cop_state = cop_state
+            self._contact_init = contact_init
+            self._pzt_table_angle_deg = pzt_table_angle_deg
+            if gradient is not None:
+                self._gradient_arr = np.asarray(gradient, dtype=np.float32)
 
             angle_err = min(abs(pzt_angle_deg - force_angle_deg),
                            360 - abs(pzt_angle_deg - force_angle_deg))
             self.angle_error_history.append(angle_err)
-            self.adc_mag_history.append(pzt_mag_val)
-            self.raw_force_mag_history.append(force_total_mag)
             self.pzt_fz_history.append(total_press_val)
             self.adc_dx_history.append(cop_delta_x)
             self.adc_dy_history.append(cop_delta_y)
@@ -381,28 +382,25 @@ class RealTimePlot:
                 self.force_fz_cal_history.append(cal_fz_val)
 
     def append_full_data(self, rel_time_ms,
-                          pzt_angle_deg, pzt_mag_val, total_press_val,
+                          pzt_angle_deg, total_press_val,
                           cop_delta_x_filt, cop_delta_y_filt,
-                          force_angle_deg, force_mag_val,
+                          force_angle_deg,
                           force_fz_filt, force_fx_filt, force_fy_filt,
-                          cal_angle_deg=None, cal_mag_val=None, cal_fx_val=None, cal_fy_val=None, cal_fz_val=None):
+                          cal_angle_deg=None, cal_fx_val=None, cal_fy_val=None, cal_fz_val=None):
         with self.lock:
             self.full_time_list.append(rel_time_ms)
             self.full_adc_angle_list.append(pzt_angle_deg)
-            self.full_adc_mag_list.append(pzt_mag_val)
             self.full_total_pressure_list.append(total_press_val)
             self.full_adc_dx_list.append(cop_delta_x_filt)
             self.full_adc_dy_list.append(cop_delta_y_filt)
             self.full_force_angle_list.append(force_angle_deg)
-            self.full_force_mag_list.append(force_mag_val)
             self.full_fz_list.append(force_fz_filt)
             self.full_fx_list.append(force_fx_filt)
             self.full_fy_list.append(force_fy_filt)
-            if cal_mag_val is not None:
+            if cal_fx_val is not None:
                 self.full_cal_angle_list.append(cal_angle_deg)
-                self.full_cal_mag_list.append(cal_mag_val)
-                self.full_fx_cal_list.append(cal_fx_val if cal_fx_val is not None else float('nan'))
-                self.full_fy_cal_list.append(cal_fy_val if cal_fy_val is not None else float('nan'))
+                self.full_fx_cal_list.append(cal_fx_val)
+                self.full_fy_cal_list.append(cal_fy_val)
             if cal_fz_val is not None:
                 self.full_fz_cal_list.append(cal_fz_val)
 
@@ -411,11 +409,8 @@ class RealTimePlot:
         t0 = time.perf_counter()
         with self.lock:
             pzt_angle_deg = self._pzt_angle_deg
-            pzt_mag_val = self._pzt_mag_val
             force_angle_deg = self._force_angle_deg
-            force_mag_val = self._force_mag_val
             cal_angle_deg = self._cal_angle_deg
-            cal_mag_val = self._cal_mag_val
             pzt_fz_hist = list(self.pzt_fz_history)
             cop_dx_hist = list(self.adc_dx_history); cop_dy_hist = list(self.adc_dy_history)
             force_fz_hist = list(self.force_fz_history)
@@ -429,17 +424,18 @@ class RealTimePlot:
             cop_base_x = self._cop_base_x; cop_base_y = self._cop_base_y
             cop_delta_x = self._cop_delta_x; cop_delta_y = self._cop_delta_y
             cal_fx_val = self._cal_fx_val; cal_fy_val = self._cal_fy_val
+            force_fx_val = self._force_fx_val; force_fy_val = self._force_fy_val
+            pzt_table_angle_deg = self._pzt_table_angle_deg
             cop_state = self._cop_state
-            with COP.g_cop_grad_table_lock:
-                grad_arr = COP.g_cop_grad_table_arr.copy()
+            contact_init = self._contact_init
+            grad_arr = self._gradient_arr.copy()
 
         # 状态显示
         _state_names = {0: "未接触", 1: "粗略测量", 2: "精细测量"}
         self.win.setWindowTitle(f"RealTime — {_state_names.get(cop_state, '?')}")
 
         # 初始 CoP 未确定时冻结蓝色箭头（与红色一致）
-        _fa = force_angle_deg if COP.g_cop_contact_init_flag else 0.0
-        _fm = force_mag_val if COP.g_cop_contact_init_flag else 0.0
+        _fa = force_angle_deg if contact_init else 0.0
 
         # Direction: PZT=red + Force=blue
         fs = self._font_size(12)
@@ -450,14 +446,17 @@ class RealTimePlot:
         self._dir_txt_frc.setHtml(self._html(f'Force_Angle: {_fa:.1f}°', 'blue', fs))
         self._dir_txt_frc.setPos(0.75, 0.95)
 
-        # Magnitude: proportional length
-        pzt_mag_len = max(min((pzt_mag_val / 5.0) * 0.65, 0.65), 0.01)
-        self._update_arrow(self._mag_pzt, pzt_angle_deg, pzt_mag_len, 'r')
-        force_mag_len = max(min((abs(_fm) / 20.0) * 0.65, 0.65), 0.01)
-        self._update_arrow(self._mag_frc, _fa, force_mag_len, 'b')
-        self._mag_txt_pzt.setHtml(self._html(f'PZT_Mag: {pzt_mag_val:.1f}', 'red', fs))
+        # Pressure Table + Gradient 占据原 Magnitude 区域
+        # 此处只保留箭头几何，不持久化 magnitude 数据
+        pzt_arrow_len = min(max(np.hypot(cop_delta_x, cop_delta_y) * 0.5, 0.0), 0.65)
+        self._update_arrow(self._mag_pzt, pzt_angle_deg, pzt_arrow_len, 'r')
+        _force_fx = 0.0 if (force_fx_val is None or np.isnan(force_fx_val)) else force_fx_val
+        _force_fy = 0.0 if (force_fy_val is None or np.isnan(force_fy_val)) else force_fy_val
+        force_arrow_len = min(max(np.hypot(_force_fx, _force_fy) * 0.05, 0.0), 0.65)
+        self._update_arrow(self._mag_frc, _fa, force_arrow_len, 'b')
+        self._mag_txt_pzt.setHtml(self._html(f'PZT_Angle: {pzt_angle_deg:.1f}°', 'red', fs))
         self._mag_txt_pzt.setPos(0.35, 0.75)
-        self._mag_txt_frc.setHtml(self._html(f'Force_Mag: {abs(_fm):.1f}', 'blue', fs))
+        self._mag_txt_frc.setHtml(self._html(f'Force_Angle: {_fa:.1f}°', 'blue', fs))
         self._mag_txt_frc.setPos(0.35, 0.62)
 
         # Time-series
@@ -478,7 +477,7 @@ class RealTimePlot:
             self._t_err.setPos(int(max(len(x_vals) - 1, 1) * 0.85), 180 - 180 * 0.12)
 
         # Pressure table + CoP + Gradient：仅在初始 CoP 确定后显示
-        if COP.g_cop_contact_init_flag:
+        if contact_init:
             cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
             self._cell_grid.set_data(press_table_arr, cell_vmax)
             for row_idx in range(12):
@@ -491,8 +490,9 @@ class RealTimePlot:
                 spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
             self._cop_dots.setData(spots=spots)
             if not np.isnan(cop_base_x) and not np.isnan(cop_base_y) and np.hypot(cop_delta_x, cop_delta_y) > 0.05:
+                table_angle = pzt_table_angle_deg if pzt_table_angle_deg is not None else pzt_angle_deg
                 self._update_arrow((self._cop_arr, self._cop_hL, self._cop_hR),
-                                   np.degrees(np.arctan2(-cop_delta_y, cop_delta_x)) if abs(cop_delta_x) + abs(cop_delta_y) > 1e-6 else 0,
+                                   table_angle,
                                    np.hypot(cop_delta_x, cop_delta_y), 'r', (cop_base_x, cop_base_y))
             else:
                 self._cop_arr.setData([], [])
@@ -507,15 +507,15 @@ class RealTimePlot:
             for grad_idx, (grad_ln, grad_dot) in enumerate(zip(self._g_lines, self._g_heads)):
                 grad_row, grad_col = divmod(grad_idx, 7)
                 grad_x, grad_y = grad_arr[grad_row, grad_col, 0], grad_arr[grad_row, grad_col, 1]
-                grad_mag = np.hypot(grad_x, grad_y)
-                if grad_mag > 1.0:
-                    arrow_dx = -grad_x / grad_mag * 0.3
-                    arrow_dy = grad_y / grad_mag * 0.3
+                grad_norm = np.hypot(grad_x, grad_y)
+                if grad_norm > 1.0:
+                    arrow_dx = -grad_x / grad_norm * 0.3
+                    arrow_dy = grad_y / grad_norm * 0.3
                     tip_x = grad_col + arrow_dx
                     tip_y = grad_row + arrow_dy
                     grad_ln.setData([grad_col, tip_x], [grad_row, tip_y])
                     grad_dot.setData(x=[tip_x], y=[tip_y], brush='k', size=4)
-                    self._g_txts[grad_idx].setText(f"{grad_mag:.0f}")
+                    self._g_txts[grad_idx].setText(f"{grad_norm:.0f}")
                     self._g_txts[grad_idx].setPos(grad_col, grad_row)
                 else:
                     grad_ln.setData([], [])
@@ -585,7 +585,7 @@ class RealTimePlot:
                 txt_r.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.19)
 
     # ===== 全程静态图 (matplotlib Agg, 缺则 skip) =====
-    def plot_full_magnitude_curve(self, save_dir):
+    def plot_full_analysis(self, save_dir):
         if len(self.full_time_list) == 0: print("⚠️ 无数据"); return
         try:
             import matplotlib
@@ -594,37 +594,32 @@ class RealTimePlot:
         except ImportError:
             print("⚠️ matplotlib 未安装, 跳过 PNG 出图 (CSV 数据已保留)")
             return
-        has_cal = len(self.full_cal_mag_list) == len(self.full_time_list)
+        has_cal = self.full_cal_angle_list and len(self.full_cal_angle_list) == len(self.full_time_list)
         t = self.full_time_list
-        fig, axes = plt.subplots(5, 2, figsize=(18, 24))
-        (aL1, aR1), (aL2, aR2), (aL3, aR3), (aL4, aR4), (aL5, aR5) = axes
+        fig, axes = plt.subplots(4, 2, figsize=(18, 20))
+        (aL1, aR1), (aL2, aR2), (aL3, aR3), (aL4, aR4) = axes
         def _p(ax, d, c, lbl):
             if d and len(d) == len(t): ax.plot(t, d, c, linewidth=1.0, label=lbl)
         _p(aL1, self.full_adc_angle_list, 'b-', 'PZT Angle'); aL1.set_title("PZT Angle"); aL1.grid(True, alpha=0.3)
-        _p(aL2, self.full_adc_mag_list, 'b-', 'PZT Mag'); aL2.set_title("PZT Mag"); aL2.grid(True, alpha=0.3)
-        _p(aL3, self.full_total_pressure_list, 'b-', 'PZT Fz'); aL3.set_title("PZT Fz"); aL3.grid(True, alpha=0.3)
-        _p(aL4, self.full_adc_dx_list, 'b-', 'PZT Fx'); aL4.set_title("PZT Fx"); aL4.grid(True, alpha=0.3)
-        _p(aL5, self.full_adc_dy_list, 'c-', 'PZT Fy'); aL5.set_title("PZT Fy"); aL5.grid(True, alpha=0.3)
+        _p(aL2, self.full_total_pressure_list, 'b-', 'PZT Fz'); aL2.set_title("PZT Fz"); aL2.grid(True, alpha=0.3)
+        _p(aL3, self.full_adc_dx_list, 'b-', 'PZT Fx'); aL3.set_title("PZT Fx"); aL3.grid(True, alpha=0.3)
+        _p(aL4, self.full_adc_dy_list, 'c-', 'PZT Fy'); aL4.set_title("PZT Fy"); aL4.grid(True, alpha=0.3)
         _p(aR1, self.full_force_angle_list, 'r-', 'Measured')
         if has_cal: _p(aR1, self.full_cal_angle_list, 'g--', 'Calibrated')
         aR1.set_title("Angle: Meas vs Cal"); aR1.grid(True, alpha=0.3)
         if has_cal: aR1.legend(fontsize=8)
-        _p(aR2, self.full_force_mag_list, 'r-', 'Measured')
-        if has_cal: _p(aR2, self.full_cal_mag_list, 'g--', 'Calibrated')
-        aR2.set_title("Mag: Meas vs Cal"); aR2.grid(True, alpha=0.3)
-        if has_cal: aR2.legend(fontsize=8)
-        _p(aR3, self.full_fz_list, 'r-', 'Fz'); aR3.set_title("Fz: Measured"); aR3.grid(True, alpha=0.3)
+        _p(aR2, self.full_fz_list, 'r-', 'Fz'); aR2.set_title("Fz: Measured"); aR2.grid(True, alpha=0.3)
         has_cal_fz = self.full_fz_cal_list and len(self.full_fz_cal_list) == len(t)
-        if has_cal_fz: _p(aR3, self.full_fz_cal_list, 'g--', 'Fz_cal')
-        if has_cal_fz: aR3.legend(fontsize=8)
-        _p(aR4, self.full_fx_list, 'r-', 'Measured')
-        if has_cal: _p(aR4, self.full_fx_cal_list, 'g--', 'Calibrated')
-        aR4.set_title("Fx: Meas vs Cal"); aR4.grid(True, alpha=0.3)
+        if has_cal_fz: _p(aR2, self.full_fz_cal_list, 'g--', 'Fz_cal')
+        if has_cal_fz: aR2.legend(fontsize=8)
+        _p(aR3, self.full_fx_list, 'r-', 'Measured')
+        if has_cal: _p(aR3, self.full_fx_cal_list, 'g--', 'Calibrated')
+        aR3.set_title("Fx: Meas vs Cal"); aR3.grid(True, alpha=0.3)
+        if has_cal: aR3.legend(fontsize=8)
+        _p(aR4, self.full_fy_list, 'm-', 'Measured')
+        if has_cal: _p(aR4, self.full_fy_cal_list, 'c--', 'Calibrated')
+        aR4.set_title("Fy: Meas vs Cal"); aR4.grid(True, alpha=0.3)
         if has_cal: aR4.legend(fontsize=8)
-        _p(aR5, self.full_fy_list, 'm-', 'Measured')
-        if has_cal: _p(aR5, self.full_fy_cal_list, 'c--', 'Calibrated')
-        aR5.set_title("Fy: Meas vs Cal"); aR5.grid(True, alpha=0.3)
-        if has_cal: aR5.legend(fontsize=8)
         for row in axes:
             for ax in row: ax.set_xlabel("Time (ms)", fontsize=9)
         plt.tight_layout()

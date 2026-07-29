@@ -62,15 +62,16 @@ class PZTSensorAngle:
 
     # ---------- 公共 API ----------
 
-    def get_all(self, adc_data) -> tuple[float, float, float]:
+    def get_all(self, adc_data) -> tuple[float, float, float, float, float]:
         """
-        输入 rows*cols 个 ADC 值，一次性输出 (angle, dx, dy)。
+        输入 rows*cols 个 ADC 值，一次性输出 (angle, dx, dy, cop_x, cop_y)。
 
         :param adc_data: list/np.array，长度为 rows*cols 的 ADC 原始数据
-        :return: (angle, dx, dy)
-            · angle: PZT 角度（0~360°）
-            · dx:    CoP X 方向位移（列方向，cells）
-            · dy:    CoP Y 方向位移（行方向，cells）
+        :return: (angle, dx, dy, cop_x, cop_y)
+            · angle:     PZT 角度（0~360°）
+            · dx:        CoP X 方向位移（列方向，cells）
+            · dy:        CoP Y 方向位移（行方向，cells）
+            · cop_x/y:   当前帧 CoP（rows*cols cell 坐标）
         :raises ValueError: ADC 数据长度不等于 rows*cols 时抛出
         """
         expected = self.rows * self.cols
@@ -79,12 +80,46 @@ class PZTSensorAngle:
 
         dx, dy = self._compute_delta_cop(adc_data)
         angle = self._compute_cop_angle(dx, dy)
-        return angle, dx, dy
+        cop_x, cop_y = self.get_cop(adc_data)
+        return angle, dx, dy, cop_x, cop_y
 
     def get_angle(self, adc_data) -> float:
-        """便捷接口：只输出 PZT 角度（0~360°）。等价于 get_all(...)[0]。"""
-        angle, _, _ = self.get_all(adc_data)
-        return angle
+        """便捷接口：只输出 PZT 角度（0~360°）。"""
+        dx, dy = self._compute_delta_cop(adc_data)
+        return self._compute_cop_angle(dx, dy)
+
+    def get_cop(self, adc_data) -> tuple[float, float]:
+        """计算当前帧 CoP (cop_x, cop_y)，不影响 origin/精修状态。
+
+        :param adc_data: list/np.array，长度为 rows*cols 的 ADC 原始数据
+        :return: (cop_x, cop_y)，cell 单位；总压力为 0 时返回 (0.0, 0.0)
+        :raises ValueError: ADC 数据长度不等于 rows*cols 时抛出
+        """
+        expected = self.rows * self.cols
+        if len(adc_data) != expected:
+            raise ValueError(f"ADC数据长度必须为{expected}")
+
+        frame2d = np.asarray(adc_data, dtype=np.float32).reshape(self.rows, self.cols)
+        total_pressure = float(np.sum(frame2d))
+        if total_pressure == 0:
+            return 0.0, 0.0
+        return self._compute_cop(frame2d, total_pressure)
+
+    def get_gradient(self, adc_data) -> np.ndarray:
+        """便捷接口：计算当前帧的 2D 梯度。等价于 compute_gradient(adc_data)。"""
+        return self._compute_gradient(adc_data)
+    
+    def get_origin(self) -> tuple[float | None, float | None]:
+        """返回首次接触 origin：(origin_x, origin_y)；未锁时均为 None。"""
+        return self._origin_x, self._origin_y
+
+    def get_state(self) -> int:
+        """返回 CoP 状态：0=未接触, 1=已接触/粗略, 2=已精修。"""
+        if self._refined:
+            return 2
+        if self._contact_init:
+            return 1
+        return 0
 
     def reset_origin(self) -> None:
         """清掉首次接触 origin 与低压计数，同时清掉二次精修状态（候选点、稳定计数、已精修标志）；
@@ -100,49 +135,6 @@ class PZTSensorAngle:
         self._refined = False
 
     # ---------- 内部算法 ----------
-
-    def _compute_cop(self, frame2d: np.ndarray, total_pressure: float) -> tuple[float, float]:
-        """计算 2D 帧的 CoP (X, Y) — 压力加权中心, 几何意义.
-
-        输入:  (rows × cols) 帧 + 总压力 total_pressure
-        输出:  (cop_x, cop_y) 浮动位置, 已是 cell 单位
-        """
-        x_grid = np.tile(np.arange(self.cols), (self.rows, 1))
-        y_grid = np.repeat(np.arange(self.rows), self.cols).reshape(self.rows, self.cols)
-        cop_x = float(np.sum(frame2d * x_grid) / total_pressure)
-        cop_y = float(np.sum(frame2d * y_grid) / total_pressure)
-        return cop_x, cop_y
-
-    def compute_gradient(self, adc_data) -> np.ndarray:
-        """计算压力帧的 2D 梯度（中心差分）
-
-        :param adc_data: list/np.array，长度为 rows*cols 的 ADC 原始数据
-        :return: np.ndarray，shape (rows, cols, 2) — 最后一维是 (grad_x, grad_y)
-            · grad_x = 右 - 左（列方向）
-            · grad_y = 上 - 下（行方向）
-            · 边界单元使用单侧差分（缺失邻居用中心值代替，等价于中心差分退化）
-        :raises ValueError: ADC 数据长度不等于 rows*cols 时抛出
-        """
-        expected = self.rows * self.cols
-        if len(adc_data) != expected:
-            raise ValueError(f"ADC数据长度必须为{expected}")
-
-        frame2d = np.asarray(adc_data, dtype=np.float32).reshape(self.rows, self.cols)
-
-        grad_x = np.zeros((self.rows, self.cols), dtype=np.float32)
-        grad_y = np.zeros((self.rows, self.cols), dtype=np.float32)
-
-        if self.cols > 1:
-            grad_x[:, 1:-1] = frame2d[:, 2:] - frame2d[:, :-2]      # 内部中心差分
-            grad_x[:, 0] = frame2d[:, 1] - frame2d[:, 0]            # 左边界
-            grad_x[:, -1] = frame2d[:, -1] - frame2d[:, -2]         # 右边界
-        if self.rows > 1:
-            grad_y[1:-1, :] = frame2d[:-2, :] - frame2d[2:, :]      # 内部: up - down
-            grad_y[0, :] = frame2d[0, :] - frame2d[1, :]            # 上边界: center - down
-            grad_y[-1, :] = frame2d[-2, :] - frame2d[-1, :]         # 下边界: up - center
-
-        return np.stack([grad_x, grad_y], axis=-1)
-
     def _update_dynamic_threshold(self, total_pressure: float) -> None:
         with self._lock:
             # collect_frames=0: 跳过历史累积, _thresh 直接 = 0
@@ -155,6 +147,34 @@ class PZTSensorAngle:
                 self._pressure_history.append(total_pressure)
                 if len(self._pressure_history) >= self.collect_frames:
                     self._thresh = self.threshold_factor * float(np.mean(self._pressure_history))
+
+    @staticmethod
+    def _compute_cop_angle(px: float, py: float) -> float:
+        return PZTSensorAngle._compute_angle(px, -py)
+
+    @staticmethod
+    def _compute_cop_angle_ccw90(px: float, py: float) -> float:
+        return PZTSensorAngle._compute_angle(py, px)
+
+    @staticmethod
+    def _compute_angle(x: float, y: float) -> float:
+        epsilon = 1e-8
+        angle = np.degrees(np.arctan2(y, x + epsilon))
+        if angle < 0:
+            angle += 360
+        return angle
+
+    def _compute_cop(self, frame2d: np.ndarray, total_pressure: float) -> tuple[float, float]:
+        """计算 2D 帧的 CoP (X, Y) — 压力加权中心, 几何意义.
+
+        输入:  (rows × cols) 帧 + 总压力 total_pressure
+        输出:  (cop_x, cop_y) 浮动位置, 已是 cell 单位
+        """
+        x_grid = np.tile(np.arange(self.cols), (self.rows, 1))
+        y_grid = np.repeat(np.arange(self.rows), self.cols).reshape(self.rows, self.cols)
+        cop_x = float(np.sum(frame2d * x_grid) / total_pressure)
+        cop_y = float(np.sum(frame2d * y_grid) / total_pressure)
+        return cop_x, cop_y
 
     def _compute_delta_cop(self, raw_frame) -> tuple[float, float]:
         self._frame_count += 1
@@ -233,19 +253,33 @@ class PZTSensorAngle:
 
         return delta_x, delta_y
 
-    @staticmethod
-    def _compute_angle(x: float, y: float) -> float:
-        epsilon = 1e-8
-        angle = np.degrees(np.arctan2(y, x + epsilon))
-        if angle < 0:
-            angle += 360
-        return angle
+    def _compute_gradient(self, adc_data) -> np.ndarray:
+        """计算压力帧的 2D 梯度（中心差分）
 
-    @staticmethod
-    def _compute_cop_angle(px: float, py: float) -> float:
-        return PZTSensorAngle._compute_angle(px, -py)
+        :param adc_data: list/np.array，长度为 rows*cols 的 ADC 原始数据
+        :return: np.ndarray，shape (rows, cols, 2) — 最后一维是 (grad_x, grad_y)
+            · grad_x = 右 - 左（列方向）
+            · grad_y = 上 - 下（行方向）
+            · 边界单元使用单侧差分（缺失邻居用中心值代替，等价于中心差分退化）
+        :raises ValueError: ADC 数据长度不等于 rows*cols 时抛出
+        """
+        expected = self.rows * self.cols
+        if len(adc_data) != expected:
+            raise ValueError(f"ADC数据长度必须为{expected}")
 
-    @staticmethod
-    def _compute_cop_angle_ccw90(px: float, py: float) -> float:
-        return PZTSensorAngle._compute_angle(-py, px)
+        frame2d = np.asarray(adc_data, dtype=np.float32).reshape(self.rows, self.cols)
+
+        grad_x = np.zeros((self.rows, self.cols), dtype=np.float32)
+        grad_y = np.zeros((self.rows, self.cols), dtype=np.float32)
+
+        if self.cols > 1:
+            grad_x[:, 1:-1] = frame2d[:, 2:] - frame2d[:, :-2]      # 内部中心差分
+            grad_x[:, 0] = frame2d[:, 1] - frame2d[:, 0]            # 左边界
+            grad_x[:, -1] = frame2d[:, -1] - frame2d[:, -2]         # 右边界
+        if self.rows > 1:
+            grad_y[1:-1, :] = frame2d[:-2, :] - frame2d[2:, :]      # 内部: up - down
+            grad_y[0, :] = frame2d[0, :] - frame2d[1, :]            # 上边界: center - down
+            grad_y[-1, :] = frame2d[-2, :] - frame2d[-1, :]         # 下边界: up - center
+
+        return np.stack([grad_x, grad_y], axis=-1)
     
