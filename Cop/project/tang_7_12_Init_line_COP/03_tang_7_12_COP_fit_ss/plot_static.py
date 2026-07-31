@@ -27,7 +27,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from tang_7_12_InitCOP_realtime_other_package import angle_difference
+from tangential_7_12_other_package import angle_difference
 
 
 # ===================================================================

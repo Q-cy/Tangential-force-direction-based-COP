@@ -8,19 +8,13 @@
 ### 技术栈: python
 
 ## 架构分层
-
 tang_7_12_Init_line_COP_vec_cal/01_tang_7_12_COP_cal_fit_realtime/
-├── main.py          #主函数，
+├── main.py          #主函数
 ├── realtime.py      #用于实时显示各种数据
 ├── data.py          #用于读取各种数据
 ├── fit.py           #用于标定数据
-├── angle.py         #用于计算角度
-├── COP.py           #用于计算COP(Center of Pressure)
 ├── table.py         #用于保存数据至csv文件
 ├── plot_static.py   #用于把数据绘制成静态图
-├── calibrate.py     #查找表标定(lookup + discrete)
-├── eskin_ffi.py     #libeskin_finger_sdk.so 的 ctypes 封装
-├── libeskin_finger_sdk.so
 └── CLAUDE.md        (给Claude Code使用的工作手册)
 
 ## 编码规范
