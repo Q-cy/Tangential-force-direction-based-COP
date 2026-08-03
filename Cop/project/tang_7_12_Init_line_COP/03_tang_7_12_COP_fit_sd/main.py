@@ -12,8 +12,8 @@ from data import PressureSensor, SixAxisForceSensor, TimestampedBuffer
 from realtime import RealTimePlot
 from table import auto_get_csv_path, init_csv_file, build_csv_row
 from calibrate import load_lookup, build_discrete_grid, apply as cal_apply, apply_discrete
-import tangential_7_12_other_package as pzt
-from tangential_7_12_package import PZTSensorAngle
+import tang_7_12_InitCOP_realtime_other_package as pzt
+from tang_7_12_InitCOP_realtime_package_note import PZTSensorAngle
 
 # ===================== 配置 =====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
