@@ -142,20 +142,33 @@ class PressureSensor:
 
     def close(self):
         self._running = False
+        if self._tx_thread.is_alive():
+            self._tx_thread.join(timeout=1)
+        if self._rx_thread.is_alive():
+            self._rx_thread.join(timeout=1)
         if self.ser and self.ser.is_open:
             self.ser.close()
 
 # ===================== 六维力传感器 =====================
 class SixAxisForceSensor:
+    CMD_BYTES = b'\x49\xAA\x0D\x0A'   # 读一帧命令
+    FRAME_LEN = 28                    # 2B 帧头 + 24B 数据 + 2B 帧尾
+    MAX_RX_BUF = 512                  # 持久化接收缓冲区上限
+    CMD_INTERVAL_S = 0.005            # 命令发送最小间隔 (与设备 ~8ms 处理延迟匹配)
+
     def __init__(self):
         self.ser = None
         self.port = FORCE_SENSOR_PORT
         self.zero_data = [0.0]*6
+        self._rx_buf = bytearray()          # 持久化接收缓冲 (粘包/分包统一处理)
+        self._rx_lock = threading.Lock()    # 保护 _rx_buf
+        self._io_lock = threading.Lock()    # 保护串口写/读 + zero_data (多线程并发访问)
+        self._last_cmd_t = 0.0
         self.open_port()
 
     def open_port(self):
         """打开固定路径的串口;失败抛错(由 main.py 捕获)"""
-        self.ser = serial.Serial(self.port, DATA_BAUDRATE_FORCE, timeout=0.05)
+        self.ser = serial.Serial(self.port, DATA_BAUDRATE_FORCE, timeout=0.01)
         time.sleep(0.1)
         self.ser.reset_input_buffer()
 
@@ -169,36 +182,99 @@ class SixAxisForceSensor:
         time.sleep(0.2)
         self.open_port()
 
+    def _fill_rx_buf(self):
+        """把串口当前可读字节追加进 _rx_buf (调用方须持 _io_lock);
+        溢出时按最近的 49 AA 截断, 保留可对齐的最旧帧"""
+        try:
+            waiting = self.ser.in_waiting
+            if waiting <= 0:
+                return
+            chunk = self.ser.read(waiting)
+            if not chunk:
+                return
+            if len(self._rx_buf) + len(chunk) > self.MAX_RX_BUF:
+                idx = self._rx_buf.rfind(b'\x49\xaa')
+                if idx >= 0:
+                    del self._rx_buf[:idx]
+                else:
+                    self._rx_buf.clear()
+            self._rx_buf.extend(chunk)
+        except Exception:
+            pass
+
+    def _try_pop_frame(self):
+        """从 _rx_buf 解析一帧: 帧头 49 AA + 28B + 帧尾 0D 0A; 成功取帧并返回, 无完整帧返回 None"""
+        with self._rx_lock:
+            for _ in range(16):   # safety: 坏数据滑字节, 防止卡死
+                if len(self._rx_buf) < self.FRAME_LEN:
+                    return None
+                if self._rx_buf[0:2] != b'\x49\xaa':
+                    del self._rx_buf[:1]          # 非帧头, 滑 1 字节
+                    continue
+                if self._rx_buf[26:28] != b'\x0d\x0a':
+                    # 伪帧头: 跳到下一个 49 AA; 没有则滑 1 字节
+                    nxt = self._rx_buf.find(b'\x49\xaa', 2)
+                    if nxt >= 0:
+                        del self._rx_buf[:nxt]
+                    else:
+                        del self._rx_buf[:1]
+                    continue
+                resp = bytes(self._rx_buf[:self.FRAME_LEN])
+                del self._rx_buf[:self.FRAME_LEN]
+                return resp
+            self._rx_buf.clear()   # 解析多次仍失败, 清空防卡死
+            return None
+
+    def _parse_frame(self, resp: bytes):
+        """28B 帧解析为 [Fx,Fy,Fz,Mx,My,Mz] (N, 去零点, 保留 2 位小数)"""
+        Fx = struct.unpack('<f', resp[2:6])[0]
+        Fy = struct.unpack('<f', resp[6:10])[0]
+        Fz = struct.unpack('<f', resp[10:14])[0]
+        Mx = struct.unpack('<f', resp[14:18])[0]
+        My = struct.unpack('<f', resp[18:22])[0]
+        Mz = struct.unpack('<f', resp[22:26])[0]
+        Fx *= 9.8; Fy *= 9.8; Fz *= 9.8
+        Mx *= 9.8; My *= 9.8; Mz *= 9.8
+        Fx -= self.zero_data[0]; Fy -= self.zero_data[1]; Fz -= self.zero_data[2]
+        Mx -= self.zero_data[3]; My -= self.zero_data[4]; Mz -= self.zero_data[5]
+        return [round(v, 2) for v in [Fx, Fy, Fz, Mx, My, Mz]]
+
     def read(self):
-        """读取力/力矩数据（清空缓存 + 帧头校验）"""
+        """写命令 + 从持久化缓冲解析一帧; 无完整帧返回 None。
+        不再每次 reset_input_buffer (readme 所述丢帧根源): 字节持续累积, 解析出完整帧再移除。"""
         if not self.ser or not self.ser.is_open:
             return None
-        try:
-            self.ser.reset_input_buffer()  # 清空残留，防帧错位
-            self.ser.write(b'\x49\xAA\x0D\x0A')
-            time.sleep(0.008)
-            resp = self.ser.read(28)
-            if len(resp) != 28 or resp[:2] != b'\x49\xAA' or resp[-2:] != b'\x0D\x0A':
+        with self._io_lock:   # 防止与 rezero 线程并发访问串口/zero_data
+            try:
+                now = time.perf_counter()
+                if now - self._last_cmd_t >= self.CMD_INTERVAL_S:
+                    self.ser.write(self.CMD_BYTES)
+                    self._last_cmd_t = now
+                self._fill_rx_buf()
+            except Exception:
                 return None
-            Fx = struct.unpack('<f', resp[2:6])[0]
-            Fy = struct.unpack('<f', resp[6:10])[0]
-            Fz = struct.unpack('<f', resp[10:14])[0]
-            Mx = struct.unpack('<f', resp[14:18])[0]
-            My = struct.unpack('<f', resp[18:22])[0]
-            Mz = struct.unpack('<f', resp[22:26])[0]
-            Fx *= 9.8; Fy *= 9.8; Fz *= 9.8
-            Mx *= 9.8; My *= 9.8; Mz *= 9.8
-            Fx -= self.zero_data[0]; Fy -= self.zero_data[1]; Fz -= self.zero_data[2]
-            Mx -= self.zero_data[3]; My -= self.zero_data[4]; Mz -= self.zero_data[5]
-            return [round(v, 2) for v in [Fx, Fy, Fz, Mx, My, Mz]]
-        except Exception as e:
+            resp = self._try_pop_frame()
+        if resp is None:
             return None
+        return self._parse_frame(resp)
 
     def calibrate_zero(self):
         """零点校准（1帧）"""
         d = self.read()
         if d:
-            self.zero_data = d
+            with self._io_lock:
+                self.zero_data = d
+
+    def add_zero_bias(self, fx: float, fy: float):
+        """累加 Fx/Fy 零点偏差 (锁内修改 zero_data, 供 rezero 线程调用)"""
+        with self._io_lock:
+            self.zero_data[0] += fx
+            self.zero_data[1] += fy
+
+    def close(self):
+        """关闭串口 (main.py 退出路径调用)"""
+        if self.ser and self.ser.is_open:
+            self.ser.close()
 
 # ===================== 带时间戳的线程安全缓存 =====================
 class TimestampedBuffer:
@@ -214,8 +290,8 @@ class TimestampedBuffer:
         with self.lock:
             return self.buf[-1] if self.buf else None
 
-    # TODO(deprecated): find_closest 死代码 - 当前未使用（主循环只用 get_latest）
     def find_closest(self, ts):
+        """返回时间上最接近 ts 的帧; 缓冲为空返回 None (F5 严格同步用)"""
         with self.lock:
             best = None
             best_dt = 1e9
@@ -225,3 +301,11 @@ class TimestampedBuffer:
                     best_dt = dt
                     best = item
             return best
+
+
+def match_closest(buf: "TimestampedBuffer", ts: float, max_diff_s: float):
+    """在 buf 中找与 ts 最接近的帧; 时间差超过 max_diff_s 返回 None (F5 严格同步)"""
+    item = buf.find_closest(ts)
+    if item is None or abs(item["t"] - ts) > max_diff_s:
+        return None
+    return item

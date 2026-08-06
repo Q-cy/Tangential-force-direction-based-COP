@@ -67,6 +67,8 @@ class PZTSensorAngle:
 
         # per-region 完整状态: {region_id: {...}}；每个 region 独立锁定 origin + 二次精修状态
         self._region_states: dict[int, dict] = {}
+        # F11: 上一帧 regions 的 (region_id, cop_x, cop_y)，用于跨帧质心匹配继承稳定 id
+        self._prev_regions: list[tuple[int, float, float]] = []
 
     # ---------- 公共 API ----------
 
@@ -163,11 +165,12 @@ class PZTSensorAngle:
         return s
 
     def reset_region_origin(self, region_id: int, frame2d: np.ndarray) -> None:
-        """门控 reset: 当 region 内 cell 全部 <= _pixel_thresh 时硬删除状态。
+        """门控 reset: 当 region 足迹内任一 cell <= _pixel_thresh 时删除该 region 状态。
 
         判定规则:
-            对 region 内的每个 (r, c) cell, 检查 frame2d[r, c] > _pixel_thresh[r, c]
-            - 全部 >: region 在工作中, no-op
+            对 region 足迹 (状态新建时记录的 coords) 内的每个 (r, c) cell,
+            检查 frame2d[r, c] > _pixel_thresh[r, c]
+            - 全部 >: region 仍在按压, no-op
             - 任一 <=: region 已放手, pop 状态
             - _pixel_thresh 未确定: 不 reset (no-op, 避免学阈值阶段误 reset)
 
@@ -233,7 +236,9 @@ class PZTSensorAngle:
             if self._pixel_thresh is None:
                 self._pixel_cnt += 1
                 if self._pixel_avg_buffer is None:
-                    self._pixel_avg_buffer = frame2d
+                    # 强制 float64: 后续累加右侧 (frame2d - buffer) / int → float64
+                    # 若 buffer 是 int64, 会因 same_kind 规则崩溃
+                    self._pixel_avg_buffer = frame2d.astype(np.float64)
                 else:
                     self._pixel_avg_buffer += (frame2d - self._pixel_avg_buffer) / self._pixel_cnt
                 if self._pixel_cnt >= self.collect_frames:
@@ -418,8 +423,14 @@ class PZTSensorAngle:
             markers = np.zeros((rows, cols), dtype=np.int32)
             markers[int(round(cy)), int(round(cx))] = 1
 
-        # 2) 分水岭: 输入 -frame2d, 使峰=低代价; 8 邻结构；输出 region_id[i,j] = (0 or k)(背景像素 or 归属于第 k 号种子的区域)
-        region_id = watershed_ift(-frame2d.astype(np.float64), markers, structure=struct_3x3)
+        # 2) 分水岭: 输入 (UINT16_MAX - frame2d) 作为代价图, 使峰=低代价; 8 邻结构
+        # 注: scipy >= 1.11 的 watershed_ift 只支持 uint8/uint16 输入, 不能用 float64
+        UINT16_MAX = np.iinfo(np.uint16).max   # = 65535
+        region_id = watershed_ift(
+            (UINT16_MAX - frame2d).astype(np.uint16),
+            markers,
+            structure=struct_3x3,
+        )
 
         # 3) 提取每域几何信息（与 mask 求交防止分水岭把背景也分进来）
         regions_info = []
@@ -484,42 +495,64 @@ class PZTSensorAngle:
 
         return regions_info
 
+    REGION_MATCH_DIST = 1.5   # F11: 跨帧 region 质心匹配距离阈值 (cells)
+
     def _compute_region_delta_cop(self, frame2d: np.ndarray,
                                     min_area: int = 1) -> list[dict]:
             """识别压力帧中的多指接触域，并计算每个域的 (delta_x, delta_y)。
 
             每个 region 独立锁定 origin（独立状态机）：
-            - 首次出现的 region_id 在该帧的 CoP 视为其 origin, delta = (0, 0)
+            - region_id 跨帧稳定 (F11): 本帧 region 与上一帧按质心最近邻匹配
+              (距离 <= REGION_MATCH_DIST 继承 id, 否则分配新 id);
+              不再按面积排名 —— 排名会随手指并拢/分开而交换, 导致状态错位
+            - 首次出现的 region 在该帧的 CoP 视为其 origin, delta = (0, 0);
+              coords (足迹) 仅在状态新建时记录 (F7), 供 reset_region_origin
+              判定"已放手"——每帧刷新会让比较恒真 (coords 永远来自当前 mask)
             - 后续该 region 再次出现时, delta = 当前 CoP - 该 region 的 origin
             - 二次精修 (refine): 与全帧 _compute_delta_cop 同算法, per-region 独立
-            - 调用 reset_region_origin(region_id) 可单独清掉某个 region 的完整状态
+            - 本帧不再出现的 region 由 stale 清理删除; 调用
+              reset_region_origin(region_id) 可单独清掉"已放手"的 region
 
             :param frame2d: (rows, cols) 2D 压力帧
             :param min_area: 过滤掉 cell 数 < min_area 的小区域（默认 1，不过滤）
             :return: list[dict]，按 area 降序，每个 dict 包含 _compute_region_cop 输出
                     + 'delta': (delta_x, delta_y) — 该域 CoP 与其 origin 的差
+                    + 'id':    稳定 region 标识 (跨帧不随面积排名变化)
 
             用法:
                 for region in p._compute_region_delta_cop(frame2d):
-                    print(region['cop'], region['delta'], region['area'])
+                    print(region['id'], region['cop'], region['delta'], region['area'])
             """
             regions_info = self._compute_region_cop(frame2d, min_area=min_area)
             with self._lock:
                 current_region_ids = set()
-                for idx, region in enumerate(regions_info):
-                    cop_x, cop_y = region['cop']
-                    region_id = idx + 1   # _compute_region_cop 按 area 降序, 用 idx+1 作 region 标识
-                    current_region_ids.add(region_id)
-                    s = self._get_region_state(region_id)
-                    s['coords'] = region['coords']   # 同步给 _region_states, 给 reset_region_origin 用
+                taken_ids = set()   # 本帧已匹配的 id, 防两个 region 继承同一 id
 
-                    # 防御: 已接触但本帧总压跌破阈值 → 接触丢失, 删除状态
-                    if (self._total_thresh is not None
-                            and region['total_pressure'] < self._total_thresh
-                            and s['contact_init']):
-                        self._region_states.pop(region_id, None)
-                        delta_x, delta_y = 0.0, 0.0
-                    elif not s['contact_init']:
+                for region in regions_info:
+                    cop_x, cop_y = region['cop']
+
+                    # F11: 质心最近邻匹配上一帧 region, 继承稳定 id
+                    region_id = None
+                    best_d = 1e9
+                    for rid, px, py in self._prev_regions:
+                        if rid in taken_ids:
+                            continue
+                        d = float(np.hypot(cop_x - px, cop_y - py))
+                        if d < best_d:
+                            best_d, region_id = d, rid
+                    if region_id is None or best_d > self.REGION_MATCH_DIST:
+                        region_id = 1
+                        while region_id in self._region_states or region_id in taken_ids:
+                            region_id += 1
+                    taken_ids.add(region_id)
+                    current_region_ids.add(region_id)
+
+                    s = self._get_region_state(region_id)
+                    # F7: coords 仅在状态新建时记录 (足迹), 不再每帧刷新
+                    if s.get('coords') is None:
+                        s['coords'] = region['coords']
+
+                    if not s['contact_init']:
                         # 首次接触: 锁 origin (origin 锁定时同步把候选点设到这一帧的 CoP)
                         if self._total_thresh is not None and region['total_pressure'] > self._total_thresh:
                             s['origin_x'] = cop_x
@@ -561,10 +594,14 @@ class PZTSensorAngle:
                                 s['refined'] = True
 
                     region['delta'] = (delta_x, delta_y)
+                    region['id'] = region_id
 
                 # 清理本帧不再出现的 region (上一帧存在, 这一帧消失)
                 stale_ids = set(self._region_states.keys()) - current_region_ids
                 for stale_id in stale_ids:
                     self._region_states.pop(stale_id, None)
+
+                # 保存本帧 (id, 质心) 供下帧匹配
+                self._prev_regions = [(r['id'], r['cop'][0], r['cop'][1]) for r in regions_info]
 
             return regions_info

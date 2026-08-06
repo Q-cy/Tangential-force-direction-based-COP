@@ -32,7 +32,9 @@ TABLE_CSV_HEADER = [  # CSV 文件表头（84通道 + 时间戳 + 力/角度/标
     # 标定后的切向力
     "Fx_cal", "Fy_cal", "Force_cal_angle",
     # 接触状态
-    "CoP_state"
+    "CoP_state",
+    # 有效行标记 (1=接触帧有效, 0=无效); fit.py/plot_static.py 训练筛选依赖此列
+    "valid"
 ]
 
 def auto_get_csv_path(save_dir: str) -> str:
@@ -79,6 +81,7 @@ def build_csv_row(
     force_cal_angle: float = None, # 标定后角度 (deg)
     cop_state: int = 0,            # 接触状态: 0=未接触, 1=等待稳定, 2=测量中
     adc_sum: float = 0.0,          # ADC 84通道之和
+    valid: int = 0,                # 有效行标记: 1=接触帧有效, 0=无效 (训练筛选用)
 ) -> list:
     """
     构造符合表头格式的CSV行数据
@@ -108,5 +111,6 @@ def build_csv_row(
         fy_cal if fy_cal is not None else float('nan'),
         force_cal_angle if force_cal_angle is not None else float('nan'),
         cop_state,
+        valid,
     ]
     return csv_row

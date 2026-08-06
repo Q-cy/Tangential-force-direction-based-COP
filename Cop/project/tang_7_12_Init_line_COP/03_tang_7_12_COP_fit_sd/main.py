@@ -8,7 +8,7 @@ import threading
 from pyqtgraph.Qt import QtWidgets
 import sys
 
-from data import PressureSensor, SixAxisForceSensor, TimestampedBuffer
+from data import PressureSensor, SixAxisForceSensor, TimestampedBuffer, match_closest
 from realtime import RealTimePlot
 from table import auto_get_csv_path, init_csv_file, build_csv_row
 from fit import load_coefs, apply_predict_multi
@@ -145,6 +145,18 @@ def data_loop():
             time.sleep(0.001)
             continue
 
+        # ---- F5 严格时间同步: 双传感器时以较新帧为锚点, 在另一缓冲找
+        #      MAIN_MAX_TIME_DIFF_S 窗内最近帧; 匹配成功才写 CSV 行,
+        #      保证行内 press/force 时间差有界。状态机/绘图仍用最新帧逐帧驱动。
+        csv_press_item = press_item
+        csv_force_item = force_item
+        if has_press and has_force:
+            if force_item["t"] >= press_item["t"]:
+                csv_press_item = match_closest(buf_press, force_item["t"], MAIN_MAX_TIME_DIFF_S)
+            else:
+                csv_force_item = match_closest(buf_force, press_item["t"], MAIN_MAX_TIME_DIFF_S)
+        write_row = (csv_press_item is not None) and (csv_force_item is not None)
+
         # ---- 计算 PZT / CoP ----
         if press_item is not None:
             base_sub_arr = np.array(press_item["data"])
@@ -164,6 +176,17 @@ def data_loop():
             total_press_val = float(np.sum(press_item["data"]))
             pzt_table_angle_deg = (-pzt_angle_deg) % 360.0
 
+            # per-region CoP / delta (与整帧同一 frame2d 对齐);
+            # region_id 取稳定 id (F11), reset_region_origin 按足迹判定"已放手"(F7)
+            region_results = cop_sensor._compute_region_delta_cop(frame2d)
+            for region in region_results:
+                region_id = region['id']
+                cop_sensor.reset_region_origin(region_id, frame2d)
+                print(f"  region {region_id}: cop={region['cop']}, "
+                      f"delta={region['delta']}, "
+                      f"area={region['area']}, "
+                      f"total_p={region['total_pressure']:.1f}")
+
             print(f"frame {rel_time_ms}ms: angle={pzt_angle_deg:.1f}°, "
                   f"dx={cop_delta_x:+.2f}, dy={cop_delta_y:+.2f}, "
                   f"cop=({cop_curr_x:.2f},{cop_curr_y:.2f})")
@@ -180,8 +203,7 @@ def data_loop():
                             time.sleep(0.001)
                         if vals:
                             avg = np.mean(vals, axis=0)
-                            sensor_force.zero_data[0] += avg[0]
-                            sensor_force.zero_data[1] += avg[1]
+                            sensor_force.add_zero_bias(avg[0], avg[1])
                             print("🔄 COP精修完成，Fx/Fy已归零")
                     threading.Thread(target=_rezero, daemon=True).start()
             _prev_refined = refined
@@ -197,8 +219,7 @@ def data_loop():
                         time.sleep(0.001)
                     if vals:
                         avg = np.mean(vals, axis=0)
-                        sensor_force.zero_data[0] += avg[0]
-                        sensor_force.zero_data[1] += avg[1]
+                        sensor_force.add_zero_bias(avg[0], avg[1])
                         print("🔄 力卸载，Fx/Fy已归零")
                 threading.Thread(target=_rezero_unload, daemon=True).start()
             _prev_contact = contact_init
@@ -219,16 +240,26 @@ def data_loop():
             gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)
 
         # ---- 计算 Force ----
+        # 滤波队列只接收匹配帧 (F5): 保证行内 force 各列 (raw+滤波+角度) 来自同一匹配帧序列
         if force_item is not None:
-            force_fx_val, force_fy_val, force_fz_val = force_item["data"][:3]
-            buf_force_fx.append(force_fx_val)
-            buf_force_fy.append(force_fy_val)
-            buf_force_fz.append(force_fz_val)
-            force_fx_filt = np.median(buf_force_fx)
-            force_fy_filt = np.median(buf_force_fy)
-            force_fz_filt = np.median(buf_force_fz)
-            force_angle_deg = pzt.compute_6Dforce_angle(force_fx_filt, force_fy_filt)
-            force_data_out = force_item["data"]
+            if csv_force_item is not None:
+                force_fx_val, force_fy_val, force_fz_val = csv_force_item["data"][:3]
+                buf_force_fx.append(force_fx_val)
+                buf_force_fy.append(force_fy_val)
+                buf_force_fz.append(force_fz_val)
+                force_fx_filt = np.median(buf_force_fx)
+                force_fy_filt = np.median(buf_force_fy)
+                force_fz_filt = np.median(buf_force_fz)
+                force_angle_deg = pzt.compute_6Dforce_angle(force_fx_filt, force_fy_filt)
+                force_data_out = csv_force_item["data"]
+            else:
+                # 无匹配帧: 力数据超窗, 保留上次滤波值, 本次不写行
+                force_fx_val = force_fy_val = force_fz_val = float('nan')
+                force_fx_filt = float(np.median(buf_force_fx)) if buf_force_fx else float('nan')
+                force_fy_filt = float(np.median(buf_force_fy)) if buf_force_fy else float('nan')
+                force_fz_filt = float(np.median(buf_force_fz)) if buf_force_fz else float('nan')
+                force_angle_deg = float('nan')
+                force_data_out = _NAN6
         else:
             force_fx_val = force_fy_val = force_fz_val = float('nan')
             force_fx_filt = force_fy_filt = force_fz_filt = float('nan')
@@ -251,30 +282,33 @@ def data_loop():
                 cal_angle_deg = pzt.compute_vector_angle(cal_fx_val, cal_fy_val)
 
         # ---- CSV ----
+        # 行内 force 来自匹配帧 (F5), press 列来自最新帧 (状态机输出);
+        # dt 列 = |press_t - 匹配 force_t|, 双传感器时 <= MAIN_MAX_TIME_DIFF_S
         press_ts = press_item["t"] if press_item is not None else None
-        force_ts_now = force_item["t"] if force_item is not None else None
+        force_ts_now = csv_force_item["t"] if csv_force_item is not None else None
 
-        # 去重: 主循环 > sensor 帧率时 get_latest() 复用同一帧, 不重复写
-        csv_row = build_csv_row(
-            press_timestamp=press_ts if press_ts is not None else float('nan'),
-            rel_ms=rel_time_ms,
-            ch_data=press_item["data"] if press_item is not None else [0]*84,
-            force_data=force_data_out,
-            force_timestamp=force_ts_now if force_ts_now is not None else float('nan'),
-            delta_cop_x=cop_delta_x_filt,
-            delta_cop_y=cop_delta_y_filt,
-            delta_force_x=force_fx_filt,
-            delta_force_y=force_fy_filt,
-            delta_force_z=force_fz_filt,
-            adc_angle=pzt_angle_deg,
-            force_angle=force_angle_deg,
-            fx_cal=cal_fx_val,
-            fy_cal=cal_fy_val,
-            force_cal_angle=cal_angle_deg,
-            cop_state=cop_state,
-            adc_sum=total_press_val,
-        )
-        csv_writer.writerow(csv_row)
+        if write_row:
+            csv_row = build_csv_row(
+                press_timestamp=press_ts if press_ts is not None else float('nan'),
+                rel_ms=rel_time_ms,
+                ch_data=press_item["data"] if press_item is not None else [0]*84,
+                force_data=force_data_out,
+                force_timestamp=force_ts_now if force_ts_now is not None else float('nan'),
+                delta_cop_x=cop_delta_x_filt,
+                delta_cop_y=cop_delta_y_filt,
+                delta_force_x=force_fx_filt,
+                delta_force_y=force_fy_filt,
+                delta_force_z=force_fz_filt,
+                adc_angle=pzt_angle_deg,
+                force_angle=force_angle_deg,
+                fx_cal=cal_fx_val,
+                fy_cal=cal_fy_val,
+                force_cal_angle=cal_angle_deg,
+                cop_state=cop_state,
+                adc_sum=total_press_val,
+                valid=1 if cop_state > 0 else 0,
+            )
+            csv_writer.writerow(csv_row)
 
         # ---- 更新绘图 (限速到 MAIN_PLOT_FPS Hz) ----
         now = time.perf_counter()
@@ -304,6 +338,18 @@ def data_loop():
 
         elapsed = time.perf_counter() - loop_start_s
         time.sleep(max(0, 1/MAIN_TARGET_FPS - elapsed))   # 限速 100Hz, 让 Qt 主线程有 CPU 跑 GUI
+
+    # F12 资源清理: 关闭串口 (close 内含线程 join, 由 try 兜底)
+    if has_press:
+        try:
+            sensor_press.close()
+        except Exception:
+            pass
+    if has_force:
+        try:
+            sensor_force.close()
+        except Exception:
+            pass
 
     csv_file_obj.close()
     row_count = sum(1 for _ in open(csv_path)) - 1

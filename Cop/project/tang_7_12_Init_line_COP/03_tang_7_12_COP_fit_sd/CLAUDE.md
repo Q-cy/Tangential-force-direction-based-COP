@@ -3,14 +3,14 @@
 > 给Claude Code使用的工作手册。
 
 ## 项目画像
-### 项目名: PZT_Hall（02_tang_7_12_COP_fit_fast）
+### 项目名: PZT_Hall（03_tang_7_12_COP_fit_sd）
 ### 定位: 压阻阵列(PZT) + 六维力传感器 数据采集 / 标定 / 实时显示 / 数据保存
 ### 技术栈: python（PyQtGraph 实时绘图，scipy/numpy 拟合，pyserial 串口）
 
 ## 架构分层
 
 ```
-02_tang_7_12_COP_fit_fast/
+03_tang_7_12_COP_fit_sd/
 ├── main.py                              # 主入口：实时采集线程 + 标定引擎选择 + CSV 保存 + 绘图调度
 ├── realtime.py                          # PyQtGraph 实时绘图窗口（RealTimePlot + CellGridItem + GridLinesItem）
 ├── data.py                              # 串口采集：PressureSensor（12×7 PZT） + SixAxisForceSensor + TimestampedBuffer
@@ -34,10 +34,10 @@
   → PZTSensorAngle.get_gradient → (12, 7, 2) 梯度
 
 六维力串口 /dev/ttyUSB1
-  → SixAxisForceSensor（28B 帧）
+  → SixAxisForceSensor（28B 帧，持久化缓冲 + 帧头尾校验）
   → TimestampedBuffer
 
-两者经时间匹配后
+两者经严格时间匹配后（MAIN_MAX_TIME_DIFF_S=15ms 窗口内配对，超窗跳过该行）
   → 标定引擎（fit.py）
   → CSV 持久化（table.py）+ PyQtGraph 实时绘图（realtime.py）
 ```
@@ -58,7 +58,8 @@
 ## 注意事项
 - 同时接入压阻阵列（12×7 = 84 通道 PZT）+ 六维力传感器
 - 压阻帧：14B header + 168B payload + 1B CRC，CRC-8 ITU 校验，10ms 轮询
-- 六维力帧：28B，定点 reset_input_buffer + 帧头 49 AA 帧尾 0D 0A 校验
+- 六维力帧：28B，持久化缓冲 + 帧头 49 AA 帧尾 0D 0A 校验（不再每次 reset_input_buffer）
 - CoP 状态机：阈值→首次接触 origin 锁定→稳定 N 帧触发二次精修（精修后重新归零 Fx/Fy）
+- CSV 表头含 valid 列（1=接触帧有效），fit.py 训练筛选 / plot_static.py 高亮依赖该列
 - 训练产出物：`python fit.py` → fit_coefs.bin（需手动 copy 到项目目录）
 - 离线分析：`python plot_static.py -f xxx.csv -c col1,col2 -r 100:500`
