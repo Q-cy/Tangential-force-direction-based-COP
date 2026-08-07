@@ -1,5 +1,6 @@
 """压阻传感器 CoP 角度估计（PZTSensorAngle 类，支持多 sensor 实例）"""
 
+import heapq
 import numpy as np
 import threading
 from collections import deque
@@ -17,7 +18,8 @@ class PZTSensorAngle:
                  refine_distance: float = 0.1,
                  merge_ratio: float = 0.8, merge_min_cells: int = 2,
                  region_match_dist: float = 1.5,
-                 region_min_area: int = 4):
+                 region_min_area: int = 4,
+                 region_peak_ratio: float = 0.6, region_peak_dist: int = 3):
         """
         构造一个 PZTSensorAngle 角度估计实例。
 
@@ -39,6 +41,8 @@ class PZTSensorAngle:
         :param merge_min_cells: 浅谷合并最少满足 cell 数：边界中满足条件的 cell 数 ≥ 此值才合并（默认 2）。
         :param region_match_dist: region 帧间追踪最大匹配距离（cells，默认 1.5）：质心距离 ≤ 此值继承稳定 id。
         :param region_min_area: region 最小面积（cell 数，默认 4）：分割/追踪/合并统一过滤 < 此值的碎片 region。
+        :param region_peak_ratio: 附属峰判据：峰高 < 此比例 × 更高峰（默认 0.6）且距离近 → 不成种子。
+        :param region_peak_dist: 附属峰判据：与更高峰距离（曼哈顿, cells）< 此值（默认 3）且高度低 → 不成种子。
         """
         self.rows = rows
         self.cols = cols
@@ -61,6 +65,9 @@ class PZTSensorAngle:
         self._prev_regions = []
         # region 最小面积: _compute_region 分割统一过滤
         self._region_min_area = region_min_area
+        # 附属峰判据: 高度 < ratio×更高峰 且 距离 < dist → 不成种子
+        self._region_peak_ratio = region_peak_ratio
+        self._region_peak_dist = region_peak_dist
         # 候选点/稳定计数/已精修标志 —— 跟随 origin 生命周期
         self._refine_cand_x = None
         self._refine_cand_y = None
@@ -473,8 +480,35 @@ class PZTSensorAngle:
                     merged[y, x] = new_label[find(lbl)]
         return merged
 
-    def _compute_region(self, frame2d: np.ndarray) -> list[dict]:
-        """用分水岭算法识别压力帧中的多指接触域。
+    def _grow_from_peaks(self, markers, frame2d, mask):
+        """BFS 峰生长（参考 COP.py _segment_by_peaks）: 种子先标号, 优先队列按 -压力
+        （高压力 cell 先被占领 → region 从峰一圈圈扩散, 波谷最后长到 → 天然边界）。
+        4 邻扩散, 只长入 mask 内且未标号的 cell。"""
+        rows, cols = self.rows, self.cols
+        labeled = np.zeros((rows, cols), dtype=np.int32)
+        heap = []
+        for r in range(rows):
+            for c in range(cols):
+                lbl = markers[r, c]
+                if lbl > 0:
+                    labeled[r, c] = lbl
+                    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < rows and 0 <= nc < cols and labeled[nr, nc] == 0 and mask[nr, nc]:
+                            heapq.heappush(heap, (-frame2d[nr, nc], nr, nc, lbl))
+        while heap:
+            _, y, x, lbl = heapq.heappop(heap)
+            if labeled[y, x] != 0:
+                continue
+            labeled[y, x] = lbl
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                ny, nx = y + dr, x + dc
+                if 0 <= ny < rows and 0 <= nx < cols and labeled[ny, nx] == 0 and mask[ny, nx]:
+                    heapq.heappush(heap, (-frame2d[ny, nx], ny, nx, lbl))
+        return labeled
+
+    def _compute_region_watershed(self, frame2d: np.ndarray) -> list[dict]:
+        """用分水岭算法识别压力帧中的多指接触域（保留备查, 调用链已改用 BFS 版）。
 
         算法：先在 mask 内找压力局部极大值作为种子，再用 watershed_ift
         按 -frame2d 代价图灌水分割。每峰对应一个接触点（指）。
@@ -557,10 +591,105 @@ class PZTSensorAngle:
         regions_info.sort(key=lambda d: d['area'], reverse=True)
         return regions_info
 
+    def _compute_region_BFS(self, frame2d: np.ndarray) -> list[dict]:
+        """用 BFS 峰生长识别压力帧中的多指接触域（参考 COP.py _segment_by_peaks）。
+
+        算法：先在 mask 内找压力局部极大值作为种子，再从种子按压力高优先 4 邻扩散
+        （高压力 cell 先被占领 → region 从峰一圈圈生长, 波谷自然成边界, 不绕过包围）。
+        面积 < self._region_min_area 的碎片 region 统一过滤（__init__ 参数 region_min_area）。
+
+        :param frame2d: (rows, cols) 2D 压力帧
+        :return: list[dict]，按 area 降序，每个 dict 包含:
+            · 'coords':         list[(row, col), ...] — 该域所有 cell 坐标
+            · 'area':           int，区域内 cell 数（== len(coords)）
+            · 'bbox':           (cmin, rmin, cmax, rmax) — 最小外接矩形（可能有空洞）
+
+        若需 per-region CoP（含压力加权中心 + 总压力），请改用 self._compute_region_cop(frame2d)
+        """
+        threshold = self._pixel_thresh if self._pixel_thresh is not None else 0.0
+        mask = frame2d > 5 * threshold
+        if not mask.any():
+            return []
+
+        rows, cols = self.rows, self.cols
+
+        # 1) 在 mask 内找"严格峰"作为种子: 严格高于所有 8 邻（等值面 cell 不成种子, 防整面按压碎片化）
+        struct_3x3 = generate_binary_structure(2, 2)               # 8 邻（连通 plateau 合并用）
+        # maximum_filter 的 footprint 含中心, `>` 恒 False, 用 pad+shift 求 8 邻最大（不含中心）
+        padded = np.pad(frame2d, 1, mode='constant', constant_values=-np.inf)
+        max_nb = np.full_like(frame2d, -np.inf)
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                max_nb = np.maximum(max_nb, padded[1 + dr:1 + dr + rows, 1 + dc:1 + dc + cols])
+        local_max = (frame2d > max_nb) & mask
+
+        if local_max.any():
+            # 附属峰过滤: 高度 < ratio×更高峰 且 距离 < dist → 不成种子（同一接触的起伏）
+            cand = [(r, c, float(frame2d[r, c])) for r, c in zip(*np.where(local_max))]
+            cand.sort(key=lambda t: -t[2])
+            kept = []
+            for r, c, v in cand:
+                dominated = False
+                for kr, kc, kv in kept:                           # 已保留的更高峰
+                    if (v < self._region_peak_ratio * kv
+                            and abs(r - kr) + abs(c - kc) < self._region_peak_dist):
+                        dominated = True
+                        break
+                if not dominated:
+                    kept.append((r, c, v))
+            markers = np.zeros((rows, cols), dtype=np.int32)
+            for i, (r, c, _) in enumerate(kept, 1):
+                markers[r, c] = i
+        else:
+            # 兜底: 无峰 → 在活动区质心处造一个种子, 整片作为单区域
+            rs, cs = np.where(mask)
+            weights = frame2d[rs, cs]
+            total_w = float(weights.sum())
+            if total_w > 0:
+                cy = float((rs * weights).sum() / total_w)
+                cx = float((cs * weights).sum() / total_w)
+            else:
+                cy = float(rs.mean()); cx = float(cs.mean())
+            markers = np.zeros((rows, cols), dtype=np.int32)
+            markers[int(round(cy)), int(round(cx))] = 1
+
+        # 2) BFS 峰生长: 压力高优先 4 邻扩散, 只长入 mask 内 cell
+        region_grid = self._grow_from_peaks(markers, frame2d, mask)
+
+        # 2.5) 浅谷合并: 相邻 region 边界压力 ≥ merge_ratio×较低峰 的 cell 数 ≥ merge_min_cells
+        #      则合并（浅谷=材料噪声, 深谷=独立接触）。只在 mask 内合并, 背景不参与。
+        region_grid = self._merge_shallow_regions(region_grid, frame2d)
+
+        # 3) 提取每域几何信息（8 邻连通分量拆分, 保证每 region 连通）
+        regions_info = []
+        for id in np.unique(region_grid):                         # region_grid[i,j] = (0 or k)(背景像素 or 归属于第 k 号种子的区域)
+            if id == 0:
+                continue                                          # 0 = 背景
+            basin = region_grid == id
+            comps, ncomp = label(basin, structure=struct_3x3)     # 8 邻连通分量
+            for ci in range(1, ncomp + 1):
+                region_mask = comps == ci                         # 第 id 域的第 ci 个连通分量
+                area = int(region_mask.sum())
+                if area < self._region_min_area:
+                    continue
+                rs, cs = np.where(region_mask)                    # rs, cs分别是行和列索引，都是一维ndarray，(rs, cs)不用交叉组合
+                coords = list(zip(rs.tolist(), cs.tolist()))      # region_mask 的 True 索引展开，zip两两配对
+                regions_info.append({
+                    'area':  area,
+                    'bbox':  (int(cs.min()), int(rs.min()),
+                            int(cs.max()), int(rs.max())),      # 外接矩形（可能有洞）
+                    'coords': coords,
+                })
+
+        regions_info.sort(key=lambda d: d['area'], reverse=True)
+        return regions_info
+
     def _compute_region_cop(self, frame2d: np.ndarray) -> list[dict]:
         """识别压力帧中的多指接触域，并计算每个域的压力加权中心 (CoP)。
 
-        流程: 先调用 self._compute_region(frame2d) 取得每个 region 的几何信息,
+        流程: 先调用 self._compute_region_BFS(frame2d) 取得每个 region 的几何信息,
             再对每个 region 在 frame2d 上算压力加权中心。
 
         :param frame2d: (rows, cols) 2D 压力帧
@@ -578,7 +707,7 @@ class PZTSensorAngle:
             for region in p._compute_region_cop(frame2d):
                 print(region['cop'], region['area'], region['total_pressure'])
         """
-        regions_info = self._compute_region(frame2d)
+        regions_info = self._compute_region_BFS(frame2d)
         for region in regions_info:
             coords = region['coords']
             rs = np.array([c[0] for c in coords])
