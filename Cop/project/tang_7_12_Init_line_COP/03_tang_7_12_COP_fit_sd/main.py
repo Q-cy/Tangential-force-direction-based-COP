@@ -28,10 +28,10 @@ MAIN_READ_INTERVAL_S = 0.005               # 采集线程读取间隔(秒)，0.0
 MAIN_PLOT_FPS = 60                         # plot set_data 限速 (Hz), 防止 GUI 卡顿
 MAIN_MAX_TIME_DIFF_S = 0.015               # 压力-力传感器最大时间匹配差(秒)
 g_main_stop_flag = threading.Event()       # 全局停止信号
-g_main_plot = None                         # 绘图对象引用
+plot = None                                # 绘图对象引用
 
 # ===================== 采集线程 =====================
-class PressureThread(threading.Thread):                   
+class PressureThread(threading.Thread):
     def __init__(self, sensor, buf):                      
         super().__init__(daemon=True)
         self.s = sensor
@@ -63,14 +63,13 @@ class ForceThread(threading.Thread):
             time.sleep(0.001)
 
 # ===================== 数据循环 =====================
-def data_loop():
-    global g_main_plot
+def data_loop(plot):
     # 自动获取CSV文件路径
     csv_path = auto_get_csv_path(MAIN_SAVE_DIR)
     # 初始化CSV文件（写入表头）
     csv_writer, csv_file_obj = init_csv_file(csv_path)
 
-    has_press = True          # 是否有压力传感器
+    has_press = True           # 是否有压力传感器
     has_force = True           # 是否有六维力传感器
 
     try:
@@ -100,7 +99,6 @@ def data_loop():
         print("❌ 无任何传感器，退出")
         return
 
-    print("🎨 绘图已打开")
     start_time_s = time.perf_counter()
 
     # 加载 fit 标定模型
@@ -168,24 +166,20 @@ def data_loop():
             pzt_angle_deg, cop_delta_x, cop_delta_y, cop_curr_x, cop_curr_y = cop_sensor.get_all(base_sub_arr)
             origin_x, origin_y = cop_sensor.get_origin()
             cop_state = cop_sensor.get_state()
-            cop_base_x = cop_curr_x if origin_x is None else origin_x
-            cop_base_y = cop_curr_y if origin_y is None else origin_y
             gradient_arr = cop_sensor.get_gradient(base_sub_arr)
             contact_init = cop_state > 0
+
+            # per-region 分割（独立于整帧链路），掩码供 realtime 外框着色显示;
+            # _compute_region_delta_cop 内部: _compute_region(分割) + 质心跨帧追踪稳定 id
+            #   + per-region origin/delta（供 CoP 点/角度箭头显示）
+            region_list = cop_sensor._compute_region_delta_cop(frame2d)
+            region_mask = np.zeros((cop_sensor.rows, cop_sensor.cols), dtype=np.int32)
+            for region in region_list:
+                for r, c in region['coords']:
+                    region_mask[r, c] = region['id']
             refined = cop_state == 2
             total_press_val = float(np.sum(press_item["data"]))
             pzt_table_angle_deg = (-pzt_angle_deg) % 360.0
-
-            # per-region CoP / delta (与整帧同一 frame2d 对齐);
-            # region_id 取稳定 id (F11), reset_region_origin 按足迹判定"已放手"(F7)
-            region_results = cop_sensor._compute_region_delta_cop(frame2d)
-            for region in region_results:
-                region_id = region['id']
-                cop_sensor.reset_region_origin(region_id, frame2d)
-                print(f"  region {region_id}: cop={region['cop']}, "
-                      f"delta={region['delta']}, "
-                      f"area={region['area']}, "
-                      f"total_p={region['total_pressure']:.1f}")
 
             print(f"frame {rel_time_ms}ms: angle={pzt_angle_deg:.1f}°, "
                   f"dx={cop_delta_x:+.2f}, dy={cop_delta_y:+.2f}, "
@@ -230,7 +224,9 @@ def data_loop():
             cop_delta_y_filt = float(np.median(buf_cop_delta_y))
         else:
             base_sub_arr = np.zeros(84)
-            cop_curr_x = cop_curr_y = cop_delta_x = cop_delta_y = cop_base_x = cop_base_y = float('nan')
+            cop_curr_x = cop_curr_y = cop_delta_x = cop_delta_y = float('nan')
+            origin_x = origin_y = None
+            region_mask = np.zeros((cop_sensor.rows, cop_sensor.cols), dtype=np.int32)
             cop_delta_x_filt = cop_delta_y_filt = 0.0
             pzt_angle_deg = 0.0
             total_press_val = 0.0
@@ -313,10 +309,10 @@ def data_loop():
         # ---- 更新绘图 (限速到 MAIN_PLOT_FPS Hz) ----
         now = time.perf_counter()
         if now - _last_plot_t >= PLOT_INTERVAL_S:
-            g_main_plot.set_data(
+            plot.set_data(
                 pzt_angle_deg, force_angle_deg,
                 base_sub_arr, total_press_val,
-                cop_curr_x, cop_curr_y, cop_base_x, cop_base_y,
+                cop_curr_x, cop_curr_y, origin_x, origin_y,
                 cop_delta_x_filt, cop_delta_y_filt,
                 force_fx_filt, force_fy_filt, force_fz_filt,
                 cal_fx_val, cal_fy_val, cal_fz_val, cal_angle_deg,
@@ -325,9 +321,11 @@ def data_loop():
                 contact_init=contact_init,
                 refined=refined,
                 pzt_table_angle_deg=pzt_table_angle_deg,
+                region_mask=region_mask,
+                regions=region_list,
             )
             if contact_init:
-                g_main_plot.append_full_data(
+                plot.append_full_data(
                     rel_time_ms,
                     pzt_angle_deg, total_press_val,
                     cop_delta_x_filt, cop_delta_y_filt,
@@ -361,20 +359,19 @@ def data_loop():
 
 # ===================== 主函数 =====================
 def main():
-    global g_main_plot
     app = QtWidgets.QApplication.instance()
     if app is None:
-        app = QtWidgets.QApplication(sys.argv)
+        app = QtWidgets.QApplication(sys.argv)                          # argument vector
 
-    g_main_plot = RealTimePlot()
-    data_thread = threading.Thread(target=data_loop)
+    plot = RealTimePlot()
+    data_thread = threading.Thread(target=data_loop, args=(plot,))      # arguments 
     data_thread.start()
 
     app.exec()
 
     g_main_stop_flag.set()
     data_thread.join(timeout=2)
-    g_main_plot.plot_full_analysis(MAIN_SAVE_DIR)
+    plot.plot_full_analysis(MAIN_SAVE_DIR)
 
 if __name__ == "__main__":
     main()

@@ -14,7 +14,10 @@ class PZTSensorAngle:
                  stability_frames: int = 5,
                  reset_at_frame: int = 0,
                  refine_cnt: int = 10,
-                 refine_distance: float = 0.1):
+                 refine_distance: float = 0.1,
+                 merge_ratio: float = 0.8, merge_min_cells: int = 2,
+                 region_match_dist: float = 1.5,
+                 region_min_area: int = 4):
         """
         构造一个 PZTSensorAngle 角度估计实例。
 
@@ -32,6 +35,10 @@ class PZTSensorAngle:
                                         0 = 禁用精修。
         :param refine_distance: 判定"稳定"的 CoP 与候选点欧氏距离阈值（cells，默认 0.1）。
                                       0 = 禁用精修。
+        :param merge_ratio: 浅谷合并阈值：边界 cell 压力 ÷ min(两 region 峰值) > 此值视为浅谷（默认 0.8）。
+        :param merge_min_cells: 浅谷合并最少满足 cell 数：边界中满足条件的 cell 数 ≥ 此值才合并（默认 2）。
+        :param region_match_dist: region 帧间追踪最大匹配距离（cells，默认 1.5）：质心距离 ≤ 此值继承稳定 id。
+        :param region_min_area: region 最小面积（cell 数，默认 4）：分割/追踪/合并统一过滤 < 此值的碎片 region。
         """
         self.rows = rows
         self.cols = cols
@@ -46,6 +53,14 @@ class PZTSensorAngle:
         self._refine_cnt = refine_cnt
         self._refine_distance = refine_distance
         self._refine_enabled = (refine_cnt > 0) and (refine_distance > 0)
+        # 浅谷合并参数（_compute_region 用）
+        self._merge_ratio = merge_ratio
+        self._merge_min_cells = merge_min_cells
+        # region 帧间追踪（_track_regions 用）: 上帧 [(id, cop_x, cop_y)]
+        self._region_match_dist = region_match_dist
+        self._prev_regions = []
+        # region 最小面积: _compute_region 分割统一过滤
+        self._region_min_area = region_min_area
         # 候选点/稳定计数/已精修标志 —— 跟随 origin 生命周期
         self._refine_cand_x = None
         self._refine_cand_y = None
@@ -226,6 +241,8 @@ class PZTSensorAngle:
                 self._pressure_history.append(total_pressure)
                 if len(self._pressure_history) >= self.collect_frames:
                     self._total_thresh = self.threshold_factor * float(np.mean(self._pressure_history))
+                    if self._total_thresh <= 0:
+                        self._total_thresh = 10
 
     def _dynamic_pixel_threshold(self, frame2d: np.ndarray) -> None:
         with self._lock:
@@ -243,6 +260,7 @@ class PZTSensorAngle:
                     self._pixel_avg_buffer += (frame2d - self._pixel_avg_buffer) / self._pixel_cnt
                 if self._pixel_cnt >= self.collect_frames:
                     self._pixel_thresh = self.threshold_factor * self._pixel_avg_buffer
+                    self._pixel_thresh = np.where(self._pixel_thresh <= 0, 10.0, self._pixel_thresh)
 
     @staticmethod
     def _compute_cop_angle(px: float, py: float) -> float:
@@ -377,15 +395,92 @@ class PZTSensorAngle:
 
         return np.stack([grad_x, grad_y], axis=-1)
 
-    def _compute_region(self, frame2d: np.ndarray, min_area: int = 1) -> list[dict]:
+    def _merge_shallow_regions(self, region_mask, frame2d):
+        """合并浅谷相邻 region（参考 COP.py _merge_adjacent_regions）。
+
+        边界 cell 压力 ≥ _merge_ratio × min(两 region 峰值) 的数量 ≥ _merge_min_cells
+        视为浅谷（材料噪声）→ 合并；否则为深谷（独立接触）→ 保留。
+        返回重编号为连续 1..M 的 region_mask。
+        """
+        n = int(region_mask.max())
+        if n <= 1:
+            return region_mask
+        rows, cols = region_mask.shape
+
+        peak_vals = {}
+        for lbl in range(1, n + 1):
+            peak_vals[lbl] = float(frame2d[region_mask == lbl].max())
+
+        high_count = {}
+        for y in range(rows):
+            for x in range(cols):
+                l1 = region_mask[y, x]
+                if l1 == 0:
+                    continue
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < rows and 0 <= nx < cols:
+                        l2 = region_mask[ny, nx]
+                        if l2 != 0 and l2 != l1:
+                            pair = (min(l1, l2), max(l1, l2))
+                            min_peak = min(peak_vals[l1], peak_vals[l2])
+                            if min_peak > 0 and min(frame2d[y, x], frame2d[ny, nx]) / min_peak > self._merge_ratio:
+                                high_count[pair] = high_count.get(pair, 0) + 1
+
+        pairs_to_merge = [pair for pair, cnt in high_count.items() if cnt >= self._merge_min_cells]
+        if not pairs_to_merge:
+            return region_mask
+
+        parent = list(range(n + 1))
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        # 弱者至多并入一次（弱峰被吸收 → 每个 region 最终只有一个峰）:
+        # 防止谷 strip（自己成 basin 的浅谷）同时并入两侧 region 把独立接触连通;
+        # 强 region 可吸收多个弱碎片（星形合并不受影响）。
+        merged_weak = set()
+        for (a, b), cnt in sorted(high_count.items(), key=lambda kv: -kv[1]):
+            if cnt < self._merge_min_cells:
+                continue
+            weak, strong = (a, b) if peak_vals[a] < peak_vals[b] else (b, a)
+            if weak in merged_weak:
+                continue
+            union(weak, strong)
+            merged_weak.add(weak)
+
+        new_label = {}
+        next_lbl = 1
+        for lbl in range(1, n + 1):
+            root = find(lbl)
+            if root not in new_label:
+                new_label[root] = next_lbl
+                next_lbl += 1
+
+        merged = np.zeros_like(region_mask)
+        for y in range(rows):
+            for x in range(cols):
+                lbl = region_mask[y, x]
+                if lbl > 0:
+                    merged[y, x] = new_label[find(lbl)]
+        return merged
+
+    def _compute_region(self, frame2d: np.ndarray) -> list[dict]:
         """用分水岭算法识别压力帧中的多指接触域。
 
         算法：先在 mask 内找压力局部极大值作为种子，再用 watershed_ift
         按 -frame2d 代价图灌水分割。每峰对应一个接触点（指）。
+        面积 < self._region_min_area 的碎片 region 统一过滤（__init__ 参数 region_min_area）。
 
         :param frame2d: (rows, cols) 2D 压力帧
-        :param threshold: 二值化阈值，cell 压力 > threshold 视为 active（默认 0.0）
-        :param min_area: 过滤掉面积 < min_area 的小区域（默认 1，不过滤）
         :return: list[dict]，按 area 降序，每个 dict 包含:
             · 'coords':         list[(row, col), ...] — 该域所有 cell 坐标
             · 'area':           int，区域内 cell 数（== len(coords)）
@@ -398,7 +493,7 @@ class PZTSensorAngle:
         #   self._dynamic_pixel_threshold(frame2d)
         # 本方法只使用 self._pixel_thresh (未就绪时 fallback 0.0)。
         threshold = self._pixel_thresh if self._pixel_thresh is not None else 0.0
-        mask = frame2d > threshold
+        mask = frame2d > 5 * threshold
         if not mask.any():
             return []
 
@@ -432,35 +527,43 @@ class PZTSensorAngle:
             structure=struct_3x3,
         )
 
-        # 3) 提取每域几何信息（与 mask 求交防止分水岭把背景也分进来）
+        # 2.5) 浅谷合并: 相邻 region 边界压力 ≥ merge_ratio×较低峰 的 cell 数 ≥ merge_min_cells
+        #      则合并（浅谷=材料噪声, 深谷=独立接触）。只在 mask 内合并, 背景不参与。
+        region_grid = np.where(mask, region_id, 0).astype(np.int32)
+        region_grid = self._merge_shallow_regions(region_grid, frame2d)
+
+        # 3) 提取每域几何信息（与 mask 求交防止分水岭把背景也分进来;
+        #    basin ∩ mask 可能不连通 → 按 8 邻连通分量拆分, 保证每 region 连通）
         regions_info = []
-        for id in np.unique(region_id):                           # region_id[i,j] = (0 or k)(背景像素 or 归属于第 k 号种子的区域)
+        for id in np.unique(region_grid):                         # region_grid[i,j] = (0 or k)(背景像素 or 归属于第 k 号种子的区域)
             if id == 0:
                 continue                                          # 0 = 背景
-            region_mask = (region_id == id) & mask                # 第 id 区域为 true
-            area = int(region_mask.sum())
-            if area < min_area:
-                continue
-            rs, cs = np.where(region_mask)                        # rs, cs分别是行和列索引，都是一维ndarray，(rs, cs)不用交叉组合
-            coords = list(zip(rs.tolist(), cs.tolist()))          # region_mask 的 True 索引展开，zip两两配对
-            regions_info.append({
-                'area':  area,
-                'bbox':  (int(cs.min()), int(rs.min()),
-                        int(cs.max()), int(rs.max())),          # 外接矩形（可能有洞）
-                'coords': coords,
-            })
+            basin = region_grid == id
+            comps, ncomp = label(basin, structure=struct_3x3)     # 8 邻连通分量
+            for ci in range(1, ncomp + 1):
+                region_mask = comps == ci                         # 第 id 域的第 ci 个连通分量
+                area = int(region_mask.sum())
+                if area < self._region_min_area:
+                    continue
+                rs, cs = np.where(region_mask)                    # rs, cs分别是行和列索引，都是一维ndarray，(rs, cs)不用交叉组合
+                coords = list(zip(rs.tolist(), cs.tolist()))      # region_mask 的 True 索引展开，zip两两配对
+                regions_info.append({
+                    'area':  area,
+                    'bbox':  (int(cs.min()), int(rs.min()),
+                            int(cs.max()), int(rs.max())),      # 外接矩形（可能有洞）
+                    'coords': coords,
+                })
 
         regions_info.sort(key=lambda d: d['area'], reverse=True)
         return regions_info
 
-    def _compute_region_cop(self, frame2d: np.ndarray, min_area: int = 1) -> list[dict]:
+    def _compute_region_cop(self, frame2d: np.ndarray) -> list[dict]:
         """识别压力帧中的多指接触域，并计算每个域的压力加权中心 (CoP)。
 
-        流程: 先调用 self._compute_region(frame2d, min_area) 取得每个 region 的几何信息,
+        流程: 先调用 self._compute_region(frame2d) 取得每个 region 的几何信息,
             再对每个 region 在 frame2d 上算压力加权中心。
 
         :param frame2d: (rows, cols) 2D 压力帧
-        :param min_area: 过滤掉 cell 数 < min_area 的小区域（默认 1，不过滤）
         :return: list[dict]，按 area 降序，每个 dict 包含:
             · 'coords':         list[(row, col), ...] — 该域所有 cell 坐标
             · 'area':           int，区域内 cell 数（== len(coords)）
@@ -475,7 +578,7 @@ class PZTSensorAngle:
             for region in p._compute_region_cop(frame2d):
                 print(region['cop'], region['area'], region['total_pressure'])
         """
-        regions_info = self._compute_region(frame2d, min_area=min_area)
+        regions_info = self._compute_region(frame2d)
         for region in regions_info:
             coords = region['coords']
             rs = np.array([c[0] for c in coords])
@@ -495,10 +598,7 @@ class PZTSensorAngle:
 
         return regions_info
 
-    REGION_MATCH_DIST = 1.5   # F11: 跨帧 region 质心匹配距离阈值 (cells)
-
-    def _compute_region_delta_cop(self, frame2d: np.ndarray,
-                                    min_area: int = 1) -> list[dict]:
+    def _compute_region_delta_cop(self, frame2d: np.ndarray) -> list[dict]:
             """识别压力帧中的多指接触域，并计算每个域的 (delta_x, delta_y)。
 
             每个 region 独立锁定 origin（独立状态机）：
@@ -514,7 +614,6 @@ class PZTSensorAngle:
               reset_region_origin(region_id) 可单独清掉"已放手"的 region
 
             :param frame2d: (rows, cols) 2D 压力帧
-            :param min_area: 过滤掉 cell 数 < min_area 的小区域（默认 1，不过滤）
             :return: list[dict]，按 area 降序，每个 dict 包含 _compute_region_cop 输出
                     + 'delta': (delta_x, delta_y) — 该域 CoP 与其 origin 的差
                     + 'id':    稳定 region 标识 (跨帧不随面积排名变化)
@@ -523,7 +622,7 @@ class PZTSensorAngle:
                 for region in p._compute_region_delta_cop(frame2d):
                     print(region['id'], region['cop'], region['delta'], region['area'])
             """
-            regions_info = self._compute_region_cop(frame2d, min_area=min_area)
+            regions_info = self._compute_region_cop(frame2d)
             with self._lock:
                 current_region_ids = set()
                 taken_ids = set()   # 本帧已匹配的 id, 防两个 region 继承同一 id
@@ -540,7 +639,7 @@ class PZTSensorAngle:
                         d = float(np.hypot(cop_x - px, cop_y - py))
                         if d < best_d:
                             best_d, region_id = d, rid
-                    if region_id is None or best_d > self.REGION_MATCH_DIST:
+                    if region_id is None or best_d > self._region_match_dist:
                         region_id = 1
                         while region_id in self._region_states or region_id in taken_ids:
                             region_id += 1
@@ -605,3 +704,6 @@ class PZTSensorAngle:
                 self._prev_regions = [(r['id'], r['cop'][0], r['cop'][1]) for r in regions_info]
 
             return regions_info
+
+
+    
