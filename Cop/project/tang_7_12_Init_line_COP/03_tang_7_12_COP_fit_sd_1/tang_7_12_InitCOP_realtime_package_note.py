@@ -862,7 +862,6 @@ class PZTSensorAngle:
 
                     region['delta'] = (delta_x, delta_y)
                     region['id'] = region_id
-                    region['contact_init'] = s['contact_init']
 
                 # stale 缓冲（参考项目 frames_since_seen>3）: 未匹配 tracker 保留 3 帧, 超过才删
                 for rid, s in self._region_states.items():

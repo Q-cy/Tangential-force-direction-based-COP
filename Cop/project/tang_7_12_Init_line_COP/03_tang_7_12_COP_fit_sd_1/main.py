@@ -27,7 +27,7 @@ MAIN_TARGET_FPS = 100                      # sub thread 限速 (Hz), 防止 GIL 
 MAIN_READ_INTERVAL_S = 0.005               # 采集线程读取间隔(秒)，0.005=200Hz tick (sensor 帧间隔 ~12ms)
 MAIN_PLOT_FPS = 60                         # plot set_data 限速 (Hz), 防止 GUI 卡顿
 MAIN_MAX_TIME_DIFF_S = 0.015               # 压力-力传感器最大时间匹配差(秒)
-MAIN_REGION_MODE = "region"                  # "full"=仅整帧计算, "region"=仅分region计算, "both"=两者同时
+MAIN_REGION_MODE = "both"                  # "full"=仅整帧计算, "region"=仅分region计算, "both"=两者同时
 g_main_stop_flag = threading.Event()       # 全局停止信号
 plot = None                                # 绘图对象引用
 
@@ -196,11 +196,6 @@ def data_loop(plot):
             else:
                 region_list = []
                 region_mask = np.zeros((cop_sensor.rows, cop_sensor.cols), dtype=np.int32)
-            # region 模式(不跑整帧): 用"任一 region 已锁 origin"驱动实时显示;
-            # CSV/录制/力归零仍由整帧 contact_init 决定, 故不改动 cop_state。
-            contact_init_display = contact_init
-            if use_region and not use_full:
-                contact_init_display = any(r.get('contact_init', False) for r in region_list)
             refined = cop_state == 2
             total_press_val = float(np.sum(press_item["data"]))
             pzt_table_angle_deg = (-pzt_angle_deg) % 360.0
@@ -344,7 +339,7 @@ def data_loop(plot):
                 cal_fx_val, cal_fy_val, cal_fz_val, cal_angle_deg,
                 cop_state=cop_state,
                 gradient=gradient_arr,
-                contact_init=contact_init_display,
+                contact_init=contact_init,
                 refined=refined,
                 pzt_table_angle_deg=pzt_table_angle_deg,
                 region_mask=region_mask,

@@ -547,13 +547,10 @@ class RealTimePlot:
                 for col_idx in range(7):
                     cell_val = press_table_arr[row_idx, col_idx]
                     self._cell_txts[row_idx][col_idx].setText(f"{cell_val:.0f}" if cell_val > 0 else "")
-            # CoP dots + arrow (region 模式下 cop_curr 为 NaN, 只显示 region 自己的点)
-            if not np.isnan(cop_curr_x) and not np.isnan(cop_curr_y):
-                spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
-                if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
-                    spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
-            else:
-                spots = []
+            # CoP dots + arrow
+            spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+            if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
+                spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
             self._cop_dots.setData(spots=spots)
             # 整帧形心（不加权, 与压力无关）
             if self._centroid_xy is not None:
@@ -591,12 +588,9 @@ class RealTimePlot:
             self._region_base_dots.setData(spots=base_spots)
 
             # Gradient arrows
-            if not np.isnan(cop_curr_x) and not np.isnan(cop_curr_y):
-                grad_spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
-                if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
-                    grad_spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
-            else:
-                grad_spots = []
+            grad_spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+            if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
+                grad_spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
             self._grad_cop_dots.setData(spots=grad_spots)
             for grad_idx, (grad_ln, grad_dot) in enumerate(zip(self._g_lines, self._g_heads)):
                 grad_row, grad_col = divmod(grad_idx, 7)
