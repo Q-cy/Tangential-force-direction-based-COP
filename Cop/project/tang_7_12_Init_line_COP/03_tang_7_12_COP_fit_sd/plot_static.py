@@ -80,9 +80,6 @@ TITLE = None
 # 保存路径（None=自动生成在 CSV_DIR 下）
 SAVE_PATH = None
 
-# 是否同一子图叠加（True=所有线画在一个图上, False=每列独立子图）
-SHARE_AXIS = True
-
 # 误差计算参考列（None=不计算误差）。设为真值列名，会对其他列计算相对于此列的误差
 # 例：ERROR_REF_COLUMN = "Force_angle"   → 计算其他列 vs Force_angle 的误差
 ERROR_REF_COLUMN = "delta_Force_Y"
@@ -297,7 +294,7 @@ def _save_error_csv(error_path: str, error_results: list):
 
 
 def plot_static(csv_paths: list, plot_cols: list, x_col, row_start=None, row_end=None,
-                title=None, save_path=None, share_axis=False,
+                title=None, save_path=None,
                 error_ref_col=None, csv_dir=None):
     """主绘图函数，支持多文件"""
     first_base = os.path.splitext(os.path.basename(csv_paths[0]))[0]
@@ -638,7 +635,6 @@ def main():
     parser.add_argument("-x", "--xcol", default=None, help="X 轴列名/列号")
     parser.add_argument("-t", "--title", default=None, help="图表标题")
     parser.add_argument("-s", "--save", default=None, help="保存路径")
-    parser.add_argument("--share", action="store_true", help="同一子图叠加")
     parser.add_argument("-e", "--error-ref", default=None, help="误差计算参考列")
     parser.add_argument("-l", "--list", action="store_true", help="列出目录下 CSV 及列名后退出")
     args = parser.parse_args()
@@ -679,11 +675,10 @@ def main():
     x_col = args.xcol or X_COLUMN
     title = args.title or TITLE
     save_path = args.save or SAVE_PATH
-    share = args.share or SHARE_AXIS
     error_ref = args.error_ref or ERROR_REF_COLUMN
 
     plot_static(csv_paths, plot_cols, x_col, row_start, row_end,
-                title=title, save_path=save_path, share_axis=share,
+                title=title, save_path=save_path,
                 error_ref_col=error_ref, csv_dir=csv_dir)
 
 

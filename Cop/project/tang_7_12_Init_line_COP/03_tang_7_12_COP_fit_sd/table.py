@@ -2,7 +2,6 @@
 
 import os
 import csv
-import numpy as np
 
 TABLE_CSV_HEADER = [  # CSV 文件表头（84通道 + 时间戳 + 力/角度/标定数据）
     "timestamp", "rel_ms", "adc_sum",

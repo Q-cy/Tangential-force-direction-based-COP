@@ -40,16 +40,6 @@ class PressureSensor:
         time.sleep(0.1)
         self.ser.reset_input_buffer()
 
-    # TODO(deprecated): reconnect 死代码 - 当前未使用（保留作为扩展点）
-    def reconnect(self):
-        try:
-            if self.ser and self.ser.is_open:
-                self.ser.close()
-        except:
-            pass
-        time.sleep(0.2)
-        self.open_port()
-
     @staticmethod
     def crc8_itu(data: bytes) -> int:
         """CRC-8-ITU 校验(多项式 0x07, 初始 0x00, final XOR 0x55)"""
@@ -171,16 +161,6 @@ class SixAxisForceSensor:
         self.ser = serial.Serial(self.port, DATA_BAUDRATE_FORCE, timeout=0.01)
         time.sleep(0.1)
         self.ser.reset_input_buffer()
-
-    # TODO(deprecated): reconnect 死代码 - 当前未使用（保留作为扩展点）
-    def reconnect(self):
-        try:
-            if self.ser and self.ser.is_open:
-                self.ser.close()
-        except:
-            pass
-        time.sleep(0.2)
-        self.open_port()
 
     def _fill_rx_buf(self):
         """把串口当前可读字节追加进 _rx_buf (调用方须持 _io_lock);

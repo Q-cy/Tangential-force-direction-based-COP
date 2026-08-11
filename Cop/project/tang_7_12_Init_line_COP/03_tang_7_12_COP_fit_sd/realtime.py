@@ -150,8 +150,6 @@ class RealTimePlot:
     def __init__(self):
         self.rows, self.cols = 12, 7
         self.lock = threading.Lock()
-        # TODO(deprecated): _fps_times 死代码 - 当前未使用（保留作为扩展点）
-        # self._fps_times = deque(maxlen=30)
         self._heat_vmax = 500.0   # 热力图色阶下限
 
         # === 全程存储 ===
@@ -184,12 +182,8 @@ class RealTimePlot:
         self._cop_delta_y = 0.0             # CoP偏移Y
         self._force_fx_val = 0.0            # 力传感器Fx
         self._force_fy_val = 0.0            # 力传感器Fy
-        self._force_fz_val = 0.0            # 力传感器Fz
-        self._total_press_val = 0.0         # 总压力值
         self._cal_fx_val = None             # 标定力Fx
         self._cal_fy_val = None             # 标定力Fy
-        self._cal_fz_val = None             # 标定力Fz
-        self._cal_angle_deg = None          # 标定力角度(度)
         self._cop_state = 0                 # CoP状态(0=未接触,1=粗略,2=精细)
         self._gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)  # 压力梯度(每帧由 main 传入)
         self._contact_init = False
@@ -389,7 +383,6 @@ class RealTimePlot:
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
                  cal_fx_val=None, cal_fy_val=None, cal_fz_val=None,
-                 cal_angle_deg=None,
                  cop_state=0,
                  gradient=None,
                  contact_init=False,
@@ -410,12 +403,8 @@ class RealTimePlot:
             self._cop_delta_y = cop_delta_y
             self._force_fx_val = force_fx_val
             self._force_fy_val = force_fy_val
-            self._force_fz_val = force_fz_val
-            self._total_press_val = total_press_val
             self._cal_fx_val = cal_fx_val
             self._cal_fy_val = cal_fy_val
-            self._cal_fz_val = cal_fz_val
-            self._cal_angle_deg = cal_angle_deg
             self._cop_state = cop_state
             self._contact_init = contact_init
             self._pzt_table_angle_deg = pzt_table_angle_deg
@@ -471,7 +460,6 @@ class RealTimePlot:
         with self.lock:
             pzt_angle_deg = self._pzt_angle_deg
             force_angle_deg = self._force_angle_deg
-            cal_angle_deg = self._cal_angle_deg
             pzt_fz_hist = list(self.pzt_fz_history)
             cop_dx_hist = list(self.adc_dx_history); cop_dy_hist = list(self.adc_dy_history)
             force_fz_hist = list(self.force_fz_history)
@@ -639,8 +627,6 @@ class RealTimePlot:
                 t.setText("")
             self._grad_cop_dots.setData(spots=[])
 
-        # TODO(deprecated): 以下 FPS 计算死代码 - 当前未启用（保留作为扩展点）
-        # FPS
     @staticmethod
     def _html(text, color, size=16):
         return f'<span style="color:{color};font-size:{size}pt;font-weight:bold">{text}</span>'
@@ -650,8 +636,7 @@ class RealTimePlot:
         w = self.win.width()
         return max(int(base * w / 1900), 7)
 
-    # TODO(deprecated): _u1 参数 color/pzt_val/pzt_label/txt_r 死代码 - 当前未使用（保留作为扩展点）
-    def _u1(self, curve, plot, data, txt, label, color='red', pzt_val=None, pzt_label=None, txt_r=None, fs=16):
+    def _u1(self, curve, plot, data, txt, label, color='red', fs=16):
         if data:
             xs = list(range(len(data)))
             curve.setData(xs, data)
@@ -659,14 +644,8 @@ class RealTimePlot:
             lo, hi = _yrange(data)
             plot.setYRange(lo, hi, padding=0)
             span = hi - lo if hi != lo else 1
-            if txt_r and pzt_val is not None:
-                txt.setHtml(self._html(f'True_{label}={data[-1]:.2f}', color, fs))
-                txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
-                txt_r.setHtml(self._html(f'{pzt_label}={pzt_val:.2f}', 'red', fs))
-                txt_r.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.19)
-            else:
-                txt.setHtml(self._html(f'{label}={data[-1]:.2f}', color, fs))
-                txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
+            txt.setHtml(self._html(f'{label}={data[-1]:.2f}', color, fs))
+            txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
 
     def _u2(self, c1, c2, plot, d1, d2, txt, label, color='blue', txt_r=None, fs=16):
         if d1:

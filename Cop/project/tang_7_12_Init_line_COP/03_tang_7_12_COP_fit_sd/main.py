@@ -13,13 +13,12 @@ from realtime import RealTimePlot
 from table import auto_get_csv_path, init_csv_file, build_csv_row
 from fit import load_coefs, apply_predict_multi
 import tang_7_12_InitCOP_realtime_other_package as pzt
-from tang_7_12_InitCOP_realtime_package_note import PZTSensorAngle
+from tang_7_12_InitCOP_realtime_package_note import PRSensorAngle
 
 # ===================== 配置 =====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MAIN_SAVE_DIR = os.path.join(BASE_DIR,"../../../../../../../data/2.PZT_tangential/weight/test")  # 数据保存根目录
 fit_coefs_path = os.path.join(BASE_DIR,"./fit_coefs.bin")   # fit 模型路径
-MAIN_CAL_MODE = "fit"                       # 唯一支持的标定模式（calibrate.py 已移除）
 MAIN_CAL_DIM = "3D"                         # "2D"=仅切向力(Fx,Fy), "3D"=三维力(Fz,Fx,Fy)
 MAIN_REFINE_REZERO_FORCE = True             # True=COP二次精修后重新置零六维力
 
@@ -29,7 +28,6 @@ MAIN_PLOT_FPS = 60                         # plot set_data 限速 (Hz), 防止 G
 MAIN_MAX_TIME_DIFF_S = 0.015               # 压力-力传感器最大时间匹配差(秒)
 MAIN_REGION_MODE = "region"                  # "full"=仅整帧计算, "region"=仅分region计算, "both"=两者同时
 g_main_stop_flag = threading.Event()       # 全局停止信号
-plot = None                                # 绘图对象引用
 
 # ===================== 采集线程 =====================
 class PressureThread(threading.Thread):
@@ -124,13 +122,26 @@ def data_loop(plot):
     buf_force_fy = deque(maxlen=median_filt_window)
     buf_force_fz = deque(maxlen=median_filt_window)
 
-    cop_sensor = PZTSensorAngle()  # 每帧唯一推进 CoP 状态的入口
+    cop_sensor = PRSensorAngle()  # 每帧唯一推进 CoP 状态的入口
 
     _NAN6 = [float('nan')] * 6  # 力传感器占位
     _prev_refined = False       # COP精修状态（用于检测跳变）
     _prev_contact = False       # COP接触状态（用于检测力卸载）
     _last_plot_t = 0.0           # plot 节流: 上次 plot 更新时间
     PLOT_INTERVAL_S = 1.0 / MAIN_PLOT_FPS   # plot 限速间隔 (秒)
+
+    def _rezero_force(reason: str):
+        """10帧平均力值后累加 Fx/Fy 零点偏差（精修/卸载归零共用）"""
+        vals = []
+        for _ in range(10):
+            d = sensor_force.read()
+            if d:
+                vals.append(d)
+            time.sleep(0.001)
+        if vals:
+            avg = np.mean(vals, axis=0)
+            sensor_force.add_zero_bias(avg[0], avg[1])
+            print(f"🔄 {reason}，Fx/Fy已归零")
 
     while not g_main_stop_flag.is_set():
         loop_start_s = time.perf_counter()
@@ -196,7 +207,7 @@ def data_loop(plot):
             else:
                 region_list = []
                 region_mask = np.zeros((cop_sensor.rows, cop_sensor.cols), dtype=np.int32)
-            # region 模式(不跑整帧): 用"任一 region 已锁 origin"驱动实时显示;
+            # regions模式(不跑整帧): 用"任一 region 已锁 origin"驱动实时显示;
             # CSV/录制/力归零仍由整帧 contact_init 决定, 故不改动 cop_state。
             contact_init_display = contact_init
             if use_region and not use_full:
@@ -210,36 +221,13 @@ def data_loop(plot):
                   f"cop=({cop_curr_x:.2f},{cop_curr_y:.2f})")
 
             # COP精修完成后重新归零 Fx/Fy（Fz不变，10帧平均）
-            if MAIN_REFINE_REZERO_FORCE and has_force:
-                if refined and not _prev_refined:
-                    def _rezero():
-                        vals = []
-                        for _ in range(10):
-                            d = sensor_force.read()
-                            if d:
-                                vals.append(d)
-                            time.sleep(0.001)
-                        if vals:
-                            avg = np.mean(vals, axis=0)
-                            sensor_force.add_zero_bias(avg[0], avg[1])
-                            print("🔄 COP精修完成，Fx/Fy已归零")
-                    threading.Thread(target=_rezero, daemon=True).start()
+            if MAIN_REFINE_REZERO_FORCE and has_force and refined and not _prev_refined:
+                threading.Thread(target=_rezero_force, args=("COP精修完成",), daemon=True).start()
             _prev_refined = refined
 
             # 力卸载后COP重置 → 六维力归零
             if has_force and _prev_contact and not contact_init:
-                def _rezero_unload():
-                    vals = []
-                    for _ in range(10):
-                        d = sensor_force.read()
-                        if d:
-                            vals.append(d)
-                        time.sleep(0.001)
-                    if vals:
-                        avg = np.mean(vals, axis=0)
-                        sensor_force.add_zero_bias(avg[0], avg[1])
-                        print("🔄 力卸载，Fx/Fy已归零")
-                threading.Thread(target=_rezero_unload, daemon=True).start()
+                threading.Thread(target=_rezero_force, args=("力卸载",), daemon=True).start()
             _prev_contact = contact_init
 
             buf_cop_delta_x.append(cop_delta_x)
@@ -341,7 +329,7 @@ def data_loop(plot):
                 cop_curr_x, cop_curr_y, origin_x, origin_y,
                 cop_delta_x_filt, cop_delta_y_filt,
                 force_fx_filt, force_fy_filt, force_fz_filt,
-                cal_fx_val, cal_fy_val, cal_fz_val, cal_angle_deg,
+                cal_fx_val, cal_fy_val, cal_fz_val,
                 cop_state=cop_state,
                 gradient=gradient_arr,
                 contact_init=contact_init_display,
