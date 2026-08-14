@@ -8,26 +8,29 @@ from scipy.ndimage import label, generate_binary_structure
 
 
 class PRSensorAngle:
-    """压阻传感器：12×7（默认）PZT 阵列的 CoP 角度估计"""
+    """压阻传感器：14×5（默认）PZT 阵列的 CoP 角度估计"""
 
-    def __init__(self, rows: int = 12, cols: int = 7,
-                 total_threshold_factor: float = 3, pixel_threshold_factor: float = 5,
+    def __init__(self, rows: int = 14, cols: int = 5,
+                 total_threshold_factor: float = 0.1, pixel_threshold_factor: float = 5,
                  collect_frames: int = 10,
                  stability_frames: int = 5,
                  reset_at_frame: int = 0,
                  refine_cnt: int = 10,
                  refine_distance: float = 0.1,
-                 merge_ratio: float = 0.8, merge_min_cells: int = 2,
-                 region_match_dist: float = 10.0,
+                 merge_ratio: float = 0.6,
+                 region_match_dist: float = 5.0,
                  region_min_area: int = 4,
-                 region_peak_ratio: float = 0.6, region_peak_dist: int = 20):
+                 region_peak_ratio: float = 1, region_peak_dist: int = 3,
+                 active_r0: int = 3, active_r1: int = 5,
+                 active_c0: int = 1, active_c1: int = 3):
         """
         构造一个 PRSensorAngle 角度估计实例。
 
         :param rows: 传感器阵列行数（默认 12）。
         :param cols: 传感器阵列列数（默认 7），输入 ADC 序列长度 = rows * cols。
         :param total_threshold_factor: 动态低压阈值倍数：thresh = total_threshold_factor × mean(前 collect_frames 帧总压力)。
-                                值越大，越难被判定为"低压"。
+                                值越大，越难被判定为"低压"。数据已掩码到 2×2 活跃区时基线≈区域总压,
+                                取 0.6 使阈值落在抬起(~3000-9000)与按压(~15000-39000)之间。
         :param pixel_threshold_factor: 逐像素动态阈值倍数：thresh = pixel_threshold_factor × 逐像素背景平均。
                                 值越大，接触判定越严格。
         :param collect_frames: 学习动态阈值用的样本窗口大小（默认 20 帧）。
@@ -41,11 +44,12 @@ class PRSensorAngle:
         :param refine_distance: 判定"稳定"的 CoP 与候选点欧氏距离阈值（cells，默认 0.1）。
                                       0 = 禁用精修。
         :param merge_ratio: 浅谷合并阈值：边界 cell 压力 ÷ min(两 region 峰值) > 此值视为浅谷（默认 0.8）。
-        :param merge_min_cells: 浅谷合并最少满足 cell 数：边界中满足条件的 cell 数 ≥ 此值才合并（默认 2）。
-        :param region_match_dist: region 帧间追踪质心最大匹配距离（cells，默认 10.0）：质心距离 ≤ 此值继承稳定 id。
+        :param region_match_dist: region 帧间追踪质心最大匹配距离（cells，默认 5.0）：质心距离 ≤ 此值继承稳定 id。
         :param region_min_area: region 最小面积（cell 数，默认 4）：分割/追踪/合并统一过滤 < 此值的碎片 region。
-        :param region_peak_ratio: 附属峰判据：峰高 < 此比例 × 更高峰（默认 0.6）且距离近 → 不成种子。
-        :param region_peak_dist: 附属峰判据：与更高峰距离（曼哈顿, cells）< 此值（默认 5）且高度低 → 不成种子。
+        :param region_peak_ratio: 附属 region 判据：region 峰值 < 此比例 × 更高 region 峰值（默认 0.6）且 COP 距离近 → 并入高 region。
+        :param region_peak_dist: 附属 region 判据：与更高 region 的 COP 距离（欧氏, cells）< 此值（默认 3）且峰值低 → 并入。
+        :param active_r0/active_r1/active_c0/active_c1: 2×2 活跃接触区（0-based 半开区间，默认行[3,5) 列[1,3)）。
+                                所有计算（总压/阈值/CoP/梯度/形心）只针对掩码内 cell，其他 cell 不参与。
         """
         self.rows = rows
         self.cols = cols
@@ -63,12 +67,11 @@ class PRSensorAngle:
         self._refine_enabled = (refine_cnt > 0) and (refine_distance > 0)
         # 浅谷合并参数（_compute_region 用）
         self._merge_ratio = merge_ratio
-        self._merge_min_cells = merge_min_cells
         # regions 帧间追踪: 质心匹配 + COP 落点判据（滑动继承）, stale 3 帧缓冲
         self._region_match_dist = region_match_dist
         # regions 最小面积: _compute_region 分割统一过滤
         self._region_min_area = region_min_area
-        # 附属峰判据: 高度 < ratio×更高峰 且 距离 < dist → 不成种子
+        # 附属 region 判据: peak < ratio×更高 region peak 且 COP 距离 < dist → 并入高 region
         self._region_peak_ratio = region_peak_ratio
         self._region_peak_dist = region_peak_dist
         # 候选点/稳定计数/已精修标志 —— 跟随 origin 生命周期
@@ -92,6 +95,13 @@ class PRSensorAngle:
 
         # per-region 完整状态: {region_id: {...}}；每个 region 独立锁定 origin + 二次精修状态
         self._region_states: dict[int, dict] = {}
+
+        # 2×2 活跃接触区掩码: 所有计算只针对掩码内 cell, 其他 cell 不参与
+        self._active_mask = np.zeros((rows, cols), dtype=bool)
+        self._active_mask[active_r0:active_r1, active_c0:active_c1] = True
+
+        # 初始梯度: 锁 origin / 精修完成时记录, 输出当前梯度 - 初始梯度
+        self._grad_initial = None
 
     # ---------- 公共 API ----------
 
@@ -128,7 +138,7 @@ class PRSensorAngle:
             raise ValueError(f"ADC数据长度必须为{expected}")
 
         frame2d = np.asarray(adc_data, dtype=np.float32).reshape(self.rows, self.cols)
-        total_pressure = float(np.sum(frame2d))
+        total_pressure = float(np.sum(frame2d[self._active_mask]))
         if total_pressure == 0:
             return 0.0, 0.0
         cop_x, cop_y = self._compute_cop(frame2d, total_pressure)
@@ -138,7 +148,17 @@ class PRSensorAngle:
         """便捷接口：计算当前帧的 2D 梯度。等价于 compute_gradient(adc_data)。"""
         gradient = self._compute_gradient(adc_data)
         return gradient
-    
+
+    def get_gradient_delta(self, adc_data) -> np.ndarray:
+        """当前梯度 − 初始梯度（初始在锁 origin / 精修完成时记录）。
+
+        未锁初始值时返回当前梯度（等价差值=0 基线）。仅 2×2 活跃区非零。
+        """
+        current = self._compute_gradient(adc_data)
+        if self._grad_initial is None:
+            return current
+        return current - self._grad_initial
+
     def get_origin(self) -> tuple[float | None, float | None]:
         """返回首次接触 origin：(origin_x, origin_y)；未锁时均为 None。"""
         return self._origin_x, self._origin_y
@@ -164,13 +184,14 @@ class PRSensorAngle:
         self._refine_cand_y = None
         self._refine_curr = 0
         self._refined = False
+        self._grad_initial = None
 
-    def _get_region_state(self, region_id: int) -> dict:
+    def get_region_state(self, region_id: int) -> dict:
         """获取 region 的状态字典；首次访问时建空状态。
 
         每个 region 状态: {origin_x, origin_y, contact_init, refine_cand_x,
                           refine_cand_y, refine_curr, refined, coords,
-                          last_cop_x, last_cop_y, last_coords, frames_since_seen}
+                          last_cop_x, last_cop_y, prev_cop_x, prev_cop_y, frames_since_seen}
         """
         s = self._region_states.get(region_id)
         if s is None:
@@ -182,7 +203,7 @@ class PRSensorAngle:
                 'refined': False,
                 'coords': None,
                 'last_cop_x': None, 'last_cop_y': None,   # 最近一次出现 COP（质心匹配用）
-                'last_coords': None,                      # 最近一次出现足迹（COP 落点判据用）
+                'prev_cop_x': None, 'prev_cop_y': None,   # 再上一次出现 COP（匀速外推预测用）
                 'frames_since_seen': 0,                   # 未匹配帧数（stale 缓冲）
             }
             self._region_states[region_id] = s
@@ -194,7 +215,7 @@ class PRSensorAngle:
           - self._dynamic_total_threshold(total_pressure)  → 更新 _total_thresh
           - self._dynamic_pixel_threshold(frame2d)         → 更新 _pixel_thresh
         """
-        total_pressure = float(np.sum(frame2d))
+        total_pressure = float(np.sum(frame2d[self._active_mask]))
         self._dynamic_total_threshold(total_pressure)
         self._dynamic_pixel_threshold(frame2d)
 
@@ -250,11 +271,12 @@ class PRSensorAngle:
 
         输入:  (rows × cols) 帧 + 总压力 total_pressure
         输出:  (cop_x, cop_y) 浮动位置, 已是 cell 单位
+        只统计 2×2 活跃区掩码内 cell, 其他 cell 不参与。
         """
-        x_grid = np.tile(np.arange(self.cols), (self.rows, 1))
-        y_grid = np.repeat(np.arange(self.rows), self.cols).reshape(self.rows, self.cols)
-        cop_x = float(np.sum(frame2d * x_grid) / total_pressure)
-        cop_y = float(np.sum(frame2d * y_grid) / total_pressure)
+        ys, xs = np.where(self._active_mask)
+        vals = frame2d[self._active_mask]
+        cop_x = float((xs * vals).sum() / total_pressure)
+        cop_y = float((ys * vals).sum() / total_pressure)
         return cop_x, cop_y
 
     def _compute_centroid(self, frame2d: np.ndarray) -> tuple[float, float] | None:
@@ -269,7 +291,7 @@ class PRSensorAngle:
         :return: (centroid_x, centroid_y) cell 单位, x = 列索引, y = 行索引
         """
         threshold = self._pixel_thresh if self._pixel_thresh is not None else 10.0
-        mask = frame2d > 3 * threshold
+        mask = self._active_mask & (frame2d > 3 * threshold)
         if not mask.any():
             return None
         rs, cs = np.where(mask)
@@ -284,7 +306,7 @@ class PRSensorAngle:
         frame_flat = np.asarray(raw_frame, dtype=np.float32).flatten()
         frame2d = frame_flat.reshape(rows, cols)
 
-        total_pressure = float(np.sum(frame2d))
+        total_pressure = float(np.sum(frame2d[self._active_mask]))
 
         # thresh 未确定不进入低压分支
         if self._total_thresh is not None:
@@ -312,6 +334,7 @@ class PRSensorAngle:
                 self._origin_x = cop_x
                 self._origin_y = cop_y
                 self._contact_init = True
+                self._grad_initial = self._grad_from_frame2d(frame2d)  # 记录初始梯度
                 if self._refine_enabled:
                     # origin 锁定时同步把候选点设到这一帧的 CoP, 稳定计数从 1 开始
                     self._refine_cand_x = cop_x
@@ -347,17 +370,18 @@ class PRSensorAngle:
                 self._origin_x = self._refine_cand_x
                 self._origin_y = self._refine_cand_y
                 self._refined = True
+                self._grad_initial = self._grad_from_frame2d(frame2d)  # 精修完成: 重新基线
 
         return delta_x, delta_y
 
     def _compute_gradient(self, adc_data) -> np.ndarray:
-        """计算压力帧的 2D 梯度（中心差分）
+        """计算 2×2 活跃区内各 cell 的 2D 梯度。
+
+        只对活跃区掩码内 cell 计算, 且只使用活跃邻居的差分（平均左右/上下的
+        活跃邻居差分）；无活跃邻居的方向为 0 —— 不对掩码外的 0 值做外推。
 
         :param adc_data: list/np.array，长度为 rows*cols 的 ADC 原始数据
         :return: np.ndarray，shape (rows, cols, 2) — 最后一维是 (grad_x, grad_y)
-            · grad_x = 右 - 左（列方向）
-            · grad_y = 上 - 下（行方向）
-            · 边界单元使用单侧差分（缺失邻居用中心值代替，等价于中心差分退化）
         :raises ValueError: ADC 数据长度不等于 rows*cols 时抛出
         """
         expected = self.rows * self.cols
@@ -365,27 +389,40 @@ class PRSensorAngle:
             raise ValueError(f"ADC数据长度必须为{expected}")
 
         frame2d = np.asarray(adc_data, dtype=np.float32).reshape(self.rows, self.cols)
+        return self._grad_from_frame2d(frame2d)
 
+    def _grad_from_frame2d(self, frame2d: np.ndarray) -> np.ndarray:
+        """从 (rows, cols) 帧计算活跃区内梯度（供 _compute_gradient 与状态机锁定时复用）。"""
         grad_x = np.zeros((self.rows, self.cols), dtype=np.float32)
         grad_y = np.zeros((self.rows, self.cols), dtype=np.float32)
+        mask = self._active_mask
+        rows, cols = self.rows, self.cols
 
-        if self.cols > 1:
-            grad_x[:, 1:-1] = frame2d[:, 2:] - frame2d[:, :-2]      # 内部中心差分
-            grad_x[:, 0] = frame2d[:, 1] - frame2d[:, 0]            # 左边界
-            grad_x[:, -1] = frame2d[:, -1] - frame2d[:, -2]         # 右边界
-        if self.rows > 1:
-            grad_y[1:-1, :] = frame2d[:-2, :] - frame2d[2:, :]      # 内部: up - down
-            grad_y[0, :] = frame2d[0, :] - frame2d[1, :]            # 上边界: center - down
-            grad_y[-1, :] = frame2d[-2, :] - frame2d[-1, :]         # 下边界: up - center
+        for r, c in zip(*np.where(mask)):
+            dxs = []
+            if c + 1 < cols and mask[r, c + 1]:
+                dxs.append(frame2d[r, c + 1] - frame2d[r, c])
+            if c - 1 >= 0 and mask[r, c - 1]:
+                dxs.append(frame2d[r, c] - frame2d[r, c - 1])
+            if dxs:
+                grad_x[r, c] = float(np.mean(dxs))
+
+            dys = []
+            if r + 1 < rows and mask[r + 1, c]:
+                dys.append(frame2d[r + 1, c] - frame2d[r, c])
+            if r - 1 >= 0 and mask[r - 1, c]:
+                dys.append(frame2d[r, c] - frame2d[r - 1, c])
+            if dys:
+                grad_y[r, c] = float(np.mean(dys))
 
         return np.stack([grad_x, grad_y], axis=-1)
 
     def _merge_shallow_regions(self, region_mask, frame2d):
         """合并浅谷相邻 region
         输入： region_mask 存储 cell 属于哪个 region 的 array
-        输出： 
-        边界 cell 压力 ≥ _merge_ratio × min(两 region 峰值) 的数量 ≥ _merge_min_cells
-        视为浅谷（材料噪声）→ 合并；否则为深谷（独立接触）→ 保留。
+        输出：
+        边界 cell 压力 ≥ _merge_ratio × min(两 region 峰值) 的数量
+        > 边界总对数的一半 → 视为浅谷（材料噪声）→ 合并；否则为深谷（独立接触）→ 保留。
         返回重编号为连续 1..M 的 region_mask。
         """
         n = int(region_mask.max())          # region_mask 为 int array
@@ -398,6 +435,7 @@ class PRSensorAngle:
             peak_vals[lbl] = float(frame2d[region_mask == lbl].max())    #同 region 最大的cell
 
         high_count = {}
+        total_count = {}
         for y in range(rows):
             for x in range(cols):
                 l1 = region_mask[y, x]
@@ -409,11 +447,14 @@ class PRSensorAngle:
                         l2 = region_mask[ny, nx]
                         if l2 != 0 and l2 != l1:
                             pair = (min(l1, l2), max(l1, l2))
+                            total_count[pair] = total_count.get(pair, 0) + 1
                             min_peak = min(peak_vals[l1], peak_vals[l2])
                             if min_peak > 0 and min(frame2d[y, x], frame2d[ny, nx]) / min_peak > self._merge_ratio:
                                 high_count[pair] = high_count.get(pair, 0) + 1
 
-        pairs_to_merge = [pair for pair, cnt in high_count.items() if cnt >= self._merge_min_cells]
+        # 满足浅谷条件的边界 cell 对数 > 边界总对数的一半 → 合并
+        pairs_to_merge = [pair for pair, cnt in high_count.items()
+                          if cnt > total_count[pair] / 2]
         if not pairs_to_merge:
             return region_mask
 
@@ -435,7 +476,7 @@ class PRSensorAngle:
         # 强 region 可吸收多个弱碎片（星形合并不受影响）。
         merged_weak = set()
         for (a, b), cnt in sorted(high_count.items(), key=lambda kv: -kv[1]):
-            if cnt < self._merge_min_cells:
+            if cnt <= total_count[(a, b)] / 2:
                 continue
             weak, strong = (a, b) if peak_vals[a] < peak_vals[b] else (b, a)
             if weak in merged_weak:
@@ -497,8 +538,12 @@ class PRSensorAngle:
     def _compute_region_BFS(self, frame2d: np.ndarray) -> list[dict]:
         """用 BFS 峰生长识别压力帧中的多指接触域
 
-        算法：先在 mask 内找压力局部极大值作为种子，再从种子按压力高优先 4 邻扩散
-        （高压力 cell 先被占领 → region 从峰一圈圈生长, 波谷自然成边界, 不绕过包围）。
+        算法：先在 mask 内找种子（主路径 2×2 块峰: 块内每 cell 同时大于 自己角上 3 个外圈
+        cell 的平均值 和 最大值的 0.8 倍, 4×3 覆盖外圈一圈, 平均抗单点噪声 + max 拦截深谷桥;
+        无块峰回退单 cell 严格 8 邻峰; 再无峰质心兜底），
+        再从种子按压力高优先 4 邻扩散（高压力 cell 先被占领 → region 从峰一圈圈生长,
+        波谷自然成边界, 不绕过包围）。附属 region 归并（peak + COP 距离）在
+        _compute_region_cop 分割后做。
         面积 < self._region_min_area 的碎片 region 统一过滤（__init__ 参数 region_min_area）。
 
         :param frame2d: (rows, cols) 2D 压力帧
@@ -506,6 +551,7 @@ class PRSensorAngle:
             · 'coords':         list[(row, col), ...] — 该域所有 cell 坐标
             · 'area':           int，区域内 cell 数（== len(coords)）
             · 'bbox':           (cmin, rmin, cmax, rmax) — 最小外接矩形（可能有空洞）
+            · 'peak':           float — 区域内最高压力
         """
         threshold = self._pixel_thresh if self._pixel_thresh is not None else 10.0
         mask = frame2d > 3 * threshold
@@ -514,10 +560,10 @@ class PRSensorAngle:
 
         rows, cols = self.rows, self.cols
 
-        # 1) 在 mask 内找"严格峰"作为种子: 严格高于所有 8 邻
+        # 1) 种子: 主路径 2×2 块峰, 无块峰回退单 cell 峰, 再无峰质心兜底
         # generate_binary_structure(rank, connectivity), rank=2：二维结构（图像是 2D）， connectivity=2：二维下代表8‑邻域， struct_3x3 返回 3x3 boolarray
-        struct_3x3 = generate_binary_structure(2, 2)               
-        # maximum_filter 的 footprint 含中心, `>` 恒 False, 用 pad+shift 求 8 邻最大（不含中心）
+        struct_3x3 = generate_binary_structure(2, 2)
+        # 单 cell 严格 8 邻峰（回退层用）: maximum_filter 的 footprint 含中心, `>` 恒 False, 用 pad+shift 求 8 邻最大（不含中心）
         padded = np.pad(frame2d, 1, mode='constant', constant_values=-np.inf)  # padding = 1,填充 -∞
         max_nb = np.full_like(frame2d, -np.inf)                                # 全 -∞ 矩阵
         for dr in (-1, 0, 1):                                                  # dr、dc 遍历3×3邻域的9个偏移
@@ -526,46 +572,63 @@ class PRSensorAngle:
                     continue
                 # 取出相对于原图偏移(dr,dc)的那一层，和max_nb逐元素取最大值，padded.shape = (rows+2, cols+2)
                 max_nb = np.maximum(max_nb, padded[1 + dr:1 + dr + rows, 1 + dc:1 + dc + cols])
-        # 遍历完 dr, dc 后 max_nb 存储的是相同位置 cell 的8邻域中的最大值， local_max 是局部极大值
-        local_max = (max_nb < 1 * frame2d) & mask
 
-        if local_max.any():
-            # 附属峰过滤: 高度 < ratio×更高峰 且 距离 < dist → 不成种子（同一接触的起伏）
-            # np.where 返回行数组和列数组，zip* 并行遍历两个可迭代对象，按位置索引一一配对，也就是变成坐标
-            cand = [(r, c, float(frame2d[r, c])) for r, c in zip(*np.where(local_max))]
-            cand.sort(key=lambda t: -t[2])                        # 对 cand 三元组列表里每一个三元组t，对于-t[2]，默认升序
-            kept = []
-            for r, c, v in cand:
-                dominated = False
-                for kr, kc, kv in kept:                           # 已保留的更高峰
-                    if (v < self._region_peak_ratio * kv
-                            and abs(r - kr) + abs(c - kc) < self._region_peak_dist):
-                        dominated = True
-                        break
-                if not dominated:
-                    kept.append((r, c, v))
-            markers = np.zeros((rows, cols), dtype=np.int32)
-            # enumerate(kept, 1)：从1开始计数，i为种子编号；_表示忽略压力v，只取坐标r,c
-            for i, (r, c, _) in enumerate(kept, 1):
-                markers[r, c] = i
+        # 2×2 块峰: 块内每 cell 同时大于 自己角上 3 个外圈 cell 的平均值 和 最大值的 0.8 倍
+        # （平均抗单点噪声; max 拦截"深谷桥"等中间块; 单点噪声凑不齐 4 cell, 不成峰）
+        padded2 = np.pad(frame2d, 2, mode='constant', constant_values=-np.inf)
+        ring = {}   # 外圈一圈 12 个偏移切片（anchor 对齐 (rows-1, cols-1), -inf 填充缺失侧）
+        for (dr, dc) in [(-1,-1),(-1,0),(-1,1),(-1,2),(0,-1),(0,2),
+                         (1,-1),(1,2),(2,-1),(2,0),(2,1),(2,2)]:
+            ring[(dr, dc)] = padded2[2+dr:2+dr+rows-1, 2+dc:2+dc+cols-1]
+
+        def _corner(offsets):
+            cells = [ring[o] for o in offsets]
+            return (sum(cells) / len(cells), np.maximum.reduce(cells))   # (均值, 最大值)
+
+        cA = _corner([(-1,-1),(-1,0),(0,-1)])   # A=(r,c): 上/左/左上
+        cB = _corner([(-1,1),(-1,2),(0,2)])     # B=(r,c+1): 上/右上/右
+        cC = _corner([(1,-1),(2,-1),(2,0)])     # C=(r+1,c): 左/左下/下
+        cD = _corner([(1,2),(2,1),(2,2)])       # D=(r+1,c+1): 右/右下/下
+        min4_mask = np.minimum.reduce([mask[:rows-1, :cols-1], mask[1:, :cols-1],
+                                       mask[:rows-1, 1:], mask[1:, 1:]])   # 块内 4 cell 全在 mask（threshold 可能为逐像素数组）
+        block_ok = ((frame2d[:rows-1, :cols-1] > cA[0]) & (frame2d[:rows-1, :cols-1] > 0.8 * cA[1])
+                    & (frame2d[:rows-1, 1:] > cB[0]) & (frame2d[:rows-1, 1:] > 0.8 * cB[1])
+                    & (frame2d[1:, :cols-1] > cC[0]) & (frame2d[1:, :cols-1] > 0.8 * cC[1])
+                    & (frame2d[1:, 1:] > cD[0]) & (frame2d[1:, 1:] > 0.8 * cD[1])
+                    & min4_mask)
+
+        if block_ok.any():
+            # 块种子: 每块 4 cell 同号, 重叠块经 8 邻连通 label 合并为 1 种子（平台不分裂）
+            seed_mask = np.zeros((rows, cols), dtype=np.int32)
+            for r, c in zip(*np.where(block_ok)):
+                seed_mask[r:r + 2, c:c + 2] = 1
+            markers, _ = label(seed_mask, structure=struct_3x3)
         else:
-            # 兜底: 无峰 → 在活动区质心处造一个种子, 整片作为单区域
-            rs, cs = np.where(mask)
-            weights = frame2d[rs, cs]
-            total_w = float(weights.sum())
-            if total_w > 0:
-                cy = float((rs * weights).sum() / total_w)
-                cx = float((cs * weights).sum() / total_w)
+            # 回退 1: 无块峰 → 单 cell 严格 8 邻峰（所有局部极大值直接成种子; 附属 region
+            # 判定已移到 _compute_region_cop, 分割后按 region 峰值 + COP 距离归并）
+            local_max = (max_nb < 1 * frame2d) & mask
+            if local_max.any():
+                markers = np.zeros((rows, cols), dtype=np.int32)
+                for i, (r, c) in enumerate(zip(*np.where(local_max)), 1):
+                    markers[r, c] = i
             else:
-                cy = float(rs.mean()); cx = float(cs.mean())
-            markers = np.zeros((rows, cols), dtype=np.int32)
-            markers[int(round(cy)), int(round(cx))] = 1
+                # 回退 2: 无峰 → 在活动区质心处造一个种子, 整片作为单区域
+                rs, cs = np.where(mask)
+                weights = frame2d[rs, cs]
+                total_w = float(weights.sum())
+                if total_w > 0:
+                    cy = float((rs * weights).sum() / total_w)
+                    cx = float((cs * weights).sum() / total_w)
+                else:
+                    cy = float(rs.mean()); cx = float(cs.mean())
+                markers = np.zeros((rows, cols), dtype=np.int32)
+                markers[int(round(cy)), int(round(cx))] = 1
 
         # 2) BFS 峰生长: 压力高优先 4 邻扩散, 只长入 mask 内 cell
         region_grid = self._grow_from_peaks(markers, frame2d, mask)
 
-        # 2.5) 浅谷合并: 相邻 region 边界压力 ≥ merge_ratio×较低峰 的 cell 数 ≥ merge_min_cells
-        #      则合并（浅谷=材料噪声, 深谷=独立接触）。只在 mask 内合并, 背景不参与。
+        # 2.5) 浅谷合并: 相邻 region 边界压力 ≥ merge_ratio×较低峰 的 cell 对数
+        #      > 边界总对数的一半 → 合并（浅谷=材料噪声, 深谷=独立接触）。只在 mask 内合并, 背景不参与。
         region_grid = self._merge_shallow_regions(region_grid, frame2d)
 
         # 3) 提取每域几何信息（8 邻连通分量拆分, 保证每 region 连通）
@@ -587,6 +650,7 @@ class PRSensorAngle:
                     'bbox':  (int(cs.min()), int(rs.min()),
                             int(cs.max()), int(rs.max())),      # 外接矩形（可能有洞）
                     'coords': coords,
+                    'peak':  float(frame2d[rs, cs].max()),     # region 内最高压力（附属归并判据用）
                 })
 
         regions_info.sort(key=lambda d: d['area'], reverse=True)
@@ -599,14 +663,19 @@ class PRSensorAngle:
             再对每个 region 在 frame2d 上算压力加权中心。
 
         :param frame2d: (rows, cols) 2D 压力帧
-        :return: list[dict]，按 area 降序，每个 dict 包含:
+        :return: list[dict]，按 peak 降序，每个 dict 包含:
             · 'coords':         list[(row, col), ...] — 该域所有 cell 坐标
             · 'area':           int，区域内 cell 数（== len(coords)）
             · 'bbox':           (cmin, rmin, cmax, rmax) — 最小外接矩形（可能有空洞）
+            · 'peak':           float — 区域内最高压力
             · 'cop':            (cop_x, cop_y) — 该域压力加权中心
                                 ⚠️ x = 列索引, y = 行索引
             · 'centroid':       (cx, cy) — 该域等权形心（每个 cell 权重=1, 压力不参与）
             · 'total_pressure': float，区域内 cell 总压力
+
+        附属 region 归并: 矮 region (peak < region_peak_ratio×更高 region peak) 且
+        COP 欧氏距离 < region_peak_dist → coords 并入高 region（同一接触的起伏）。
+        归并不要求相邻; 被并入的 region 从结果中移除（region 数可能减少）。
 
         退化: coords 非空但 total_pressure == 0 时, cop 退化为几何中心 (rs.mean(), cs.mean())
 
@@ -633,16 +702,43 @@ class PRSensorAngle:
             region['centroid'] = (float(cs.mean()), float(rs.mean()))  # 等权形心, 压力不参与
             region['total_pressure'] = total_p
 
-        return regions_info
+        # 附属 region 归并: 矮 region 并入 COP 距离近的更高 region（同一接触的起伏）。
+        # 原峰级过滤在种子阶段做, 此时无 COP; 移到分割后按 region 峰值 + COP 距离更准,
+        # 且顺带修复原实现"不相邻矮峰区域静默丢失"的问题。
+        regions_info.sort(key=lambda d: d['peak'], reverse=True)
+        merged = []
+        for reg in regions_info:
+            for hi in merged:                                 # merged 内按 peak 降序
+                if (reg['peak'] < self._region_peak_ratio * hi['peak']
+                        and np.hypot(reg['cop'][0] - hi['cop'][0],
+                                     reg['cop'][1] - hi['cop'][1]) < self._region_peak_dist):
+                    hi['coords'] += reg['coords']
+                    hi['area'] += reg['area']
+                    hi['peak'] = max(hi['peak'], reg['peak'])
+                    # 对合并后 coords 重算特征（region ≤ 84 cells, 重算代价可忽略）
+                    rs = np.array([c[0] for c in hi['coords']])
+                    cs = np.array([c[1] for c in hi['coords']])
+                    pv = frame2d[rs, cs]
+                    hi['total_pressure'] = float(pv.sum())
+                    if hi['total_pressure'] > 0:
+                        hi['cop'] = (float((cs * pv).sum() / hi['total_pressure']),
+                                     float((rs * pv).sum() / hi['total_pressure']))
+                    else:
+                        hi['cop'] = (float(cs.mean()), float(rs.mean()))
+                    hi['centroid'] = (float(cs.mean()), float(rs.mean()))
+                    hi['bbox'] = (int(cs.min()), int(rs.min()), int(cs.max()), int(rs.max()))
+                    break
+            else:
+                merged.append(reg)
+        return merged
 
     def _compute_region_delta_cop(self, frame2d: np.ndarray) -> list[dict]:
             """识别压力帧中的多指接触域，并计算每个域的 (delta_x, delta_y)。
 
             每个 region 独立锁定 origin（独立状态机）：
             - region_id 跨帧稳定 (F11): 本帧 region 与存活 tracker 按质心最近邻匹配
-              (距离 <= REGION_MATCH_DIST 继承 id); 质心超距时, 若本帧 COP 落在上一帧
-              region 足迹内 (滑动中 COP 尚未移出原区域) 则视为同一手指, 继承 id
-              (不重置 origin); 都不满足才分配新 id
+              (COP 与 tracker 预测位置[last_cop 匀速外推, 仅连续帧可见时启用]距离
+              <= REGION_MATCH_DIST 继承 id, 不重置 origin); 超距则分配新 id
             - 首次出现的 region 在该帧的 CoP 视为其 origin, delta = (0, 0);
               coords (足迹) 仅在状态新建时记录 (F7), 供 reset_region_origin
               判定"已放手"——每帧刷新会让比较恒真 (coords 永远来自当前 mask)
@@ -668,27 +764,24 @@ class PRSensorAngle:
                 for region in regions_info:
                     cop_x, cop_y = region['cop']
 
-                    # F11: 质心最近邻 → COP 落点判据, 继承稳定 id
-                    # 1) 质心匹配（静止/慢速）: 候选池 = 所有存活 tracker 的 last_cop
+                    # F11: 质心最近邻 → 继承稳定 id（候选池 = 所有存活 tracker 的预测位置）
                     region_id = None
                     best_d = 1e9
                     for rid, s in self._region_states.items():
                         if rid in taken_ids or s['last_cop_x'] is None:
                             continue
-                        d = float(np.hypot(cop_x - s['last_cop_x'], cop_y - s['last_cop_y']))
+                        # 匀速外推预测位置（仅连续帧可见时启用; stale/首观测退化为 last_cop）
+                        if s['frames_since_seen'] == 0 and s['prev_cop_x'] is not None:
+                            pred_x = 2.0 * s['last_cop_x'] - s['prev_cop_x']
+                            pred_y = 2.0 * s['last_cop_y'] - s['prev_cop_y']
+                        else:
+                            pred_x, pred_y = s['last_cop_x'], s['last_cop_y']
+                        d = float(np.hypot(cop_x - pred_x, cop_y - pred_y))
                         if d < best_d:
                             best_d, region_id = d, rid
-                    # 2) 质心超距 → 本帧 COP 落在上一帧 region 足迹内 → 同一手指滑动, 继承 id
-                    if region_id is None or best_d > self._region_match_dist:
+                    # 质心超距 → 新 region 分配新 id
+                    if region_id is not None and best_d > self._region_match_dist:
                         region_id = None
-                        hit_cell = (int(round(cop_y)), int(round(cop_x)))
-                        for rid, s in self._region_states.items():
-                            if rid in taken_ids or s.get('last_coords') is None:
-                                continue
-                            if hit_cell in s['last_coords']:
-                                region_id = rid
-                                break
-                    # 3) 兜底: 新 region 分配新 id
                     if region_id is None:
                         region_id = 1
                         while region_id in self._region_states or region_id in taken_ids:
@@ -696,14 +789,13 @@ class PRSensorAngle:
                     taken_ids.add(region_id)
                     current_region_ids.add(region_id)
 
-                    s = self._get_region_state(region_id)
+                    s = self.get_region_state(region_id)
                     # F7: coords 仅在状态新建时记录 (足迹), 不再每帧刷新
                     if s.get('coords') is None:
                         s['coords'] = region['coords']
-                    # 帧间追踪状态: 记录本帧 COP 与足迹（COP 落点判据用）
-                    s['last_cop_x'] = cop_x
-                    s['last_cop_y'] = cop_y
-                    s['last_coords'] = region['coords']
+                    # 帧间追踪状态: 移位更新 prev/last（匀速外推预测用）
+                    s['prev_cop_x'], s['prev_cop_y'] = s['last_cop_x'], s['last_cop_y']
+                    s['last_cop_x'], s['last_cop_y'] = cop_x, cop_y
                     s['frames_since_seen'] = 0
 
                     if not s['contact_init']:
@@ -762,4 +854,3 @@ class PRSensorAngle:
             return regions_info
 
 
-    

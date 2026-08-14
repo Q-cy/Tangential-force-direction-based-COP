@@ -27,8 +27,8 @@ def _yrange(data, pad=0.1):
 
 
 class CellGridItem(pg.GraphicsObject):
-    """84 个独立色块 + 数值文字，复现 matplotlib table 效果"""
-    def __init__(self, rows=12, cols=7):
+    """rows×cols 个独立色块 + 数值文字，复现 matplotlib table 效果"""
+    def __init__(self, rows=14, cols=5):
         pg.GraphicsObject.__init__(self)
         self.rows, self.cols = rows, cols
         self.data = np.zeros((rows, cols))
@@ -126,7 +126,7 @@ class CellGridItem(pg.GraphicsObject):
 
 class GridLinesItem(pg.GraphicsObject):
     """纯网格线，避免 addLine 在 ViewBox 边界裁剪导致外圈视觉偏大"""
-    def __init__(self, rows=12, cols=7):
+    def __init__(self, rows=14, cols=5):
         pg.GraphicsObject.__init__(self)
         self.rows, self.cols = rows, cols
 
@@ -147,11 +147,9 @@ class GridLinesItem(pg.GraphicsObject):
 
 
 class RealTimePlot:
-    def __init__(self):
-        self.rows, self.cols = 12, 7
+    def __init__(self, rows: int = 14, cols: int = 5):
+        self.rows, self.cols = rows, cols
         self.lock = threading.Lock()
-        # TODO(deprecated): _fps_times 死代码 - 当前未使用（保留作为扩展点）
-        # self._fps_times = deque(maxlen=30)
         self._heat_vmax = 500.0   # 热力图色阶下限
 
         # === 全程存储 ===
@@ -175,7 +173,7 @@ class RealTimePlot:
     def init_defaults(self):
         self._pzt_angle_deg = 0.0           # PZT方向角度(度)
         self._force_angle_deg = 0.0         # 六维力方向角度(度)
-        self._press_table_arr = np.zeros((12, 7))  # 压力表数据(12×7)
+        self._press_table_arr = np.zeros((self.rows, self.cols))  # 压力表数据(rows×cols)
         self._cop_curr_x = 0.0              # 当前CoP X
         self._cop_curr_y = 0.0              # 当前CoP Y
         self._cop_base_x = 0.0              # 初始CoP X
@@ -184,17 +182,13 @@ class RealTimePlot:
         self._cop_delta_y = 0.0             # CoP偏移Y
         self._force_fx_val = 0.0            # 力传感器Fx
         self._force_fy_val = 0.0            # 力传感器Fy
-        self._force_fz_val = 0.0            # 力传感器Fz
-        self._total_press_val = 0.0         # 总压力值
         self._cal_fx_val = None             # 标定力Fx
         self._cal_fy_val = None             # 标定力Fy
-        self._cal_fz_val = None             # 标定力Fz
-        self._cal_angle_deg = None          # 标定力角度(度)
         self._cop_state = 0                 # CoP状态(0=未接触,1=粗略,2=精细)
-        self._gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)  # 压力梯度(每帧由 main 传入)
+        self._gradient_arr = np.zeros((self.rows, self.cols, 2), dtype=np.float32)  # 压力梯度(每帧由 main 传入)
         self._contact_init = False
         self._pzt_table_angle_deg = None     # Pressure Table 专用角度（invertY 视图）
-        self._region_mask = np.zeros((12, 7), dtype=np.int32)   # per-region 着色掩码
+        self._region_mask = np.zeros((self.rows, self.cols), dtype=np.int32)   # per-region 着色掩码
         self._regions = []                   # per-region 数据（cop/delta/id, 供点+箭头显示）
         self._centroid_xy = None             # 整帧形心（不加权, 品红菱形显示）
 
@@ -321,17 +315,17 @@ class RealTimePlot:
         self.p_table = self.win.addPlot(row=1, col=2, rowspan=3, title="Pressure Table")
         self.p_table.hideAxis('left'); self.p_table.hideAxis('bottom')
         self.p_table.setAspectLocked(); self.p_table.invertY(True)
-        self.p_table.setXRange(-0.5, 6.5); self.p_table.setYRange(-0.5, 11.5)
+        self.p_table.setXRange(-0.5, self.cols - 0.5); self.p_table.setYRange(-0.5, self.rows - 0.5)
         self.p_table.getViewBox().setBackgroundColor('w')
         self.p_table.getViewBox().setBorder(pg.mkPen(width=0))
-        # CellGridItem — 84 个独立色块 + 网格线（网格线在 paint() 中绘制）
-        self._cell_grid = CellGridItem(12, 7)
+        # CellGridItem — rows×cols 个独立色块 + 网格线（网格线在 paint() 中绘制）
+        self._cell_grid = CellGridItem(self.rows, self.cols)
         self.p_table.addItem(self._cell_grid)
         # 数值文字
         self._cell_txts = []
-        for r in range(12):
+        for r in range(self.rows):
             row_t = []
-            for c in range(7):
+            for c in range(self.cols):
                 t = pg.TextItem("", color='k', anchor=(0.5, 0.5))
                 self.p_table.addItem(t)
                 t.setPos(c, r)
@@ -353,21 +347,21 @@ class RealTimePlot:
         self.p_grad = self.win.addPlot(row=1, col=3, rowspan=3, title="Gradient Arrows")
         self.p_grad.hideAxis('left'); self.p_grad.hideAxis('bottom')
         self.p_grad.setAspectLocked(); self.p_grad.invertY(True)
-        self.p_grad.setXRange(-0.5, 6.5); self.p_grad.setYRange(-0.5, 11.5)
+        self.p_grad.setXRange(-0.5, self.cols - 0.5); self.p_grad.setYRange(-0.5, self.rows - 0.5)
         self.p_grad.getViewBox().setBackgroundColor('w')
         self.p_grad.getViewBox().setBorder(pg.mkPen(width=0))
-        self._grid_lines = GridLinesItem(12, 7)
+        self._grid_lines = GridLinesItem(self.rows, self.cols)
         self.p_grad.addItem(self._grid_lines)
         self._g_lines = []
         self._g_heads = []
-        for _ in range(84):
+        for _ in range(self.rows * self.cols):
             ln = self.p_grad.plot([0, 0], [0, 0], pen=pg.mkPen('k', width=1.5))
             self._g_lines.append(ln)
             dot = pg.ScatterPlotItem()
             self.p_grad.addItem(dot)
             self._g_heads.append(dot)
         self._g_txts = []
-        for _ in range(84):
+        for _ in range(self.rows * self.cols):
             t = pg.TextItem("", color='k', anchor=(0.5, 0.5))
             self.p_grad.addItem(t)
             self._g_txts.append(t)
@@ -389,7 +383,6 @@ class RealTimePlot:
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
                  cal_fx_val=None, cal_fy_val=None, cal_fz_val=None,
-                 cal_angle_deg=None,
                  cop_state=0,
                  gradient=None,
                  contact_init=False,
@@ -410,12 +403,8 @@ class RealTimePlot:
             self._cop_delta_y = cop_delta_y
             self._force_fx_val = force_fx_val
             self._force_fy_val = force_fy_val
-            self._force_fz_val = force_fz_val
-            self._total_press_val = total_press_val
             self._cal_fx_val = cal_fx_val
             self._cal_fy_val = cal_fy_val
-            self._cal_fz_val = cal_fz_val
-            self._cal_angle_deg = cal_angle_deg
             self._cop_state = cop_state
             self._contact_init = contact_init
             self._pzt_table_angle_deg = pzt_table_angle_deg
@@ -471,7 +460,6 @@ class RealTimePlot:
         with self.lock:
             pzt_angle_deg = self._pzt_angle_deg
             force_angle_deg = self._force_angle_deg
-            cal_angle_deg = self._cal_angle_deg
             pzt_fz_hist = list(self.pzt_fz_history)
             cop_dx_hist = list(self.adc_dx_history); cop_dy_hist = list(self.adc_dy_history)
             force_fz_hist = list(self.force_fz_history)
@@ -538,19 +526,24 @@ class RealTimePlot:
             self._t_err.setHtml(self._html(f'Error: {err_hist[-1]:.1f}°', 'green', fs))
             self._t_err.setPos(int(max(len(x_vals) - 1, 1) * 0.85), 180 - 180 * 0.12)
 
-        # Pressure table + CoP + Gradient：仅在初始 CoP 确定后显示
+        # Pressure Table 热力图始终显示实时压力（掩码后仅 2×2 有色）; 覆盖层由接触状态门控
+        cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
+        self._cell_grid.set_data(press_table_arr, cell_vmax)
+        self._cell_grid.set_regions(self._region_mask, REGION_PALETTE)
+        for row_idx in range(self.rows):
+            for col_idx in range(self.cols):
+                cell_val = press_table_arr[row_idx, col_idx]
+                self._cell_txts[row_idx][col_idx].setText(f"{cell_val:.0f}" if cell_val > 0 else "")
+
+        # 覆盖层: CoP 点/箭头/梯度等, 仅在接触确定后显示
         if contact_init:
-            cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
-            self._cell_grid.set_data(press_table_arr, cell_vmax)
-            self._cell_grid.set_regions(self._region_mask, REGION_PALETTE)
-            for row_idx in range(12):
-                for col_idx in range(7):
-                    cell_val = press_table_arr[row_idx, col_idx]
-                    self._cell_txts[row_idx][col_idx].setText(f"{cell_val:.0f}" if cell_val > 0 else "")
-            # CoP dots + arrow
-            spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
-            if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
-                spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+            # CoP dots + arrow (region 模式下 cop_curr 为 NaN, 只显示 region 自己的点)
+            if not np.isnan(cop_curr_x) and not np.isnan(cop_curr_y):
+                spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+                if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
+                    spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+            else:
+                spots = []
             self._cop_dots.setData(spots=spots)
             # 整帧形心（不加权, 与压力无关）
             if self._centroid_xy is not None:
@@ -588,12 +581,15 @@ class RealTimePlot:
             self._region_base_dots.setData(spots=base_spots)
 
             # Gradient arrows
-            grad_spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
-            if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
-                grad_spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+            if not np.isnan(cop_curr_x) and not np.isnan(cop_curr_y):
+                grad_spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+                if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
+                    grad_spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+            else:
+                grad_spots = []
             self._grad_cop_dots.setData(spots=grad_spots)
             for grad_idx, (grad_ln, grad_dot) in enumerate(zip(self._g_lines, self._g_heads)):
-                grad_row, grad_col = divmod(grad_idx, 7)
+                grad_row, grad_col = divmod(grad_idx, self.cols)
                 grad_x, grad_y = grad_arr[grad_row, grad_col, 0], grad_arr[grad_row, grad_col, 1]
                 grad_norm = np.hypot(grad_x, grad_y)
                 if grad_norm > 1.0:
@@ -610,12 +606,7 @@ class RealTimePlot:
                     grad_dot.setData(x=[], y=[])
                     self._g_txts[grad_idx].setText("")
         else:
-            # CoP 未确定：清空两张表
-            self._cell_grid.set_data(np.zeros((12, 7)), 1.0)
-            self._cell_grid.set_regions(np.zeros((12, 7), dtype=np.int32), [])
-            for row_idx in range(12):
-                for col_idx in range(7):
-                    self._cell_txts[row_idx][col_idx].setText("")
+            # 无接触: 仅清空覆盖层（热力图保持实时压力显示）
             self._cop_dots.setData(spots=[])
             self._centroid_dot.setData(spots=[])
             self._cop_arr.setData([], [])
@@ -633,8 +624,6 @@ class RealTimePlot:
                 t.setText("")
             self._grad_cop_dots.setData(spots=[])
 
-        # TODO(deprecated): 以下 FPS 计算死代码 - 当前未启用（保留作为扩展点）
-        # FPS
     @staticmethod
     def _html(text, color, size=16):
         return f'<span style="color:{color};font-size:{size}pt;font-weight:bold">{text}</span>'
@@ -644,8 +633,7 @@ class RealTimePlot:
         w = self.win.width()
         return max(int(base * w / 1900), 7)
 
-    # TODO(deprecated): _u1 参数 color/pzt_val/pzt_label/txt_r 死代码 - 当前未使用（保留作为扩展点）
-    def _u1(self, curve, plot, data, txt, label, color='red', pzt_val=None, pzt_label=None, txt_r=None, fs=16):
+    def _u1(self, curve, plot, data, txt, label, color='red', fs=16):
         if data:
             xs = list(range(len(data)))
             curve.setData(xs, data)
@@ -653,14 +641,8 @@ class RealTimePlot:
             lo, hi = _yrange(data)
             plot.setYRange(lo, hi, padding=0)
             span = hi - lo if hi != lo else 1
-            if txt_r and pzt_val is not None:
-                txt.setHtml(self._html(f'True_{label}={data[-1]:.2f}', color, fs))
-                txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
-                txt_r.setHtml(self._html(f'{pzt_label}={pzt_val:.2f}', 'red', fs))
-                txt_r.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.19)
-            else:
-                txt.setHtml(self._html(f'{label}={data[-1]:.2f}', color, fs))
-                txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
+            txt.setHtml(self._html(f'{label}={data[-1]:.2f}', color, fs))
+            txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
 
     def _u2(self, c1, c2, plot, d1, d2, txt, label, color='blue', txt_r=None, fs=16):
         if d1:

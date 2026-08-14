@@ -1,7 +1,5 @@
 """六维力/标定力等标量角度工具（PZT/CoP 由 main 直接调用 package_note）。"""
 
-from collections import deque
-
 import numpy as np
 
 

@@ -7,6 +7,7 @@ import time
 import struct
 from collections import deque
 import threading
+import numpy as np
 
 DATA_BAUDRATE_PRESS = 921600  # 压力传感器串口波特率
 DATA_BAUDRATE_FORCE = 460800  # 六维力传感器串口波特率
@@ -15,12 +16,25 @@ DATA_BAUDRATE_FORCE = 460800  # 六维力传感器串口波特率
 PRESSURE_SENSOR_PORT = "/dev/ttyUSB0"   # 压阻
 FORCE_SENSOR_PORT = "/dev/ttyUSB1"      # 六维力
 
+# 压阻阵列几何（14 行 × 5 列 = 70 通道，行优先）
+PRESSURE_ROWS = 14
+PRESSURE_COLS = 5
+PRESSURE_CELLS = PRESSURE_ROWS * PRESSURE_COLS        # 70
+PRESSURE_PAYLOAD_LEN = PRESSURE_CELLS * 2             # 140
+PRESSURE_FRAME_LEN = 14 + PRESSURE_PAYLOAD_LEN + 1    # 155: 14B 头 + 140B payload + 1B CRC
+
+# 活跃接触区: 只关注 2×2 块（1-based 坐标 (4,2)(4,3)(5,2)(5,3) → 0-based 行[3,4] 列[1,2]）
+# 读取时掩码, 其余 cell 置 0, 所有下游操作只看该区域
+PRESSURE_ACTIVE_R0, PRESSURE_ACTIVE_R1 = 3, 5   # 0-based 行 [3, 5)
+PRESSURE_ACTIVE_C0, PRESSURE_ACTIVE_C1 = 1, 3   # 0-based 列 [1, 3)
+
 # ===================== 压力传感器 =====================
 class PressureSensor:
+    # 请求帧: data[11-12]=读取数据长度(140 LE=0x8C 0x00), data[13]=CRC-8-ITU
     CMD_BYTES = bytes([0x55, 0xAA, 0x09, 0x00, 0x34, 0x00,
-                       0xFB, 0x00, 0x1C, 0x00, 0x00, 0xA8, 0x00, 0x35])
-    FRAME_LEN = 183              # 14B header + 168B payload + 1B status
-    MAX_RX_BUF = 4096            # 缓存区大小
+                       0xFB, 0x00, 0x1C, 0x00, 0x00, 0x8C, 0x00, 0xCF])
+    FRAME_LEN = PRESSURE_FRAME_LEN   # 155 = 14B 头 + 140B payload + 1B CRC
+    MAX_RX_BUF = 4096                # 缓存区大小
 
     def __init__(self):
         self.ser = None
@@ -39,16 +53,6 @@ class PressureSensor:
         self.ser = serial.Serial(self.port, DATA_BAUDRATE_PRESS, timeout=0.01)
         time.sleep(0.1)
         self.ser.reset_input_buffer()
-
-    # TODO(deprecated): reconnect 死代码 - 当前未使用（保留作为扩展点）
-    def reconnect(self):
-        try:
-            if self.ser and self.ser.is_open:
-                self.ser.close()
-        except:
-            pass
-        time.sleep(0.2)
-        self.open_port()
 
     @staticmethod
     def crc8_itu(data: bytes) -> int:
@@ -105,26 +109,27 @@ class PressureSensor:
                 pass
 
     def read_data(self):
-        """读一帧删一帧: 解析 _rx_buf 头部, 成功返回 168B payload 并删除, 失败整段/单字节删除"""
+        """读一帧删一帧: 解析 _rx_buf 头部, 成功返回 140B payload 并删除, 失败整段/单字节删除"""
         with self._rx_lock:  # 整个解析逻辑在锁内, 防止与 _rx_loop race
             for _ in range(100):  # safety: 防止坏数据卡死
                 if len(self._rx_buf) < self.FRAME_LEN:
-                    return None  # 不够 183B, 等下次 read 补齐
+                    return None  # 不够 155B, 等下次 read 补齐
 
                 if self._rx_buf[0:2] != b'\xaa\x55':
                     del self._rx_buf[:1]   # 不是真同步头, 滑 1 字节
                     continue
 
-                # buf[0:2] == AA 55, 长度够 183B
+                # buf[0:2] == AA 55, 长度够 155B
                 if self._rx_buf[13] != 0:
                     del self._rx_buf[:self.FRAME_LEN]   # status 错, 整段错误帧丢弃
                     continue
-                if self.crc8_itu(bytes(self._rx_buf[:182])) != self._rx_buf[182]:
+                crc_idx = 14 + PRESSURE_PAYLOAD_LEN    # CRC 位置 = 帧尾
+                if self.crc8_itu(bytes(self._rx_buf[:crc_idx])) != self._rx_buf[crc_idx]:
                     del self._rx_buf[:self.FRAME_LEN]   # CRC 错, 整段错误帧丢弃
                     continue
 
-                # 校验通过, 提取 168B payload
-                payload = bytes(self._rx_buf[14:182])
+                # 校验通过, 提取 payload
+                payload = bytes(self._rx_buf[14:crc_idx])
                 del self._rx_buf[:self.FRAME_LEN]
                 return payload
 
@@ -133,12 +138,13 @@ class PressureSensor:
             return None
 
     def decode(self, raw):
-        """raw = 168 字节 payload (84 个 uint16 LE, 12×7)"""
-        arr = [struct.unpack("<H", raw[i:i+2])[0] for i in range(0, 168, 2)]
-        out = []
-        for i in range(12):
-            out.extend(arr[i*7:(i+1)*7])
-        return out
+        """raw = 140 字节 payload (70 个 uint16 LE, 14×5, 行优先)。
+        只保留 2×2 活跃接触区（行3-4、列1-2, 0-based），其余 cell 置 0。"""
+        arr = [struct.unpack("<H", raw[i:i+2])[0] for i in range(0, PRESSURE_PAYLOAD_LEN, 2)]
+        grid = np.asarray(arr, dtype=np.float64).reshape(PRESSURE_ROWS, PRESSURE_COLS)
+        mask = np.zeros((PRESSURE_ROWS, PRESSURE_COLS), dtype=np.float64)
+        mask[PRESSURE_ACTIVE_R0:PRESSURE_ACTIVE_R1, PRESSURE_ACTIVE_C0:PRESSURE_ACTIVE_C1] = 1.0
+        return (grid * mask).flatten().tolist()
 
     def close(self):
         self._running = False
@@ -171,16 +177,6 @@ class SixAxisForceSensor:
         self.ser = serial.Serial(self.port, DATA_BAUDRATE_FORCE, timeout=0.01)
         time.sleep(0.1)
         self.ser.reset_input_buffer()
-
-    # TODO(deprecated): reconnect 死代码 - 当前未使用（保留作为扩展点）
-    def reconnect(self):
-        try:
-            if self.ser and self.ser.is_open:
-                self.ser.close()
-        except:
-            pass
-        time.sleep(0.2)
-        self.open_port()
 
     def _fill_rx_buf(self):
         """把串口当前可读字节追加进 _rx_buf (调用方须持 _io_lock);

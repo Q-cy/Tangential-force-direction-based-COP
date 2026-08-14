@@ -2,23 +2,18 @@
 
 import os
 import csv
-import numpy as np
 
-TABLE_CSV_HEADER = [  # CSV 文件表头（84通道 + 时间戳 + 力/角度/标定数据）
+PRESSURE_CHANNELS = 70   # 压阻阵列通道数（14 行 × 5 列）
+
+# 差值梯度 8 列: 4 活跃 cell (0-based 行3-4, 列1-2) × grad_x/grad_y
+_GRAD_DELTA_CELLS = [(3, 1), (3, 2), (4, 1), (4, 2)]
+GRAD_DELTA_COLS = ([f"grad_x_d{r}c{c}" for r, c in _GRAD_DELTA_CELLS]
+                   + [f"grad_y_d{r}c{c}" for r, c in _GRAD_DELTA_CELLS])
+
+TABLE_CSV_HEADER = [  # CSV 文件表头（70通道 + 时间戳 + 力/角度/标定数据）
     "timestamp", "rel_ms", "adc_sum",
-    # ch1 ~ ch84
-    "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7",
-    "ch8", "ch9", "ch10", "ch11", "ch12", "ch13", "ch14",
-    "ch15", "ch16", "ch17", "ch18", "ch19", "ch20", "ch21",
-    "ch22", "ch23", "ch24", "ch25", "ch26", "ch27", "ch28",
-    "ch29", "ch30", "ch31", "ch32", "ch33", "ch34", "ch35",
-    "ch36", "ch37", "ch38", "ch39", "ch40", "ch41", "ch42",
-    "ch43", "ch44", "ch45", "ch46", "ch47", "ch48", "ch49",
-    "ch50", "ch51", "ch52", "ch53", "ch54", "ch55", "ch56",
-    "ch57", "ch58", "ch59", "ch60", "ch61", "ch62", "ch63",
-    "ch64", "ch65", "ch66", "ch67", "ch68", "ch69", "ch70",
-    "ch71", "ch72", "ch73", "ch74", "ch75", "ch76", "ch77",
-    "ch78", "ch79", "ch80", "ch81", "ch82", "ch83", "ch84",
+    # ch1 ~ ch70
+    *[f"ch{i}" for i in range(1, PRESSURE_CHANNELS + 1)],
     # 力传感器数据
     "Fx", "Fy", "Fz", "Mx", "My", "Mz",
     # 时间戳相关
@@ -27,6 +22,8 @@ TABLE_CSV_HEADER = [  # CSV 文件表头（84通道 + 时间戳 + 力/角度/标
     "delta_CoP_X", "delta_CoP_Y",
     # 新增 Force 分量
     "delta_Force_X", "delta_Force_Y", "delta_Force_Z",
+    # 差值梯度分量 (当前-初始)
+    *GRAD_DELTA_COLS,
     # 角度
     "ADC_angle", "Force_angle",
     # 标定后的切向力
@@ -66,7 +63,7 @@ def init_csv_file(file_path: str) -> tuple[csv.writer, object]:
 def build_csv_row(
     press_timestamp: float,  # 压力传感器时间戳（秒）
     rel_ms: int,             # 相对毫秒数
-    ch_data: list,           # 84通道压力数据
+    ch_data: list,           # 70通道压力数据
     force_data: list,        # 六维力传感器数据 [Fx,Fy,Fz,Mx,My,Mz]
     force_timestamp: float,  # 力传感器时间戳（秒）
     delta_cop_x: float,      # 新增 CoP 偏移X分量
@@ -76,11 +73,12 @@ def build_csv_row(
     delta_force_z: float,
     adc_angle: float,        # ADC角度
     force_angle: float,      # 力传感器角度
+    grad_delta_cols: list = None,  # 差值梯度 8 列 (4活跃cell × grad_x/grad_y)
     fx_cal: float = None,    # 标定后切向力 X (N)
     fy_cal: float = None,    # 标定后切向力 Y (N)
     force_cal_angle: float = None, # 标定后角度 (deg)
     cop_state: int = 0,            # 接触状态: 0=未接触, 1=等待稳定, 2=测量中
-    adc_sum: float = 0.0,          # ADC 84通道之和
+    adc_sum: float = 0.0,          # ADC 70通道之和
     valid: int = 0,                # 有效行标记: 1=接触帧有效, 0=无效 (训练筛选用)
 ) -> list:
     """
@@ -94,8 +92,8 @@ def build_csv_row(
     csv_row = [
         press_timestamp * 1000,  # timestamp：转换为毫秒级
         rel_ms,                  # rel_ms：相对开始时间的毫秒数
-        adc_sum,                 # adc_sum：ADC 84通道之和
-        *ch_data,                # ch1~ch84：压力传感器84通道数据
+        adc_sum,                 # adc_sum：ADC 70通道之和
+        *ch_data,                # ch1~ch70：压力传感器70通道数据
         *force_data,             # Fx,Fy,Fz,Mx,My,Mz：力传感器数据
         press_timestamp,         # press_t：压力传感器原始时间戳（秒）
         force_timestamp,         # force_t：力传感器原始时间戳（秒）
@@ -105,6 +103,7 @@ def build_csv_row(
         delta_force_x,
         delta_force_y,
         delta_force_z,
+        *(grad_delta_cols if grad_delta_cols is not None else [float('nan')] * len(GRAD_DELTA_COLS)),
         adc_angle,               # ADC_angle：PZT计算的角度
         force_angle,             # Force_angle：力传感器计算的角度
         fx_cal if fx_cal is not None else float('nan'),

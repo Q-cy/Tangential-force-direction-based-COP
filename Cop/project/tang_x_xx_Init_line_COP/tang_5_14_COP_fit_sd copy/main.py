@@ -8,18 +8,19 @@ import threading
 from pyqtgraph.Qt import QtWidgets
 import sys
 
-from data import PressureSensor, SixAxisForceSensor, TimestampedBuffer, match_closest
+from data import (PressureSensor, SixAxisForceSensor, TimestampedBuffer, match_closest,
+                  PRESSURE_ROWS, PRESSURE_COLS, PRESSURE_CELLS,
+                  PRESSURE_ACTIVE_R0, PRESSURE_ACTIVE_R1, PRESSURE_ACTIVE_C0, PRESSURE_ACTIVE_C1)
 from realtime import RealTimePlot
 from table import auto_get_csv_path, init_csv_file, build_csv_row
 from fit import load_coefs, apply_predict_multi
 import tang_7_12_InitCOP_realtime_other_package as pzt
-from tang_7_12_InitCOP_realtime_package_note import PZTSensorAngle
+from tang_7_12_InitCOP_realtime_package_note import PRSensorAngle
 
 # ===================== 配置 =====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MAIN_SAVE_DIR = os.path.join(BASE_DIR,"../../../../../../../data/2.PZT_tangential/weight/test")  # 数据保存根目录
 fit_coefs_path = os.path.join(BASE_DIR,"./fit_coefs.bin")   # fit 模型路径
-MAIN_CAL_MODE = "fit"                       # 唯一支持的标定模式（calibrate.py 已移除）
 MAIN_CAL_DIM = "3D"                         # "2D"=仅切向力(Fx,Fy), "3D"=三维力(Fz,Fx,Fy)
 MAIN_REFINE_REZERO_FORCE = True             # True=COP二次精修后重新置零六维力
 
@@ -27,9 +28,8 @@ MAIN_TARGET_FPS = 100                      # sub thread 限速 (Hz), 防止 GIL 
 MAIN_READ_INTERVAL_S = 0.005               # 采集线程读取间隔(秒)，0.005=200Hz tick (sensor 帧间隔 ~12ms)
 MAIN_PLOT_FPS = 60                         # plot set_data 限速 (Hz), 防止 GUI 卡顿
 MAIN_MAX_TIME_DIFF_S = 0.015               # 压力-力传感器最大时间匹配差(秒)
-MAIN_REGION_MODE = "both"                  # "full"=仅整帧计算, "region"=仅分region计算, "both"=两者同时
+MAIN_REGION_MODE = "full"                  # "full"=仅整帧计算, "region"=仅分region计算, "both"=两者同时
 g_main_stop_flag = threading.Event()       # 全局停止信号
-plot = None                                # 绘图对象引用
 
 # ===================== 采集线程 =====================
 class PressureThread(threading.Thread):
@@ -40,7 +40,6 @@ class PressureThread(threading.Thread):
     def run(self):
         while not g_main_stop_flag.is_set():
             ts = time.perf_counter()
-
             raw = self.s.read_data()
             if raw:
                 try:
@@ -124,13 +123,28 @@ def data_loop(plot):
     buf_force_fy = deque(maxlen=median_filt_window)
     buf_force_fz = deque(maxlen=median_filt_window)
 
-    cop_sensor = PZTSensorAngle()  # 每帧唯一推进 CoP 状态的入口
+    cop_sensor = PRSensorAngle(rows=PRESSURE_ROWS, cols=PRESSURE_COLS,
+                               active_r0=PRESSURE_ACTIVE_R0, active_r1=PRESSURE_ACTIVE_R1,
+                               active_c0=PRESSURE_ACTIVE_C0, active_c1=PRESSURE_ACTIVE_C1)  # 每帧唯一推进 CoP 状态的入口
 
     _NAN6 = [float('nan')] * 6  # 力传感器占位
     _prev_refined = False       # COP精修状态（用于检测跳变）
     _prev_contact = False       # COP接触状态（用于检测力卸载）
     _last_plot_t = 0.0           # plot 节流: 上次 plot 更新时间
     PLOT_INTERVAL_S = 1.0 / MAIN_PLOT_FPS   # plot 限速间隔 (秒)
+
+    def _rezero_force(reason: str):
+        """10帧平均力值后累加 Fx/Fy 零点偏差（精修/卸载归零共用）"""
+        vals = []
+        for _ in range(10):
+            d = sensor_force.read()
+            if d:
+                vals.append(d)
+            time.sleep(0.001)
+        if vals:
+            avg = np.mean(vals, axis=0)
+            sensor_force.add_zero_bias(avg[0], avg[1])
+            print(f"🔄 {reason}，Fx/Fy已归零")
 
     while not g_main_stop_flag.is_set():
         loop_start_s = time.perf_counter()
@@ -172,7 +186,7 @@ def data_loop(plot):
                 pzt_angle_deg, cop_delta_x, cop_delta_y, cop_curr_x, cop_curr_y = cop_sensor.get_all(base_sub_arr)
                 origin_x, origin_y = cop_sensor.get_origin()
                 cop_state = cop_sensor.get_state()
-                gradient_arr = cop_sensor.get_gradient(base_sub_arr)
+                gradient_arr = cop_sensor.get_gradient_delta(base_sub_arr)
                 centroid_xy = cop_sensor._compute_centroid(frame2d)
             else:
                 pzt_angle_deg = 0.0
@@ -180,7 +194,7 @@ def data_loop(plot):
                 cop_curr_x = cop_curr_y = float('nan')
                 origin_x = origin_y = None
                 cop_state = 0
-                gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)
+                gradient_arr = np.zeros((PRESSURE_ROWS, PRESSURE_COLS, 2), dtype=np.float32)
                 centroid_xy = None
             contact_init = cop_state > 0
 
@@ -196,6 +210,11 @@ def data_loop(plot):
             else:
                 region_list = []
                 region_mask = np.zeros((cop_sensor.rows, cop_sensor.cols), dtype=np.int32)
+            # regions模式(不跑整帧): 用"任一 region 已锁 origin"驱动实时显示;
+            # CSV/录制/力归零仍由整帧 contact_init 决定, 故不改动 cop_state。
+            contact_init_display = contact_init
+            if use_region and not use_full:
+                contact_init_display = any(r.get('contact_init', False) for r in region_list)
             refined = cop_state == 2
             total_press_val = float(np.sum(press_item["data"]))
             pzt_table_angle_deg = (-pzt_angle_deg) % 360.0
@@ -205,36 +224,13 @@ def data_loop(plot):
                   f"cop=({cop_curr_x:.2f},{cop_curr_y:.2f})")
 
             # COP精修完成后重新归零 Fx/Fy（Fz不变，10帧平均）
-            if MAIN_REFINE_REZERO_FORCE and has_force:
-                if refined and not _prev_refined:
-                    def _rezero():
-                        vals = []
-                        for _ in range(10):
-                            d = sensor_force.read()
-                            if d:
-                                vals.append(d)
-                            time.sleep(0.001)
-                        if vals:
-                            avg = np.mean(vals, axis=0)
-                            sensor_force.add_zero_bias(avg[0], avg[1])
-                            print("🔄 COP精修完成，Fx/Fy已归零")
-                    threading.Thread(target=_rezero, daemon=True).start()
+            if MAIN_REFINE_REZERO_FORCE and has_force and refined and not _prev_refined:
+                threading.Thread(target=_rezero_force, args=("COP精修完成",), daemon=True).start()
             _prev_refined = refined
 
             # 力卸载后COP重置 → 六维力归零
             if has_force and _prev_contact and not contact_init:
-                def _rezero_unload():
-                    vals = []
-                    for _ in range(10):
-                        d = sensor_force.read()
-                        if d:
-                            vals.append(d)
-                        time.sleep(0.001)
-                    if vals:
-                        avg = np.mean(vals, axis=0)
-                        sensor_force.add_zero_bias(avg[0], avg[1])
-                        print("🔄 力卸载，Fx/Fy已归零")
-                threading.Thread(target=_rezero_unload, daemon=True).start()
+                threading.Thread(target=_rezero_force, args=("力卸载",), daemon=True).start()
             _prev_contact = contact_init
 
             buf_cop_delta_x.append(cop_delta_x)
@@ -242,7 +238,7 @@ def data_loop(plot):
             cop_delta_x_filt = float(np.median(buf_cop_delta_x))
             cop_delta_y_filt = float(np.median(buf_cop_delta_y))
         else:
-            base_sub_arr = np.zeros(84)
+            base_sub_arr = np.zeros(PRESSURE_CELLS)
             cop_curr_x = cop_curr_y = cop_delta_x = cop_delta_y = float('nan')
             origin_x = origin_y = None
             centroid_xy = None
@@ -253,7 +249,7 @@ def data_loop(plot):
             cop_state = 0
             contact_init = False
             refined = False
-            gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)
+            gradient_arr = np.zeros((PRESSURE_ROWS, PRESSURE_COLS, 2), dtype=np.float32)
 
         # ---- 计算 Force ----
         # 滤波队列只接收匹配帧 (F5): 保证行内 force 各列 (raw+滤波+角度) 来自同一匹配帧序列
@@ -303,11 +299,18 @@ def data_loop(plot):
         press_ts = press_item["t"] if press_item is not None else None
         force_ts_now = csv_force_item["t"] if csv_force_item is not None else None
 
+        # 差值梯度 8 列 (4 活跃 cell × grad_x/grad_y, 与表头 grad_x/y_d{r}c{c} 顺序一致)
+        _gx = gradient_arr[:, :, 0]
+        _gy = gradient_arr[:, :, 1]
+        _cells = [(r, c) for r in range(PRESSURE_ACTIVE_R0, PRESSURE_ACTIVE_R1)
+                  for c in range(PRESSURE_ACTIVE_C0, PRESSURE_ACTIVE_C1)]
+        grad_delta_8 = [float(_gx[r, c]) for r, c in _cells] + [float(_gy[r, c]) for r, c in _cells]
+
         if write_row:
             csv_row = build_csv_row(
                 press_timestamp=press_ts if press_ts is not None else float('nan'),
                 rel_ms=rel_time_ms,
-                ch_data=press_item["data"] if press_item is not None else [0]*84,
+                ch_data=press_item["data"] if press_item is not None else [0]*PRESSURE_CELLS,
                 force_data=force_data_out,
                 force_timestamp=force_ts_now if force_ts_now is not None else float('nan'),
                 delta_cop_x=cop_delta_x_filt,
@@ -315,6 +318,7 @@ def data_loop(plot):
                 delta_force_x=force_fx_filt,
                 delta_force_y=force_fy_filt,
                 delta_force_z=force_fz_filt,
+                grad_delta_cols=grad_delta_8,
                 adc_angle=pzt_angle_deg,
                 force_angle=force_angle_deg,
                 fx_cal=cal_fx_val,
@@ -336,10 +340,10 @@ def data_loop(plot):
                 cop_curr_x, cop_curr_y, origin_x, origin_y,
                 cop_delta_x_filt, cop_delta_y_filt,
                 force_fx_filt, force_fy_filt, force_fz_filt,
-                cal_fx_val, cal_fy_val, cal_fz_val, cal_angle_deg,
+                cal_fx_val, cal_fy_val, cal_fz_val,
                 cop_state=cop_state,
                 gradient=gradient_arr,
-                contact_init=contact_init,
+                contact_init=contact_init_display,
                 refined=refined,
                 pzt_table_angle_deg=pzt_table_angle_deg,
                 region_mask=region_mask,
@@ -385,7 +389,7 @@ def main():
     if app is None:
         app = QtWidgets.QApplication(sys.argv)                          # argument vector
 
-    plot = RealTimePlot()
+    plot = RealTimePlot(rows=PRESSURE_ROWS, cols=PRESSURE_COLS)
     data_thread = threading.Thread(target=data_loop, args=(plot,))      # arguments 
     data_thread.start()
 
