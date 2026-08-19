@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tangential-sensor"
-version = "0.1.0"
+version = "0.2.0"
 description = "12x7 tactile pressure acquisition and tangential force processing API"
 readme = "readme.md"
 requires-python = ">=3.11"
@@ -28,5 +28,5 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.data-files]
-"share/tangential" = ["fit_coefs.bin"]
+[tool.setuptools.package-data]
+"tangential.resources" = ["fit_coefs.bin"]

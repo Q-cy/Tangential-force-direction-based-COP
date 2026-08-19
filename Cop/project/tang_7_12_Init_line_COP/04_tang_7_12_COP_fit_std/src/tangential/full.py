@@ -1,5 +1,6 @@
 """完整采集示例使用的线程、会话、CSV、同步和 GUI 辅助层。"""
 
+import inspect
 import os
 import queue
 import sys
@@ -22,7 +23,7 @@ from .storage.csv import auto_get_csv_path, build_csv_row, init_csv_file
 
 DEFAULT_CONFIG = FullApplicationConfig()
 MAIN_SAVE_DIR = DEFAULT_CONFIG.save_dir
-fit_coefs_path = DEFAULT_CONFIG.fit_coefs_path
+model_path = DEFAULT_CONFIG.model_path
 MAIN_CAL_DIM = DEFAULT_CONFIG.cal_dim
 MAIN_REFINE_REZERO_FORCE = DEFAULT_CONFIG.refine_rezero_force
 MAIN_TARGET_FPS = DEFAULT_CONFIG.target_fps
@@ -35,6 +36,28 @@ MAIN_ZERO_TIMEOUT_S = DEFAULT_CONFIG.zero_timeout_s
 MAIN_REZERO_TIMEOUT_S = DEFAULT_CONFIG.rezero_timeout_s
 
 g_main_stop_flag = threading.Event()
+
+
+def _construct_sensor(factory, port):
+    """构造真实传感器并保留无参测试工厂的注入能力。"""
+    try:
+        signature = inspect.signature(factory)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None:
+        parameters = signature.parameters.values()
+        accepts_port = (
+            "port" in signature.parameters
+            or any(parameter.kind == inspect.Parameter.VAR_KEYWORD
+                   for parameter in parameters)
+        )
+        if accepts_port:
+            return factory(port=port)
+        return factory()
+    try:
+        return factory(port=port)
+    except TypeError:
+        return factory()
 
 
 def compute_6Dforce_angle(fx: float, fy: float) -> float:
@@ -167,14 +190,18 @@ class FullAcquisitionSession:
             return self
         self.stop_event.clear()
         try:
-            self.sensor_press = self.pressure_factory()
+            self.sensor_press = _construct_sensor(
+                self.pressure_factory, self.config.pressure_port
+            )
         except Exception as exc:
             raise RuntimeError(f"压力传感器未连接: {exc}") from exc
         self.buf_press = TimestampedBuffer(self.config.buffer_size)
         print("✅ 压力传感器就绪")
 
         try:
-            self.sensor_force = self.force_factory()
+            self.sensor_force = _construct_sensor(
+                self.force_factory, self.config.force_port
+            )
             if not self.sensor_force.calibrate_zero(
                 sample_count=self.config.zero_sample_count,
                 timeout_s=self.config.zero_timeout_s,
@@ -199,14 +226,19 @@ class FullAcquisitionSession:
         self.csv_path = auto_get_csv_path(self.config.save_dir)
         self.csv_writer, self.csv_file_obj = init_csv_file(self.csv_path)
 
-        calibration = FitCalibrationModel.from_path(self.config.fit_coefs_path)
+        calibration = (
+            FitCalibrationModel.from_default()
+            if self.config.model_path is None
+            else FitCalibrationModel.from_path(self.config.model_path)
+        )
         if calibration.available:
             summary = ", ".join(
                 f"{entry[1]}{'(split)' if entry[2] else ''}"
                 for entry in calibration.params_list
             )
             print(
-                f"📐 fit模型已加载: {self.config.fit_coefs_path} "
+                f"📐 fit模型已加载: "
+                f"{calibration.path or 'tangential.resources/fit_coefs.bin'} "
                 f"(outputs: {summary})"
             )
         elif calibration.error is not None:

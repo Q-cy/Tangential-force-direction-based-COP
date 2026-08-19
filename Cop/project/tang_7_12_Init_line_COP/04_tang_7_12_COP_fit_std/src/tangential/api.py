@@ -6,10 +6,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .config import default_model_path
 from .processing.calibration import FitCalibrationModel
 from .processing.cop import PRSensorAngle
-from .sensors.pressure import PressureSensor
+from .sensors.pressure import PRESSURE_SENSOR_PORT, PressureSensor
 
 
 def compute_vector_angle(x: float, y: float) -> float:
@@ -204,16 +203,19 @@ class TangentialSensorAPI:
     """最小压力采集 API；负责设备生命周期并返回 ``TangentialSample``。"""
 
     def __init__(self, sensor=None, processor=None, sensor_factory=None,
-                 model_path=None):
+                 model_path=None, pressure_port=PRESSURE_SENSOR_PORT):
         if sensor is None:
             if sensor_factory is None:
                 sensor_factory = PressureSensor
-            sensor = sensor_factory()
+            sensor = sensor_factory(port=pressure_port)
         if processor is None:
-            if model_path is None:
-                model_path = default_model_path()
+            calibration = (
+                FitCalibrationModel.from_default()
+                if model_path is None
+                else FitCalibrationModel.from_path(model_path)
+            )
             processor = TangentialFrameProcessor(
-                calibration=FitCalibrationModel.from_path(model_path)
+                calibration=calibration
             )
         self.sensor = sensor
         self.processor = processor

@@ -1,15 +1,26 @@
 import unittest
 
-from fit import apply_predict_multi, load_coefs
+from src.tangential.processing.calibration import (
+    apply_fit_predict_multi,
+    FitCalibrationModel,
+)
 from table import TABLE_CSV_HEADER, build_csv_row
 
 
 class RegressionTests(unittest.TestCase):
     def test_existing_model_predictions_are_unchanged(self):
-        fit_type, n_inputs, params, split = load_coefs("fit_coefs.bin")
-        self.assertEqual(n_inputs, 1)
-        self.assertEqual([entry[1] for entry in params], ["sym_log", "sym_log", "exp"])
-        result = apply_predict_multi([0.1, 0.1, 100000], params, fit_type, split)
+        model = FitCalibrationModel.from_default()
+        self.assertTrue(model.available)
+        self.assertEqual(
+            [entry[1] for entry in model.params_list],
+            ["sym_log", "sym_log", "exp"],
+        )
+        result = apply_fit_predict_multi(
+            [0.1, 0.1, 100000],
+            model.params_list,
+            model.fit_type,
+            model.split_sign,
+        )
         expected = [1.4477653909084447, 0.6436570586070975, -3.5036069423285605]
         for actual, wanted in zip(result, expected):
             self.assertAlmostEqual(actual, wanted, places=12)

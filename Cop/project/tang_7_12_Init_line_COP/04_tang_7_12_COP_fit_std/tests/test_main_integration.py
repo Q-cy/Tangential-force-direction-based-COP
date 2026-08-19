@@ -170,7 +170,7 @@ class MainLoopIntegrationTests(unittest.TestCase):
     def run_loop(self, directory, force_cls=FakeForce):
         config = FullApplicationConfig(
             save_dir=directory,
-            fit_coefs_path=os.path.join(directory, "missing.bin"),
+            model_path=os.path.join(directory, "missing.bin"),
             target_fps=1000,
             max_time_diff_s=0.015,
         )
@@ -189,7 +189,7 @@ class MainLoopIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = FullApplicationConfig(
                 save_dir=directory,
-                fit_coefs_path=os.path.join(directory, "missing.bin"),
+                model_path=os.path.join(directory, "missing.bin"),
             )
             with self.assertRaisesRegex(RuntimeError, "压力传感器未连接"):
                 main.data_loop(
@@ -273,7 +273,7 @@ class MainLoopIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = FullApplicationConfig(
                 save_dir=directory,
-                fit_coefs_path=os.path.join(directory, "missing.bin"),
+                model_path=os.path.join(directory, "missing.bin"),
                 target_fps=1000,
             )
             with self.assertRaisesRegex(RuntimeError, "plot failed"):

@@ -39,6 +39,7 @@ class DistributionConfigurationTests(unittest.TestCase):
 
         project = config["project"]
         self.assertEqual(project["name"], "tangential-sensor")
+        self.assertEqual(project["version"], "0.2.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(
             set(project["dependencies"]),
@@ -56,13 +57,17 @@ class DistributionConfigurationTests(unittest.TestCase):
             ["src"],
         )
         self.assertEqual(
-            config["tool"]["setuptools"]["data-files"]["share/tangential"],
-            ["fit_coefs.bin"],
+            config["tool"]["setuptools"]["package-data"],
+            {"tangential.resources": ["fit_coefs.bin"]},
         )
+        self.assertNotIn("data-files", config["tool"]["setuptools"])
 
     def test_manifest_keeps_model_in_source_distribution(self):
         manifest = PROJECT_ROOT / "MANIFEST.in"
-        self.assertIn("include fit_coefs.bin", manifest.read_text())
+        self.assertIn(
+            "recursive-include src/tangential/resources *.bin",
+            manifest.read_text(),
+        )
 
 
 @unittest.skipUnless(
@@ -74,10 +79,9 @@ class PublicImportTests(unittest.TestCase):
         command = (
             "import sys; "
             "from tangential import FitCalibrationModel, TangentialSample, TangentialSensor; "
-            "from tangential.config import default_model_path; "
             "assert TangentialSample is not None; "
             "assert TangentialSensor is not None; "
-            "model = FitCalibrationModel.from_path(default_model_path()); "
+            "model = FitCalibrationModel.from_default(); "
             "assert model.available; "
             "assert abs(model.predict(0.1, 0.1, 100000)[0] - 1.4477653909084447) < 1e-12; "
             "assert 'pyqtgraph' not in sys.modules"
@@ -107,12 +111,7 @@ class WheelDistributionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source_dir = Path(directory) / "source"
             source_dir.mkdir()
-            for filename in (
-                "pyproject.toml",
-                "MANIFEST.in",
-                "readme.md",
-                "fit_coefs.bin",
-            ):
+            for filename in ("pyproject.toml", "MANIFEST.in", "readme.md"):
                 shutil.copy2(PROJECT_ROOT / filename, source_dir / filename)
             shutil.copytree(SOURCE_ROOT, source_dir / "src")
             wheel_dir = Path(directory) / "wheel"
@@ -144,8 +143,9 @@ class WheelDistributionTests(unittest.TestCase):
             with zipfile.ZipFile(wheel_path) as archive:
                 names = set(archive.namelist())
                 self.assertTrue(any(name.startswith("tangential/") for name in names))
-                self.assertIn(
-                    "tangential_sensor-0.1.0.data/data/share/tangential/fit_coefs.bin",
+                self.assertIn("tangential/resources/fit_coefs.bin", names)
+                self.assertNotIn(
+                    "tangential_sensor-0.2.0.data/data/share/tangential/fit_coefs.bin",
                     names,
                 )
 
@@ -174,10 +174,9 @@ class WheelDistributionTests(unittest.TestCase):
             command = (
                 "import sys; "
                 "from tangential import FitCalibrationModel, TangentialSample, TangentialSensor; "
-                "from tangential.config import default_model_path; "
                 "assert TangentialSample is not None; "
                 "assert TangentialSensor is not None; "
-                "model = FitCalibrationModel.from_path(default_model_path()); "
+                "model = FitCalibrationModel.from_default(); "
                 "assert model.available; "
                 "assert abs(model.predict(0.1, 0.1, 100000)[0] - 1.4477653909084447) < 1e-12; "
                 "assert 'pyqtgraph' not in sys.modules"

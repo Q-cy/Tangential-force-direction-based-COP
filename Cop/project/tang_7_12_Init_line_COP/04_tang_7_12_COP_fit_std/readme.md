@@ -12,13 +12,13 @@
 普通用户推荐安装 wheel。核心压力 API 不安装 GUI：
 
 ```bash
-python -m pip install tangential_sensor-0.1.0-py3-none-any.whl
+python -m pip install tangential_sensor-0.2.0-py3-none-any.whl
 ```
 
 需要完整 GUI 时安装可选依赖：
 
 ```bash
-python -m pip install "tangential_sensor-0.1.0-py3-none-any.whl[full]"
+python -m pip install "tangential_sensor-0.2.0-py3-none-any.whl[full]"
 ```
 
 推荐使用独立环境：
@@ -73,6 +73,7 @@ src/tangential/
 ├── config.py                    # 配置和模型资源路径
 ├── sensors/                     # 压力与六维力串口驱动
 ├── processing/                  # CoP、梯度和运行时标定
+├── resources/                   # wheel 内置 fit_coefs.bin
 ├── acquisition/                 # 时间戳缓存与同步
 ├── storage/                     # 108列 CSV
 ├── gui/                         # 可选 PyQtGraph GUI
@@ -80,6 +81,9 @@ src/tangential/
 ```
 
 根目录的兼容模块只转发到 `src/tangential/`，新的功能只在标准包中实现。
+
+`fit_coefs.bin` 是 `tangential.resources` 的静态 package data，安装 wheel 后由
+运行时直接从 package resource 读取；设置 `TANGENTIAL_MODEL_PATH` 可覆盖为外部模型文件。
 
 构建 wheel：
 

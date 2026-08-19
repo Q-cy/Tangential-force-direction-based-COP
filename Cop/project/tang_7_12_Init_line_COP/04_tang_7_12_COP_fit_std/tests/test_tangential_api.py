@@ -2,6 +2,7 @@ import ast
 import io
 import pathlib
 import unittest
+from importlib import resources
 from unittest import mock
 
 import numpy as np
@@ -174,6 +175,35 @@ class TangentialApiTests(unittest.TestCase):
         self.assertEqual(sensor.read_count, 1)
         self.assertTrue(sensor.closed)
 
+    def test_sensor_api_passes_pressure_port_to_factory(self):
+        calls = []
+
+        def factory(*, port):
+            calls.append(port)
+            return FakePressureSensor([])
+
+        processor, _, _ = self.make_processor()
+        api = package.TangentialSensorAPI(
+            processor=processor,
+            sensor_factory=factory,
+            pressure_port="/dev/test-pressure",
+        )
+        api.close()
+        self.assertEqual(calls, ["/dev/test-pressure"])
+
+    def test_sensor_api_uses_bundled_model_when_model_path_is_none(self):
+        def factory(*, port):
+            self.assertEqual(port, "/dev/bundled-model-test")
+            return FakePressureSensor([])
+
+        api = package.TangentialSensorAPI(
+            sensor_factory=factory,
+            pressure_port="/dev/bundled-model-test",
+            model_path=None,
+        )
+        self.assertTrue(api.processor.calibration.available)
+        api.close()
+
     def test_sensor_api_close_is_idempotent(self):
         processor, _, _ = self.make_processor()
         sensor = FakePressureSensor([])
@@ -207,12 +237,14 @@ class TangentialApiTests(unittest.TestCase):
             self.assertTrue(all(field.isdigit() for field in fields))
 
     def test_existing_fit_model_prediction_is_unchanged(self):
-        model_path = PROJECT_DIR / "fit_coefs.bin"
-        fit_type, _, params, split_sign = load_coefs(model_path)
+        resource = resources.files("src.tangential.resources").joinpath(
+            "fit_coefs.bin"
+        )
+        fit_type, _, params, split_sign = load_coefs(resource.read_bytes())
         inputs = [0.25, -0.5, 1200.0]
         expected = apply_predict_multi(inputs, params, fit_type, split_sign)
 
-        model = package.FitCalibrationModel.from_path(str(model_path))
+        model = package.FitCalibrationModel.from_default()
         actual = model.predict(*inputs)
 
         np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-12)

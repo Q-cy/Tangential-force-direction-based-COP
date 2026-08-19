@@ -1,16 +1,28 @@
 """fit_coefs.bin 的轻量运行时加载与预测。"""
 
+import io
 import os
+from importlib import resources
 
 import numpy as np
 
 
-def load_fit_coefs(path):
+def _open_binary_source(source):
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        return io.BytesIO(bytes(source)), True
+    if hasattr(source, "read"):
+        return source, False
+    return open(source, "rb"), True
+
+
+def load_fit_coefs(source):
+    """从路径、二进制流或内存中的模型字节加载拟合参数。"""
     id_map = {
         0: "sigmoid", 1: "poly", 2: "exp_log", 3: "pchip",
         4: "sym_exp", 5: "sym_log", 6: "exp",
     }
-    with open(path, "rb") as file_obj:
+    file_obj, should_close = _open_binary_source(source)
+    try:
         n_inputs = int(np.frombuffer(file_obj.read(4), dtype=np.int32)[0])
         n_outputs = int(np.frombuffer(file_obj.read(4), dtype=np.int32)[0])
         metadata = []
@@ -61,9 +73,12 @@ def load_fit_coefs(path):
                 ).copy()
                 params_list.append((params, fit_type, split))
 
-    first_type = metadata[0][0] if metadata else "poly"
-    first_split = metadata[0][2] if metadata else False
-    return first_type, n_inputs, params_list, first_split
+        first_type = metadata[0][0] if metadata else "poly"
+        first_split = metadata[0][2] if metadata else False
+        return first_type, n_inputs, params_list, first_split
+    finally:
+        if should_close:
+            file_obj.close()
 
 
 def _resolve_entry(entry, fit_type, split_sign):
@@ -147,6 +162,35 @@ class FitCalibrationModel:
             return cls(fit_type, params_list, split_sign, path=path)
         except Exception as exc:
             return cls(path=path, error=exc)
+
+    @classmethod
+    def from_default(cls):
+        """从 wheel 内置 package resource 加载模型，不依赖源码路径。"""
+        resource_name = "tangential.resources/fit_coefs.bin"
+        try:
+            try:
+                resource_package = "tangential.resources"
+                resource = resources.files(resource_package).joinpath(
+                    "fit_coefs.bin"
+                )
+            except ModuleNotFoundError:
+                # 源码测试可能以 ``src.tangential`` 导入；正式 wheel 始终
+                # 使用上面的标准包名。
+                resource_package = f"{__package__.split('.')[0]}.tangential.resources"
+                resource = resources.files(resource_package).joinpath(
+                    "fit_coefs.bin"
+                )
+            fit_type, _, params_list, split_sign = load_fit_coefs(
+                resource.read_bytes()
+            )
+            return cls(
+                fit_type,
+                params_list,
+                split_sign,
+                path=resource_name,
+            )
+        except Exception as exc:
+            return cls(path=resource_name, error=exc)
 
     def predict(self, dx, dy, total, cal_dim="3D"):
         if not self.available:
