@@ -2,10 +2,9 @@
 
 import os
 import csv
-import numpy as np
 
-TABLE_CSV_HEADER = [  # CSV 文件表头（84通道 + 时间戳 + 力/角度/标定数据）
-    "timestamp", "rel_ms", "adc_sum",
+TABLE_CSV_HEADER = [  # CSV 文件表头（84通道 + 时间差 + 力/角度/标定数据）
+    "rel_ms", "delta_ms", "adc_sum",
     # ch1 ~ ch84
     "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7",
     "ch8", "ch9", "ch10", "ch11", "ch12", "ch13", "ch14",
@@ -32,7 +31,9 @@ TABLE_CSV_HEADER = [  # CSV 文件表头（84通道 + 时间戳 + 力/角度/标
     # 标定后的切向力
     "Fx_cal", "Fy_cal", "Force_cal_angle",
     # 接触状态
-    "CoP_state"
+    "CoP_state",
+    # 有效行标记 (1=接触帧有效, 0=无效); fit.py/plot_static.py 训练筛选依赖此列
+    "valid"
 ]
 
 def auto_get_csv_path(save_dir: str) -> str:
@@ -45,9 +46,11 @@ def auto_get_csv_path(save_dir: str) -> str:
     os.makedirs(save_dir, exist_ok=True)
     date_str = datetime.now().strftime("%m%d")
     idx = 1
-    while os.path.exists(f"{save_dir}/COP_test_{date_str}_{idx}.csv"):
+    while True:
+        full_path = f"{save_dir}/COP_test_{date_str}_{idx}.csv"
+        if not os.path.exists(full_path):
+            return full_path
         idx += 1
-    return f"{save_dir}/COP_test_{date_str}_{idx}.csv"
 
 def init_csv_file(file_path: str) -> tuple[csv.writer, object]:
     """
@@ -63,7 +66,8 @@ def init_csv_file(file_path: str) -> tuple[csv.writer, object]:
 
 def build_csv_row(
     press_timestamp: float,  # 压力传感器时间戳（秒）
-    rel_ms: int,             # 相对毫秒数
+    rel_ms: float,           # 相对首个保存行的毫秒数
+    delta_ms: float,         # 与上一保存行的压力时间差（毫秒）
     ch_data: list,           # 84通道压力数据
     force_data: list,        # 六维力传感器数据 [Fx,Fy,Fz,Mx,My,Mz]
     force_timestamp: float,  # 力传感器时间戳（秒）
@@ -79,6 +83,7 @@ def build_csv_row(
     force_cal_angle: float = None, # 标定后角度 (deg)
     cop_state: int = 0,            # 接触状态: 0=未接触, 1=等待稳定, 2=测量中
     adc_sum: float = 0.0,          # ADC 84通道之和
+    valid: int = 0,                # 有效行标记: 1=接触帧有效, 0=无效 (训练筛选用)
 ) -> list:
     """
     构造符合表头格式的CSV行数据
@@ -89,8 +94,8 @@ def build_csv_row(
     
     # 构造行数据
     csv_row = [
-        press_timestamp * 1000,  # timestamp：转换为毫秒级
-        rel_ms,                  # rel_ms：相对开始时间的毫秒数
+        rel_ms,
+        delta_ms,
         adc_sum,                 # adc_sum：ADC 84通道之和
         *ch_data,                # ch1~ch84：压力传感器84通道数据
         *force_data,             # Fx,Fy,Fz,Mx,My,Mz：力传感器数据
@@ -108,5 +113,6 @@ def build_csv_row(
         fy_cal if fy_cal is not None else float('nan'),
         force_cal_angle if force_cal_angle is not None else float('nan'),
         cop_state,
+        valid,
     ]
     return csv_row

@@ -12,8 +12,8 @@ from data import PressureSensor, SixAxisForceSensor, TimestampedBuffer, match_cl
 from realtime import RealTimePlot
 from table import auto_get_csv_path, init_csv_file, build_csv_row
 from fit import load_coefs, apply_predict_multi
-import tang_7_12_InitCOP_realtime_other_package as pzt
-from tang_7_12_InitCOP_realtime_package_note import PRSensorAngle
+import tangential_other_package as pzt
+from tangential_package import PRSensorAngle
 
 # ===================== 配置 =====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

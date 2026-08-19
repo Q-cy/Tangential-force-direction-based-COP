@@ -34,6 +34,15 @@ SPLIT_SIGN = True           # True=正负分开拟合，False=不分
 
 # ===================== Read CSV =====================
 
+def _row_valid(row, fieldnames) -> bool:
+    """CSV 行有效性: 优先 valid 列; 无则 fallback CoP_state; 再无则视为有效。
+    兼容新旧 recorder: 旧版写 valid 列, 新版 (table.py) 写 CoP_state + valid。"""
+    if "valid" in fieldnames:
+        return float(row.get("valid", 0)) != 0
+    if "CoP_state" in fieldnames:
+        return float(row.get("CoP_state", 0)) != 0
+    return True
+
 def load_csv(csv_path, input_cols, output_cols, valid_only=True):
     """Read CSV, return (X[N, n_in], Y[N, n_out])"""
     X_rows, Y_rows = [], []
@@ -42,7 +51,7 @@ def load_csv(csv_path, input_cols, output_cols, valid_only=True):
         reader.fieldnames = [name.strip() for name in reader.fieldnames]
         for row in reader:
             try:
-                if valid_only and float(row.get("valid", 0)) == 0:
+                if valid_only and not _row_valid(row, reader.fieldnames):
                     continue
                 x_vals = [float(row[c]) for c in input_cols]               # 字典按名取值
                 y_vals = [float(row[c]) for c in output_cols]
@@ -611,7 +620,7 @@ def write_back_csv(csv_path, input_cols, output_cols, fit_results, order, dim, w
 
     cnt = 0
     for row in rows:
-        if write_valid_only and float(row.get("valid", 0)) == 0:
+        if write_valid_only and not _row_valid(row, header):
             continue
 
         cal_fx, cal_fy = 0.0, 0.0
@@ -708,8 +717,7 @@ def get_medians(csv_path, input_cols, output_cols):
     X_all, Y_all = [], []
     for row in rows:
         try:
-            v = float(row.get("valid", 0))
-            if v == 0:
+            if not _row_valid(row, reader.fieldnames):
                 continue
             x_vals = [float(row[c]) for c in input_cols]
             y_vals = [float(row[c]) for c in output_cols]

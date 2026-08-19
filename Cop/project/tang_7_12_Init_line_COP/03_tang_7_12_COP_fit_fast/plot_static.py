@@ -27,7 +27,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from tang_7_12_InitCOP_realtime_other_package import angle_difference
+from tangential_other_package import angle_difference
 
 
 # ===================================================================
@@ -71,7 +71,7 @@ PLOT_COLUMNS = ["Fy_cal", "delta_Force_Y"]
 ROW_START = 1000
 ROW_END = None
 
-# X 轴列名/列号（None=用第 0 列，即 timestamp）
+    # X 轴列名/列号（None=用第 0 列，即 rel_ms）
 X_COLUMN = "rel_ms"
 
 # 图表标题（None=自动用文件名生成）
@@ -79,9 +79,6 @@ TITLE = None
 
 # 保存路径（None=自动生成在 CSV_DIR 下）
 SAVE_PATH = None
-
-# 是否同一子图叠加（True=所有线画在一个图上, False=每列独立子图）
-SHARE_AXIS = True
 
 # 误差计算参考列（None=不计算误差）。设为真值列名，会对其他列计算相对于此列的误差
 # 例：ERROR_REF_COLUMN = "Force_angle"   → 计算其他列 vs Force_angle 的误差
@@ -99,9 +96,9 @@ PLOT_MODE = "full_analysis"
 # 以下为代码，一般不需要修改
 # ===================================================================
 
-# CSV 列名 → 索引映射（与 table.py TABLE_CSV_HEADER 一致）
+# CSV 列名 → 索引映射（与 table.py TABLE_CSV_HEADER 一致；旧CSV仍按实际表头解析）
 _COLUMN_NAMES = [
-    "timestamp", "rel_ms", "adc_sum",
+    "rel_ms", "delta_ms", "adc_sum",
     *(f"ch{i}" for i in range(1, 85)),
     "Fx", "Fy", "Fz", "Mx", "My", "Mz",
     "press_t", "force_t", "dt",
@@ -119,14 +116,20 @@ _ANGLE_COLUMNS = {"ADC_angle", "Force_angle", "Force_cal_angle"}
 
 def _resolve_column(col, header: list) -> int:
     """将列名或列号解析为列索引"""
+    clean_header = [name.strip() for name in header]
     if isinstance(col, int):
-        return col
-    col_str = str(col).strip()
-    if col_str.isdigit():
-        return int(col_str)
-    if col_str in _NAME_TO_IDX:
-        return _NAME_TO_IDX[col_str]
-    raise ValueError(f"未知列名: {col_str}，请用 -l 查看可用列名")
+        idx = col
+    else:
+        col_str = str(col).strip()
+        if col_str.isdigit():
+            idx = int(col_str)
+        elif col_str in clean_header:
+            return clean_header.index(col_str)
+        else:
+            raise ValueError(f"未知列名: {col_str}，请用 -l 查看可用列名")
+    if idx < 0 or idx >= len(clean_header):
+        raise ValueError(f"列号越界: {idx}，当前 CSV 共 {len(clean_header)} 列")
+    return idx
 
 
 def _resolve_columns(cols, header: list) -> list:
@@ -138,7 +141,8 @@ def _scan_csv_dir(csv_dir: str) -> list:
     if not os.path.isdir(csv_dir):
         return []
     files = [os.path.join(csv_dir, f) for f in os.listdir(csv_dir)
-             if f.endswith('.csv') and not f.startswith('_')]
+             if f.endswith('.csv')
+             and not f.startswith('_')]
     files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return files
 
@@ -211,9 +215,20 @@ def load_csv(path: str):
     """读取 CSV，返回 (header, data_2d_array)"""
     with open(path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
-        header = next(reader)
+        try:
+            header = next(reader)
+        except StopIteration as exc:
+            raise ValueError(f"CSV 文件为空且没有表头: {path}") from exc
         rows = [row for row in reader if row]
-    data = np.array(rows, dtype=np.float64)
+    if not rows:
+        return header, np.empty((0, len(header)), dtype=np.float64)
+    bad_row = next((i for i, row in enumerate(rows, 2) if len(row) != len(header)), None)
+    if bad_row is not None:
+        raise ValueError(f"CSV 第 {bad_row} 行列数与表头不一致: {path}")
+    try:
+        data = np.asarray(rows, dtype=np.float64)
+    except ValueError as exc:
+        raise ValueError(f"CSV 含非数值数据: {path}: {exc}") from exc
     return header, data
 
 
@@ -297,7 +312,7 @@ def _save_error_csv(error_path: str, error_results: list):
 
 
 def plot_static(csv_paths: list, plot_cols: list, x_col, row_start=None, row_end=None,
-                title=None, save_path=None, share_axis=False,
+                title=None, save_path=None,
                 error_ref_col=None, csv_dir=None):
     """主绘图函数，支持多文件"""
     first_base = os.path.splitext(os.path.basename(csv_paths[0]))[0]
@@ -319,6 +334,8 @@ def plot_static(csv_paths: list, plot_cols: list, x_col, row_start=None, row_end
         r0 = row_start if row_start is not None else 0
         r1 = row_end if row_end is not None else data.shape[0]
         data_slice = data[r0:r1, :]
+        if data_slice.shape[0] == 0:
+            raise ValueError(f"所选行范围没有数据: {csv_path} [{r0}:{r1}]")
         print(f"   行: [{r0}:{r1}] → {data_slice.shape[0]} 行")
         print(f"   列: {[header[i] for i in col_indices]}  |  X: {header[x_idx]}")
 
@@ -470,6 +487,8 @@ def plot_full_analysis(csv_path: str, save_path=None, row_start=None, row_end=No
     r0 = row_start if row_start is not None else 0
     r1 = row_end if row_end is not None else data.shape[0]
     data = data[r0:r1, :]
+    if data.shape[0] == 0:
+        raise ValueError(f"所选行范围没有数据: {csv_path} [{r0}:{r1}]")
 
     name_to_idx = {name.strip(): i for i, name in enumerate(header)}
 
@@ -638,7 +657,6 @@ def main():
     parser.add_argument("-x", "--xcol", default=None, help="X 轴列名/列号")
     parser.add_argument("-t", "--title", default=None, help="图表标题")
     parser.add_argument("-s", "--save", default=None, help="保存路径")
-    parser.add_argument("--share", action="store_true", help="同一子图叠加")
     parser.add_argument("-e", "--error-ref", default=None, help="误差计算参考列")
     parser.add_argument("-l", "--list", action="store_true", help="列出目录下 CSV 及列名后退出")
     args = parser.parse_args()
@@ -679,11 +697,10 @@ def main():
     x_col = args.xcol or X_COLUMN
     title = args.title or TITLE
     save_path = args.save or SAVE_PATH
-    share = args.share or SHARE_AXIS
     error_ref = args.error_ref or ERROR_REF_COLUMN
 
     plot_static(csv_paths, plot_cols, x_col, row_start, row_end,
-                title=title, save_path=save_path, share_axis=share,
+                title=title, save_path=save_path,
                 error_ref_col=error_ref, csv_dir=csv_dir)
 
 

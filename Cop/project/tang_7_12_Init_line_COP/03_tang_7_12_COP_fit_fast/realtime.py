@@ -13,6 +13,11 @@ PLOT_TIMER_INTERVAL_MS = 10    # 绘图定时器刷新间隔(毫秒)
 PLOT_ERR_HISTORY_LEN = 100     # 角度误差历史缓冲区长度
 PLOT_HISTORY_LEN = 100         # 时序曲线历史缓冲区长度
 
+MAX_REGION_ARROWS = 8          # per-region 角度箭头最大套数（与 REGION_PALETTE 等长）
+
+REGION_PALETTE = [(0, 102, 255), (0, 204, 51), (255, 128, 0), (153, 0, 255),
+                  (0, 204, 204), (255, 204, 0), (255, 0, 153), (255, 61, 61)]
+
 def _yrange(data, pad=0.1):
     clean = [v for v in data if v == v]  # filter NaN
     if len(clean) < 2: return -1, 1
@@ -28,10 +33,37 @@ class CellGridItem(pg.GraphicsObject):
         self.rows, self.cols = rows, cols
         self.data = np.zeros((rows, cols))
         self.vmax = 1.0
+        self.region_mask = np.zeros((rows, cols), dtype=np.int32)
+        self.region_palette = []
+        self.region_frames = {}
 
     def set_data(self, data, vmax):
         self.data = data
         self.vmax = max(vmax, 1)
+        self.update()
+
+    def set_regions(self, region_mask, palette):
+        self.region_mask = region_mask
+        self.region_palette = palette
+        # 外框线段: region 与背景 0 / 阵列边缘 / 其他 region 相邻的边, 每个 region 一条闭合轮廓;
+        # 公共边双方都描, paint 后画覆盖 → 接缝显示为后出现 region 的颜色
+        h, w = region_mask.shape
+        padded = np.pad(region_mask, 1, constant_values=0)
+        frames = {}
+        for r in range(h):
+            for c in range(w):
+                k = region_mask[r, c]
+                if k <= 0:
+                    continue
+                if padded[r, c + 1] != k:      # 上
+                    frames.setdefault(k, []).append(((c - 0.5, r - 0.5), (c + 0.5, r - 0.5)))
+                if padded[r + 2, c + 1] != k:  # 下
+                    frames.setdefault(k, []).append(((c - 0.5, r + 0.5), (c + 0.5, r + 0.5)))
+                if padded[r + 1, c] != k:      # 左
+                    frames.setdefault(k, []).append(((c - 0.5, r - 0.5), (c - 0.5, r + 0.5)))
+                if padded[r + 1, c + 2] != k:  # 右
+                    frames.setdefault(k, []).append(((c + 0.5, r - 0.5), (c + 0.5, r + 0.5)))
+        self.region_frames = frames
         self.update()
 
     def paint(self, p, opt, widget):
@@ -57,6 +89,16 @@ class CellGridItem(pg.GraphicsObject):
         for r in range(h + 1):
             y = r - 0.5
             p.drawLine(QtCore.QPointF(-0.5, y), QtCore.QPointF(w - 0.5, y))
+        # region 外框线: 后画, 2px 彩色覆盖 1px 灰网格线
+        pen = QtGui.QPen()
+        pen.setCosmetic(True)
+        pen.setWidth(4)
+        for rid, seg_list in self.region_frames.items():
+            pr, pgc, pb = self.region_palette[(rid - 1) % len(self.region_palette)]
+            pen.setColor(QtGui.QColor(pr, pgc, pb))
+            p.setPen(pen)
+            for (x1, y1), (x2, y2) in seg_list:
+                p.drawLine(QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2))
 
     def boundingRect(self):
         return QtCore.QRectF(-0.5, -0.5, self.cols, self.rows)
@@ -108,8 +150,6 @@ class RealTimePlot:
     def __init__(self):
         self.rows, self.cols = 12, 7
         self.lock = threading.Lock()
-        # TODO(deprecated): _fps_times 死代码 - 当前未使用（保留作为扩展点）
-        # self._fps_times = deque(maxlen=30)
         self._heat_vmax = 500.0   # 热力图色阶下限
 
         # === 全程存储 ===
@@ -142,16 +182,15 @@ class RealTimePlot:
         self._cop_delta_y = 0.0             # CoP偏移Y
         self._force_fx_val = 0.0            # 力传感器Fx
         self._force_fy_val = 0.0            # 力传感器Fy
-        self._force_fz_val = 0.0            # 力传感器Fz
-        self._total_press_val = 0.0         # 总压力值
         self._cal_fx_val = None             # 标定力Fx
         self._cal_fy_val = None             # 标定力Fy
-        self._cal_fz_val = None             # 标定力Fz
-        self._cal_angle_deg = None          # 标定力角度(度)
         self._cop_state = 0                 # CoP状态(0=未接触,1=粗略,2=精细)
         self._gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)  # 压力梯度(每帧由 main 传入)
         self._contact_init = False
         self._pzt_table_angle_deg = None     # Pressure Table 专用角度（invertY 视图）
+        self._region_mask = np.zeros((12, 7), dtype=np.int32)   # per-region 着色掩码
+        self._regions = []                   # per-region 数据（cop/delta/id, 供点+箭头显示）
+        self._centroid_xy = None             # 整帧形心（不加权, 品红菱形显示）
 
     def init_history(self):
         hist_len = PLOT_HISTORY_LEN
@@ -295,7 +334,15 @@ class RealTimePlot:
         # CoP 标记
         self._cop_dots = pg.ScatterPlotItem()
         self.p_table.addItem(self._cop_dots)
+        self._centroid_dot = pg.ScatterPlotItem()   # 整帧形心（不加权, 品红菱形）
+        self.p_table.addItem(self._centroid_dot)
         self._cop_arr, self._cop_hL, self._cop_hR = self._make_arrow_parts(self.p_table)
+        # per-region CoP 点 + 角度箭头（region 外框色, 与整帧同款显示）
+        self._region_cop_dots = pg.ScatterPlotItem()
+        self.p_table.addItem(self._region_cop_dots)
+        self._region_base_dots = pg.ScatterPlotItem()
+        self.p_table.addItem(self._region_base_dots)
+        self._region_arrows = [self._make_arrow_parts(self.p_table) for _ in range(MAX_REGION_ARROWS)]
 
         self.p_grad = self.win.addPlot(row=1, col=3, rowspan=3, title="Gradient Arrows")
         self.p_grad.hideAxis('left'); self.p_grad.hideAxis('bottom')
@@ -336,35 +383,38 @@ class RealTimePlot:
                  cop_curr_x, cop_curr_y, cop_base_x, cop_base_y, cop_delta_x, cop_delta_y,
                  force_fx_val, force_fy_val, force_fz_val,
                  cal_fx_val=None, cal_fy_val=None, cal_fz_val=None,
-                 cal_angle_deg=None,
                  cop_state=0,
                  gradient=None,
                  contact_init=False,
                  refined=False,
-                 pzt_table_angle_deg=None):
+                 pzt_table_angle_deg=None,
+                 region_mask=None,
+                 regions=None,
+                 centroid=None):
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
             self._force_angle_deg = force_angle_deg
             self._press_table_arr = press_table_arr.reshape(self.rows, self.cols)
             self._cop_curr_x = cop_curr_x
             self._cop_curr_y = cop_curr_y
-            self._cop_base_x = cop_base_x
-            self._cop_base_y = cop_base_y
+            self._cop_base_x = cop_curr_x if cop_base_x is None else cop_base_x
+            self._cop_base_y = cop_curr_y if cop_base_y is None else cop_base_y
             self._cop_delta_x = cop_delta_x
             self._cop_delta_y = cop_delta_y
             self._force_fx_val = force_fx_val
             self._force_fy_val = force_fy_val
-            self._force_fz_val = force_fz_val
-            self._total_press_val = total_press_val
             self._cal_fx_val = cal_fx_val
             self._cal_fy_val = cal_fy_val
-            self._cal_fz_val = cal_fz_val
-            self._cal_angle_deg = cal_angle_deg
             self._cop_state = cop_state
             self._contact_init = contact_init
             self._pzt_table_angle_deg = pzt_table_angle_deg
             if gradient is not None:
                 self._gradient_arr = np.asarray(gradient, dtype=np.float32)
+            self._region_mask = (np.zeros((self.rows, self.cols), dtype=np.int32)
+                                 if region_mask is None
+                                 else np.asarray(region_mask, dtype=np.int32))
+            self._regions = regions or []
+            self._centroid_xy = centroid
 
             angle_err = min(abs(pzt_angle_deg - force_angle_deg),
                            360 - abs(pzt_angle_deg - force_angle_deg))
@@ -410,7 +460,6 @@ class RealTimePlot:
         with self.lock:
             pzt_angle_deg = self._pzt_angle_deg
             force_angle_deg = self._force_angle_deg
-            cal_angle_deg = self._cal_angle_deg
             pzt_fz_hist = list(self.pzt_fz_history)
             cop_dx_hist = list(self.adc_dx_history); cop_dy_hist = list(self.adc_dy_history)
             force_fz_hist = list(self.force_fz_history)
@@ -429,6 +478,8 @@ class RealTimePlot:
             cop_state = self._cop_state
             contact_init = self._contact_init
             grad_arr = self._gradient_arr.copy()
+            regions = list(self._regions)
+            region_mask = self._region_mask.copy()
 
         # 状态显示
         _state_names = {0: "未接触", 1: "粗略测量", 2: "精细测量"}
@@ -480,15 +531,24 @@ class RealTimePlot:
         if contact_init:
             cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
             self._cell_grid.set_data(press_table_arr, cell_vmax)
+            self._cell_grid.set_regions(region_mask, REGION_PALETTE)
             for row_idx in range(12):
                 for col_idx in range(7):
                     cell_val = press_table_arr[row_idx, col_idx]
                     self._cell_txts[row_idx][col_idx].setText(f"{cell_val:.0f}" if cell_val > 0 else "")
-            # CoP dots + arrow
-            spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
-            if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
-                spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+            # CoP dots + arrow (region 模式下 cop_curr 为 NaN, 只显示 region 自己的点)
+            if not np.isnan(cop_curr_x) and not np.isnan(cop_curr_y):
+                spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+                if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
+                    spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+            else:
+                spots = []
             self._cop_dots.setData(spots=spots)
+            # 整帧形心（不加权, 与压力无关）
+            if self._centroid_xy is not None:
+                self._centroid_dot.setData(spots=[{'pos': self._centroid_xy, 'brush': 'm', 'symbol': 'd', 'size': 14}])
+            else:
+                self._centroid_dot.setData(spots=[])
             if not np.isnan(cop_base_x) and not np.isnan(cop_base_y) and np.hypot(cop_delta_x, cop_delta_y) > 0.05:
                 table_angle = pzt_table_angle_deg if pzt_table_angle_deg is not None else pzt_angle_deg
                 self._update_arrow((self._cop_arr, self._cop_hL, self._cop_hR),
@@ -499,10 +559,37 @@ class RealTimePlot:
                 self._cop_hL.setData([], [])
                 self._cop_hR.setData([], [])
 
+            # per-region CoP 点 + 角度箭头（region 外框色, 与整帧同款; 外框线由 CellGridItem 保留）
+            cop_spots, base_spots = [], []
+            for i, reg in enumerate(regions):
+                cx, cy = reg['cop']
+                dx, dy = reg['delta']
+                bx, by = cx - dx, cy - dy
+                cop_spots.append({'pos': (cx, cy), 'brush': 'g', 'size': 12})
+                base_spots.append({'pos': (bx, by), 'brush': 'b', 'symbol': 'x', 'size': 15})
+                if i < MAX_REGION_ARROWS:
+                    if np.hypot(dx, dy) > 0.05:
+                        angle = np.degrees(np.arctan2(dy, dx)) % 360.0
+                        pr, pgc, pb = REGION_PALETTE[(reg['id'] - 1) % len(REGION_PALETTE)]
+                        self._update_arrow(self._region_arrows[i], angle, np.hypot(dx, dy),
+                                           (pr, pgc, pb), (bx, by))
+                    else:
+                        for part in self._region_arrows[i]:
+                            part.setData([], [])
+            self._region_cop_dots.setData(spots=cop_spots)
+            self._region_base_dots.setData(spots=base_spots)
+            # region 数量减少时清理上一帧多余箭头，避免残影。
+            for i in range(min(len(regions), MAX_REGION_ARROWS), MAX_REGION_ARROWS):
+                for part in self._region_arrows[i]:
+                    part.setData([], [])
+
             # Gradient arrows
-            grad_spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
-            if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
-                grad_spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+            if not np.isnan(cop_curr_x) and not np.isnan(cop_curr_y):
+                grad_spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+                if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
+                    grad_spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+            else:
+                grad_spots = []
             self._grad_cop_dots.setData(spots=grad_spots)
             for grad_idx, (grad_ln, grad_dot) in enumerate(zip(self._g_lines, self._g_heads)):
                 grad_row, grad_col = divmod(grad_idx, 7)
@@ -524,13 +611,20 @@ class RealTimePlot:
         else:
             # CoP 未确定：清空两张表
             self._cell_grid.set_data(np.zeros((12, 7)), 1.0)
+            self._cell_grid.set_regions(np.zeros((12, 7), dtype=np.int32), [])
             for row_idx in range(12):
                 for col_idx in range(7):
                     self._cell_txts[row_idx][col_idx].setText("")
             self._cop_dots.setData(spots=[])
+            self._centroid_dot.setData(spots=[])
             self._cop_arr.setData([], [])
             self._cop_hL.setData([], [])
             self._cop_hR.setData([], [])
+            self._region_cop_dots.setData(spots=[])
+            self._region_base_dots.setData(spots=[])
+            for part_set in self._region_arrows:
+                for part in part_set:
+                    part.setData([], [])
             for grad_ln, grad_dot in zip(self._g_lines, self._g_heads):
                 grad_ln.setData([], [])
                 grad_dot.setData(x=[], y=[])
@@ -538,8 +632,6 @@ class RealTimePlot:
                 t.setText("")
             self._grad_cop_dots.setData(spots=[])
 
-        # TODO(deprecated): 以下 FPS 计算死代码 - 当前未启用（保留作为扩展点）
-        # FPS
     @staticmethod
     def _html(text, color, size=16):
         return f'<span style="color:{color};font-size:{size}pt;font-weight:bold">{text}</span>'
@@ -549,8 +641,7 @@ class RealTimePlot:
         w = self.win.width()
         return max(int(base * w / 1900), 7)
 
-    # TODO(deprecated): _u1 参数 color/pzt_val/pzt_label/txt_r 死代码 - 当前未使用（保留作为扩展点）
-    def _u1(self, curve, plot, data, txt, label, color='red', pzt_val=None, pzt_label=None, txt_r=None, fs=16):
+    def _u1(self, curve, plot, data, txt, label, color='red', fs=16):
         if data:
             xs = list(range(len(data)))
             curve.setData(xs, data)
@@ -558,14 +649,8 @@ class RealTimePlot:
             lo, hi = _yrange(data)
             plot.setYRange(lo, hi, padding=0)
             span = hi - lo if hi != lo else 1
-            if txt_r and pzt_val is not None:
-                txt.setHtml(self._html(f'True_{label}={data[-1]:.2f}', color, fs))
-                txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
-                txt_r.setHtml(self._html(f'{pzt_label}={pzt_val:.2f}', 'red', fs))
-                txt_r.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.19)
-            else:
-                txt.setHtml(self._html(f'{label}={data[-1]:.2f}', color, fs))
-                txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
+            txt.setHtml(self._html(f'{label}={data[-1]:.2f}', color, fs))
+            txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
 
     def _u2(self, c1, c2, plot, d1, d2, txt, label, color='blue', txt_r=None, fs=16):
         if d1:
