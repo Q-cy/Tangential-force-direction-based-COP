@@ -8,6 +8,10 @@ from unittest import mock
 import data as data_module
 
 from data import (
+    FORCE_FRAME_QUEUE_SIZE,
+    FORCE_PERIOD_S,
+    FORCE_RESPONSE_TIMEOUT_S,
+    FORCE_TARGET_HZ,
     PRESSURE_PERIOD_S,
     PRESSURE_RESPONSE_TIMEOUT_S,
     PRESSURE_TARGET_HZ,
@@ -49,6 +53,7 @@ def force_parser():
     sensor._rx_buf = bytearray()
     sensor._rx_lock = threading.Lock()
     sensor._io_lock = threading.Lock()
+    sensor._zero_lock = threading.Lock()
     sensor.zero_data = [0.0] * 6
     return sensor
 
@@ -236,12 +241,15 @@ class ProtocolTests(unittest.TestCase):
     def test_force_zero_calibration_success_and_timeout(self):
         sensor = force_parser()
         readings = iter([[float(i)] * 6 for i in range(1, 11)])
-        sensor.read = lambda: next(readings, None)
+        def next_frame(timeout_s=0.1):
+            values = next(readings, None)
+            return None if values is None else {"data": values}
+        sensor.read_frame = next_frame
         self.assertTrue(sensor.calibrate_zero(sample_count=10, timeout_s=0.1))
         self.assertEqual(sensor.zero_data, [5.5] * 6)
 
         failed = force_parser()
-        failed.read = lambda: None
+        failed.read_frame = lambda timeout_s=0.1: None
         self.assertFalse(failed.calibrate_zero(sample_count=2, timeout_s=0.003))
         self.assertEqual(failed.zero_data, [0.0] * 6)
 

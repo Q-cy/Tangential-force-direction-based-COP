@@ -103,11 +103,36 @@ class FakeForce:
     def calibrate_zero(self, sample_count=10, timeout_s=1.0):
         return self.calibrates
 
-    def read(self):
+    def read_frame(self, timeout_s=0.1):
         if time.perf_counter() - self.started < self.initial_delay:
+            time.sleep(min(timeout_s, 0.001))
             return None
         self.index += 1
-        return [float(self.index), 2.0, 3.0, 0.0, 0.0, 0.0]
+        rx_t = time.perf_counter()
+        return {
+            "request_seq": self.index - 1,
+            "tx_t": rx_t - 0.001,
+            "rx_t": rx_t,
+            "latency_s": 0.001,
+            "data": [float(self.index), 2.0, 3.0, 0.0, 0.0, 0.0],
+        }
+
+    def get_timing_stats(self):
+        return {
+            "requests": self.index,
+            "frames": self.index,
+            "response_timeouts": 0,
+            "framing_errors": 0,
+            "tail_errors": 0,
+            "serial_read_errors": 0,
+            "serial_write_errors": 0,
+            "serial_flush_errors": 0,
+            "queue_drops": 0,
+            "schedule_skips": 0,
+            "tx_intervals_s": [],
+            "rx_intervals_s": [],
+            "latencies_s": [],
+        }
 
     def add_zero_bias(self, fx, fy):
         self.biases.append((fx, fy))

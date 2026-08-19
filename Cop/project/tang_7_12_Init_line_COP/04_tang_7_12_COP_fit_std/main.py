@@ -75,11 +75,16 @@ class ForceThread(threading.Thread):
     def run(self):
         try:
             while not g_main_stop_flag.is_set():
-                ts = time.perf_counter()
-                data = self.s.read()
-                if data is not None:
-                    self.buf.append({"t": ts, "data": data})
-                time.sleep(0.001)
+                frame = self.s.read_frame(timeout_s=0.1)
+                if frame is not None:
+                    data = np.asarray(frame["data"], dtype=np.float64)
+                    self.buf.append({
+                        "t": frame["rx_t"],
+                        "data": data,
+                        "request_seq": frame["request_seq"],
+                        "tx_t": frame["tx_t"],
+                        "latency_s": frame["latency_s"],
+                    })
         except Exception as exc:
             self.error = exc
 
@@ -191,6 +196,9 @@ def data_loop(plot):
         previous_saved_press_t = None
         last_stats_log_t = time.perf_counter()
         last_stats_frames = sensor_press.get_timing_stats()["frames"]
+        last_force_stats_frames = (
+            sensor_force.get_timing_stats()["frames"] if has_force else 0
+        )
 
         force_fx_filt = float("nan")
         force_fy_filt = float("nan")
@@ -444,8 +452,9 @@ def data_loop(plot):
             return float(np.percentile(values, percentile) * 1000.0)
 
         def log_timing_stats(now):
-            """每秒报告压力采集真实频率、延迟和错误累计值。"""
+            """每秒报告两路采集真实频率、延迟和错误累计值。"""
             nonlocal last_stats_log_t, last_stats_frames
+            nonlocal last_force_stats_frames
             if now - last_stats_log_t < MAIN_TIMING_LOG_INTERVAL_S:
                 return
             stats = sensor_press.get_timing_stats()
@@ -466,8 +475,31 @@ def data_loop(plot):
                 f"队列丢帧={stats['queue_drops']}, "
                 f"跳过周期={stats['schedule_skips']}"
             )
+            if has_force:
+                force_stats = sensor_force.get_timing_stats()
+                force_frame_count = force_stats["frames"]
+                force_fps = (force_frame_count - last_force_stats_frames) / elapsed
+                force_tx_p50 = percentile_ms(force_stats["tx_intervals_s"], 50)
+                force_tx_p95 = percentile_ms(force_stats["tx_intervals_s"], 95)
+                force_latency_p50 = percentile_ms(force_stats["latencies_s"], 50)
+                force_latency_p95 = percentile_ms(force_stats["latencies_s"], 95)
+                print(
+                    "⏱ 六维力时序: "
+                    f"{force_fps:.1f} Hz, 请求间隔 P50/P95="
+                    f"{force_tx_p50:.2f}/{force_tx_p95:.2f} ms, 响应延迟 P50/P95="
+                    f"{force_latency_p50:.2f}/{force_latency_p95:.2f} ms, "
+                    f"超时={force_stats['response_timeouts']}, "
+                    f"帧头错误={force_stats['framing_errors']}, "
+                    f"尾部错误={force_stats['tail_errors']}, "
+                    f"读错={force_stats['serial_read_errors']}, "
+                    f"写错={force_stats['serial_write_errors']}, "
+                    f"队列丢帧={force_stats['queue_drops']}, "
+                    f"跳过周期={force_stats['schedule_skips']}"
+                )
             last_stats_log_t = now
             last_stats_frames = frame_count
+            if has_force:
+                last_force_stats_frames = force_frame_count
 
         while not g_main_stop_flag.is_set():
             loop_start_s = time.perf_counter()
