@@ -1,4 +1,5 @@
-# Python 3.11 完整开发/GUI环境；wheel 的核心依赖由 pyproject.toml 管理。
+# Python 3.11 完整开发/GUI锁定环境，仅供项目开发和测试使用。
+# 正式 wheel 的核心依赖和 full 可选依赖以 pyproject.toml 为准。
 numpy==2.4.3
 scipy==1.17.1
 pyserial==3.5
