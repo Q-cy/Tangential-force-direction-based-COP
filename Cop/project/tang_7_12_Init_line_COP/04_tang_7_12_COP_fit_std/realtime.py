@@ -479,6 +479,7 @@ class RealTimePlot:
             contact_init = self._contact_init
             grad_arr = self._gradient_arr.copy()
             regions = list(self._regions)
+            region_mask = self._region_mask.copy()
 
         # 状态显示
         _state_names = {0: "未接触", 1: "粗略测量", 2: "精细测量"}
@@ -530,7 +531,7 @@ class RealTimePlot:
         if contact_init:
             cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
             self._cell_grid.set_data(press_table_arr, cell_vmax)
-            self._cell_grid.set_regions(self._region_mask, REGION_PALETTE)
+            self._cell_grid.set_regions(region_mask, REGION_PALETTE)
             for row_idx in range(12):
                 for col_idx in range(7):
                     cell_val = press_table_arr[row_idx, col_idx]
@@ -577,6 +578,10 @@ class RealTimePlot:
                             part.setData([], [])
             self._region_cop_dots.setData(spots=cop_spots)
             self._region_base_dots.setData(spots=base_spots)
+            # region 数量减少时清理上一帧多余箭头，避免残影。
+            for i in range(min(len(regions), MAX_REGION_ARROWS), MAX_REGION_ARROWS):
+                for part in self._region_arrows[i]:
+                    part.setData([], [])
 
             # Gradient arrows
             if not np.isnan(cop_curr_x) and not np.isnan(cop_curr_y):

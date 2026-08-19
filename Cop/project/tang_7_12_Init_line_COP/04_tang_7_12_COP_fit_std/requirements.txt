@@ -1,0 +1,7 @@
+# Tested with Python 3.11
+numpy==2.4.3
+scipy==1.17.1
+pyserial==3.5
+pyqtgraph==0.14.0
+matplotlib==3.10.8
+PyQt5==5.15.11

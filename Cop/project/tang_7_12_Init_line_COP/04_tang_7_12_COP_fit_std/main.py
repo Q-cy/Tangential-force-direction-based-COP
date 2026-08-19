@@ -1,177 +1,248 @@
-# file_name: main.py
-
-import time
 import os
-from collections import deque
-import numpy as np
-import threading
-from pyqtgraph.Qt import QtWidgets
+import queue
 import sys
+import threading
+import time
+from collections import deque
+
+import numpy as np
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from data import PressureSensor, SixAxisForceSensor, TimestampedBuffer, match_closest
+from fit import apply_predict_multi, load_coefs
 from realtime import RealTimePlot
-from table import auto_get_csv_path, init_csv_file, build_csv_row
-from fit import load_coefs, apply_predict_multi
-import tang_7_12_InitCOP_realtime_other_package as pzt
-from tang_7_12_InitCOP_realtime_package_note import PRSensorAngle
+from table import auto_get_csv_path, build_csv_row, init_csv_file
+import tangential_other_package as pzt
+from tangential_package import PRSensorAngle
+
 
 # ===================== 配置 =====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MAIN_SAVE_DIR = os.path.join(BASE_DIR,"../../../../../../../data/2.PZT_tangential/weight/test")  # 数据保存根目录
-fit_coefs_path = os.path.join(BASE_DIR,"./fit_coefs.bin")   # fit 模型路径
-MAIN_CAL_DIM = "3D"                         # "2D"=仅切向力(Fx,Fy), "3D"=三维力(Fz,Fx,Fy)
-MAIN_REFINE_REZERO_FORCE = True             # True=COP二次精修后重新置零六维力
+MAIN_SAVE_DIR = os.path.join(
+    BASE_DIR, "../../../../../../../data/2.PZT_tangential/weight/test"
+)
+fit_coefs_path = os.path.join(BASE_DIR, "fit_coefs.bin")
+MAIN_CAL_DIM = "3D"                         # "2D"=Fx/Fy, "3D"=Fz/Fx/Fy
+MAIN_REFINE_REZERO_FORCE = True
 
-MAIN_TARGET_FPS = 100                      # sub thread 限速 (Hz), 防止 GIL 争抢让 GUI 卡
-MAIN_READ_INTERVAL_S = 0.005               # 采集线程读取间隔(秒)，0.005=200Hz tick (sensor 帧间隔 ~12ms)
-MAIN_PLOT_FPS = 60                         # plot set_data 限速 (Hz), 防止 GUI 卡顿
-MAIN_MAX_TIME_DIFF_S = 0.015               # 压力-力传感器最大时间匹配差(秒)
-MAIN_REGION_MODE = "full"                  # "full"=仅整帧计算, "region"=仅分region计算, "both"=两者同时
-g_main_stop_flag = threading.Event()       # 全局停止信号
+MAIN_TARGET_FPS = 100
+MAIN_PLOT_FPS = 60
+MAIN_MAX_TIME_DIFF_S = 0.015
+MAIN_TIMING_LOG_INTERVAL_S = 1.0
+MAIN_REGION_MODE = "full"                  # "full" / "region" / "both"
+MAIN_ZERO_SAMPLE_COUNT = 10
+MAIN_ZERO_TIMEOUT_S = 1.0
+MAIN_REZERO_TIMEOUT_S = 1.0
+
+g_main_stop_flag = threading.Event()
+
 
 # ===================== 采集线程 =====================
 class PressureThread(threading.Thread):
-    def __init__(self, sensor, buf):                      
+    def __init__(self, sensor, buf):
         super().__init__(daemon=True)
         self.s = sensor
         self.buf = buf
+        self.error = None
+
     def run(self):
-        while not g_main_stop_flag.is_set():
-            ts = time.perf_counter()
-            raw = self.s.read_data()
-            if raw:
-                try:
-                    d = np.asarray(self.s.decode(raw), dtype=np.float64)
-                    self.buf.append({"t":ts,"data":d})
-                except:
-                    pass
-            time.sleep(MAIN_READ_INTERVAL_S)
+        try:
+            while not g_main_stop_flag.is_set():
+                frame = self.s.read_frame(timeout_s=0.1)
+                if frame is not None:
+                    try:
+                        data = np.asarray(self.s.decode(frame["raw"]), dtype=np.float64)
+                        self.buf.append({
+                            "t": frame["rx_t"],
+                            "data": data,
+                            "request_seq": frame["request_seq"],
+                            "tx_t": frame["tx_t"],
+                            "latency_s": frame["latency_s"],
+                        })
+                    except (TypeError, ValueError, IndexError):
+                        pass
+        except Exception as exc:
+            self.error = exc
+
 
 class ForceThread(threading.Thread):
     def __init__(self, sensor, buf):
         super().__init__(daemon=True)
         self.s = sensor
         self.buf = buf
+        self.error = None
+
     def run(self):
-        while not g_main_stop_flag.is_set():
-            ts = time.perf_counter()
-            d = self.s.read()
-            if d:
-                self.buf.append({"t":ts,"data":d})
-            time.sleep(0.001)
+        try:
+            while not g_main_stop_flag.is_set():
+                ts = time.perf_counter()
+                data = self.s.read()
+                if data is not None:
+                    self.buf.append({"t": ts, "data": data})
+                time.sleep(0.001)
+        except Exception as exc:
+            self.error = exc
+
+
+def _load_fit_model():
+    fit_type = None
+    params_list = None
+    split_sign = False
+    if not os.path.exists(fit_coefs_path):
+        print("💡 未找到 fit 模型文件")
+        return fit_type, params_list, split_sign
+    try:
+        fit_type, _, params_list, split_sign = load_coefs(fit_coefs_path)
+        type_summary = ", ".join(
+            f"{entry[1]}{'(split)' if entry[2] else ''}" for entry in params_list
+        )
+        print(f"📐 fit模型已加载: {fit_coefs_path} (outputs: {type_summary})")
+    except Exception as exc:
+        print(f"⚠️ fit模型加载失败: {exc}")
+        params_list = None
+        split_sign = False
+    return fit_type, params_list, split_sign
+
 
 # ===================== 数据循环 =====================
 def data_loop(plot):
-    # 自动获取CSV文件路径
-    csv_path = auto_get_csv_path(MAIN_SAVE_DIR)
-    # 初始化CSV文件（写入表头）
-    csv_writer, csv_file_obj = init_csv_file(csv_path)
-
-    has_press = True           # 是否有压力传感器
-    has_force = True           # 是否有六维力传感器
+    """压力帧驱动的数据循环；每个 pressure seq 只处理一次。"""
+    sensor_press = None
+    sensor_force = None
+    thread_press = None
+    thread_force = None
+    csv_file_obj = None
+    csv_path = None
+    row_count = 0
+    rezero_threads = []
+    buf_press = None
+    buf_force = None
+    pending_press = None
+    has_force = False
+    process_pressure = None
+    drain_pending = None
 
     try:
-        sensor_press = PressureSensor()
+        # 压力传感器是系统的必需输入。失败时不创建 CSV。
+        try:
+            sensor_press = PressureSensor()
+        except Exception as exc:
+            raise RuntimeError(f"压力传感器未连接: {exc}") from exc
+
         buf_press = TimestampedBuffer(500)
+        print("✅ 压力传感器就绪")
+
+        # 六维力可选；连接或校零失败均降级为压力单传感器模式。
+        has_force = False
+        try:
+            sensor_force = SixAxisForceSensor()
+            if not sensor_force.calibrate_zero(
+                sample_count=MAIN_ZERO_SAMPLE_COUNT,
+                timeout_s=MAIN_ZERO_TIMEOUT_S,
+            ):
+                raise RuntimeError(
+                    f"{MAIN_ZERO_TIMEOUT_S:.1f}s 内未收到 "
+                    f"{MAIN_ZERO_SAMPLE_COUNT} 个有效校零帧"
+                )
+            buf_force = TimestampedBuffer(500)
+            has_force = True
+            print("✅ 六维力传感器就绪，启动零点校准完成")
+        except Exception as exc:
+            print(f"⚠️ 六维力传感器不可用，降级为压力模式: {exc}")
+            if sensor_force is not None:
+                try:
+                    sensor_force.close()
+                except Exception:
+                    pass
+            sensor_force = None
+
+        # 设备状态确定后再创建文件，避免连接失败留下空 CSV。
+        csv_path = auto_get_csv_path(MAIN_SAVE_DIR)
+        csv_writer, csv_file_obj = init_csv_file(csv_path)
+
         thread_press = PressureThread(sensor_press, buf_press)
         thread_press.start()
-        print("✅ 压力传感器就绪")
-    except Exception as e:
-        has_press = False
-        buf_press = None
-        print(f"⚠️ 压力传感器未连接: {e}")
+        if has_force:
+            thread_force = ForceThread(sensor_force, buf_force)
+            thread_force.start()
 
-    try:
-        sensor_force = SixAxisForceSensor()
-        sensor_force.calibrate_zero()
-        buf_force = TimestampedBuffer(500)
-        thread_force = ForceThread(sensor_force, buf_force)
-        thread_force.start()
-        print("✅ 六维力传感器就绪")
-    except Exception as e:
-        has_force = False
-        buf_force = None
-        print(f"⚠️ 六维力传感器未连接: {e}")
+        fit_type, fit_params_list, fit_split_sign = _load_fit_model()
 
-    if not has_press and not has_force:
-        print("❌ 无任何传感器，退出")
-        return
+        median_filt_window = 5
+        buf_cop_delta_x = deque(maxlen=median_filt_window)
+        buf_cop_delta_y = deque(maxlen=median_filt_window)
+        buf_force_fx = deque(maxlen=median_filt_window)
+        buf_force_fy = deque(maxlen=median_filt_window)
+        buf_force_fz = deque(maxlen=median_filt_window)
 
-    start_time_s = time.perf_counter()
+        cop_sensor = PRSensorAngle()
+        nan6 = [float("nan")] * 6
+        prev_refined = False
+        prev_contact = False
+        last_press_seq = -1
+        last_force_seq = -1
+        last_plot_t = 0.0
+        plot_interval_s = 1.0 / MAIN_PLOT_FPS
+        pending_press = deque()
+        rezero_guard = threading.Lock()
+        pressure_start_t = None
+        last_rel_ms = 0
+        first_saved_press_t = None
+        previous_saved_press_t = None
+        last_stats_log_t = time.perf_counter()
+        last_stats_frames = sensor_press.get_timing_stats()["frames"]
 
-    # 加载 fit 标定模型
-    fit_type = None
-    fit_params_list = None
-    fit_split_sign = False
-    if os.path.exists(fit_coefs_path):
-        try:
-            fit_type, _, fit_params_list, fit_split_sign = load_coefs(fit_coefs_path)
-            type_summary = ", ".join(f"{p[1]}{'(split)' if p[2] else ''}" for p in fit_params_list)
-            print(f"📐 fit模型已加载: {fit_coefs_path} (outputs: {type_summary})")
-        except Exception as e:
-            print(f"⚠️ fit模型加载失败: {e}")
-            fit_split_sign = False
-    else:
-        print("💡 未找到 fit 模型文件")
+        force_fx_filt = float("nan")
+        force_fy_filt = float("nan")
+        force_fz_filt = float("nan")
+        force_angle_deg = float("nan")
 
-    median_filt_window = 5
-    buf_cop_delta_x = deque(maxlen=median_filt_window)
-    buf_cop_delta_y = deque(maxlen=median_filt_window)
-    buf_force_fx = deque(maxlen=median_filt_window)
-    buf_force_fy = deque(maxlen=median_filt_window)
-    buf_force_fz = deque(maxlen=median_filt_window)
+        def schedule_rezero(reason: str):
+            """从 ForceThread 缓冲区收集10个新帧，串口始终保持单消费者。"""
+            if not has_force or g_main_stop_flag.is_set():
+                return
 
-    cop_sensor = PRSensorAngle()  # 每帧唯一推进 CoP 状态的入口
+            def worker():
+                if not rezero_guard.acquire(blocking=False):
+                    print(f"ℹ️ {reason}归零请求已合并到正在执行的任务")
+                    return
+                try:
+                    latest = buf_force.get_latest()
+                    seq = latest["seq"] if latest is not None else -1
+                    values = []
+                    deadline = time.perf_counter() + MAIN_REZERO_TIMEOUT_S
+                    while (
+                        len(values) < MAIN_ZERO_SAMPLE_COUNT
+                        and time.perf_counter() < deadline
+                        and not g_main_stop_flag.is_set()
+                    ):
+                        items = buf_force.get_after(seq)
+                        for item in items:
+                            values.append(item["data"])
+                            seq = item["seq"]
+                            if len(values) >= MAIN_ZERO_SAMPLE_COUNT:
+                                break
+                        if len(values) < MAIN_ZERO_SAMPLE_COUNT:
+                            time.sleep(0.002)
+                    if len(values) < MAIN_ZERO_SAMPLE_COUNT:
+                        print(f"⚠️ {reason}归零失败：有效力帧不足")
+                        return
+                    avg = np.mean(values, axis=0)
+                    sensor_force.add_zero_bias(float(avg[0]), float(avg[1]))
+                    print(f"🔄 {reason}，Fx/Fy已归零")
+                finally:
+                    rezero_guard.release()
 
-    _NAN6 = [float('nan')] * 6  # 力传感器占位
-    _prev_refined = False       # COP精修状态（用于检测跳变）
-    _prev_contact = False       # COP接触状态（用于检测力卸载）
-    _last_plot_t = 0.0           # plot 节流: 上次 plot 更新时间
-    PLOT_INTERVAL_S = 1.0 / MAIN_PLOT_FPS   # plot 限速间隔 (秒)
+            task = threading.Thread(target=worker, daemon=True)
+            rezero_threads.append(task)
+            task.start()
 
-    def _rezero_force(reason: str):
-        """10帧平均力值后累加 Fx/Fy 零点偏差（精修/卸载归零共用）"""
-        vals = []
-        for _ in range(10):
-            d = sensor_force.read()
-            if d:
-                vals.append(d)
-            time.sleep(0.001)
-        if vals:
-            avg = np.mean(vals, axis=0)
-            sensor_force.add_zero_bias(avg[0], avg[1])
-            print(f"🔄 {reason}，Fx/Fy已归零")
+        def process_pressure(press_item):
+            """推进一次 CoP 状态并返回可延迟匹配力帧的完整快照。"""
+            nonlocal prev_refined, prev_contact
+            nonlocal pressure_start_t, last_rel_ms
 
-    while not g_main_stop_flag.is_set():
-        loop_start_s = time.perf_counter()
-        rel_time_ms = int((loop_start_s - start_time_s) * 1000)
-
-        # ---- 采集压力数据 ----
-        press_item = buf_press.get_latest() if has_press else None
-        force_item = buf_force.get_latest() if has_force else None
-
-        if press_item is None and force_item is None:
-            time.sleep(0.001)
-            continue
-
-        # ---- F5 严格时间同步: 双传感器时以较新帧为锚点, 在另一缓冲找
-        #      MAIN_MAX_TIME_DIFF_S 窗内最近帧; 匹配成功才写 CSV 行,
-        #      保证行内 press/force 时间差有界。状态机/绘图仍用最新帧逐帧驱动。
-        csv_press_item = press_item
-        csv_force_item = force_item
-        if has_press and has_force:
-            if force_item["t"] >= press_item["t"]:
-                csv_press_item = match_closest(buf_press, force_item["t"], MAIN_MAX_TIME_DIFF_S)
-            else:
-                csv_force_item = match_closest(buf_force, press_item["t"], MAIN_MAX_TIME_DIFF_S)
-        # 无力传感器时也写行（力列用 _NAN6 占位, 与旧版一致）
-        write_row = csv_press_item is not None and (not has_force or csv_force_item is not None)
-
-        # ---- 计算 PZT / CoP ----
-        if press_item is not None:
-            base_sub_arr = np.array(press_item["data"])
-
-            # 阈值学习（外部 API, 同时更新 _total_thresh 和 _pixel_thresh）
+            base_sub_arr = np.asarray(press_item["data"], dtype=np.float64)
             frame2d = base_sub_arr.reshape(cop_sensor.rows, cop_sensor.cols)
             cop_sensor.dynamic_threshold(frame2d)
 
@@ -179,7 +250,9 @@ def data_loop(plot):
             use_region = MAIN_REGION_MODE in ("region", "both")
 
             if use_full:
-                pzt_angle_deg, cop_delta_x, cop_delta_y, cop_curr_x, cop_curr_y = cop_sensor.get_all(base_sub_arr)
+                pzt_angle_deg, cop_delta_x, cop_delta_y, cop_curr_x, cop_curr_y = (
+                    cop_sensor.get_all(base_sub_arr)
+                )
                 origin_x, origin_y = cop_sensor.get_origin()
                 cop_state = cop_sensor.get_state()
                 gradient_arr = cop_sensor.get_gradient(base_sub_arr)
@@ -187,208 +260,346 @@ def data_loop(plot):
             else:
                 pzt_angle_deg = 0.0
                 cop_delta_x = cop_delta_y = 0.0
-                cop_curr_x = cop_curr_y = float('nan')
+                cop_curr_x = cop_curr_y = float("nan")
                 origin_x = origin_y = None
                 cop_state = 0
                 gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)
                 centroid_xy = None
-            contact_init = cop_state > 0
 
-            # per-region 分割（独立于整帧链路），掩码供 realtime 外框着色显示;
-            # _compute_region_delta_cop 内部: _compute_region(分割) + 质心跨帧追踪稳定 id
-            #   + per-region origin/delta（供 CoP 点/角度箭头显示）
+            contact_init = cop_state > 0
             if use_region:
                 region_list = cop_sensor._compute_region_delta_cop(frame2d)
                 region_mask = np.zeros((cop_sensor.rows, cop_sensor.cols), dtype=np.int32)
                 for region in region_list:
-                    for r, c in region['coords']:
-                        region_mask[r, c] = region['id']
+                    for row, col in region["coords"]:
+                        region_mask[row, col] = region["id"]
             else:
                 region_list = []
                 region_mask = np.zeros((cop_sensor.rows, cop_sensor.cols), dtype=np.int32)
-            # regions模式(不跑整帧): 用"任一 region 已锁 origin"驱动实时显示;
-            # CSV/录制/力归零仍由整帧 contact_init 决定, 故不改动 cop_state。
+
             contact_init_display = contact_init
             if use_region and not use_full:
-                contact_init_display = any(r.get('contact_init', False) for r in region_list)
+                contact_init_display = any(
+                    region.get("contact_init", False) for region in region_list
+                )
+
             refined = cop_state == 2
-            total_press_val = float(np.sum(press_item["data"]))
-            pzt_table_angle_deg = (-pzt_angle_deg) % 360.0
-
-            print(f"frame {rel_time_ms}ms: angle={pzt_angle_deg:.1f}°, "
-                  f"dx={cop_delta_x:+.2f}, dy={cop_delta_y:+.2f}, "
-                  f"cop=({cop_curr_x:.2f},{cop_curr_y:.2f})")
-
-            # COP精修完成后重新归零 Fx/Fy（Fz不变，10帧平均）
-            if MAIN_REFINE_REZERO_FORCE and has_force and refined and not _prev_refined:
-                threading.Thread(target=_rezero_force, args=("COP精修完成",), daemon=True).start()
-            _prev_refined = refined
-
-            # 力卸载后COP重置 → 六维力归零
-            if has_force and _prev_contact and not contact_init:
-                threading.Thread(target=_rezero_force, args=("力卸载",), daemon=True).start()
-            _prev_contact = contact_init
+            if MAIN_REFINE_REZERO_FORCE and refined and not prev_refined:
+                schedule_rezero("COP精修完成")
+            prev_refined = refined
+            if prev_contact and not contact_init:
+                schedule_rezero("力卸载")
+            prev_contact = contact_init
 
             buf_cop_delta_x.append(cop_delta_x)
             buf_cop_delta_y.append(cop_delta_y)
             cop_delta_x_filt = float(np.median(buf_cop_delta_x))
             cop_delta_y_filt = float(np.median(buf_cop_delta_y))
-        else:
-            base_sub_arr = np.zeros(84)
-            cop_curr_x = cop_curr_y = cop_delta_x = cop_delta_y = float('nan')
-            origin_x = origin_y = None
-            centroid_xy = None
-            region_mask = np.zeros((cop_sensor.rows, cop_sensor.cols), dtype=np.int32)
-            cop_delta_x_filt = cop_delta_y_filt = 0.0
-            pzt_angle_deg = 0.0
-            total_press_val = 0.0
-            cop_state = 0
-            contact_init = False
-            refined = False
-            gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)
+            total_press_val = float(np.sum(base_sub_arr))
 
-        # ---- 计算 Force ----
-        # 滤波队列只接收匹配帧 (F5): 保证行内 force 各列 (raw+滤波+角度) 来自同一匹配帧序列
-        if force_item is not None:
-            if csv_force_item is not None:
-                force_fx_val, force_fy_val, force_fz_val = csv_force_item["data"][:3]
-                buf_force_fx.append(force_fx_val)
-                buf_force_fy.append(force_fy_val)
-                buf_force_fz.append(force_fz_val)
-                force_fx_filt = np.median(buf_force_fx)
-                force_fy_filt = np.median(buf_force_fy)
-                force_fz_filt = np.median(buf_force_fz)
-                force_angle_deg = pzt.compute_6Dforce_angle(force_fx_filt, force_fy_filt)
-                force_data_out = csv_force_item["data"]
-            else:
-                # 无匹配帧: 力数据超窗, 保留上次滤波值, 本次不写行
-                force_fx_val = force_fy_val = force_fz_val = float('nan')
-                force_fx_filt = float(np.median(buf_force_fx)) if buf_force_fx else float('nan')
-                force_fy_filt = float(np.median(buf_force_fy)) if buf_force_fy else float('nan')
-                force_fz_filt = float(np.median(buf_force_fz)) if buf_force_fz else float('nan')
-                force_angle_deg = float('nan')
-                force_data_out = _NAN6
-        else:
-            force_fx_val = force_fy_val = force_fz_val = float('nan')
-            force_fx_filt = force_fy_filt = force_fz_filt = float('nan')
-            force_angle_deg = float('nan')
-            force_data_out = _NAN6
+            cal_fx_val = cal_fy_val = cal_fz_val = cal_angle_deg = None
+            if fit_params_list is not None:
+                inputs = [cop_delta_x_filt, cop_delta_y_filt]
+                if MAIN_CAL_DIM == "3D":
+                    inputs.append(total_press_val)
+                results = apply_predict_multi(
+                    inputs, fit_params_list, fit_type, fit_split_sign
+                )
+                if len(results) >= 3:
+                    cal_fx_val, cal_fy_val, cal_fz_val = results[:3]
+                elif len(results) >= 2:
+                    cal_fx_val, cal_fy_val = results[:2]
+                if cal_fx_val is not None and cal_fy_val is not None:
+                    cal_angle_deg = pzt.compute_vector_angle(cal_fx_val, cal_fy_val)
 
-        # ---- 标定（仅 fit 引擎）----
-        cal_fx_val = cal_fy_val = cal_fz_val = cal_angle_deg = None
-        if press_item is not None and fit_params_list is not None:
-            if MAIN_CAL_DIM == "3D":
-                x_inputs = [cop_delta_x_filt, cop_delta_y_filt, total_press_val]
-            else:
-                x_inputs = [cop_delta_x_filt, cop_delta_y_filt]
-            results = apply_predict_multi(x_inputs, fit_params_list, fit_type, fit_split_sign)
-            if len(results) >= 3:
-                cal_fx_val, cal_fy_val, cal_fz_val = results[0], results[1], results[2]
-            elif len(results) >= 2:
-                cal_fx_val, cal_fy_val, cal_fz_val = results[0], results[1], None
-            if cal_fx_val is not None:
-                cal_angle_deg = pzt.compute_vector_angle(cal_fx_val, cal_fy_val)
-
-        # ---- CSV ----
-        # 行内 force 来自匹配帧 (F5), press 列来自最新帧 (状态机输出);
-        # dt 列 = |press_t - 匹配 force_t|, 双传感器时 <= MAIN_MAX_TIME_DIFF_S
-        press_ts = press_item["t"] if press_item is not None else None
-        force_ts_now = csv_force_item["t"] if csv_force_item is not None else None
-
-        if write_row:
-            csv_row = build_csv_row(
-                press_timestamp=press_ts if press_ts is not None else float('nan'),
-                rel_ms=rel_time_ms,
-                ch_data=press_item["data"] if press_item is not None else [0]*84,
-                force_data=force_data_out,
-                force_timestamp=force_ts_now if force_ts_now is not None else float('nan'),
-                delta_cop_x=cop_delta_x_filt,
-                delta_cop_y=cop_delta_y_filt,
-                delta_force_x=force_fx_filt,
-                delta_force_y=force_fy_filt,
-                delta_force_z=force_fz_filt,
-                adc_angle=pzt_angle_deg,
-                force_angle=force_angle_deg,
-                fx_cal=cal_fx_val,
-                fy_cal=cal_fy_val,
-                force_cal_angle=cal_angle_deg,
-                cop_state=cop_state,
-                adc_sum=total_press_val,
-                valid=1 if cop_state > 0 else 0,
+            if pressure_start_t is None:
+                pressure_start_t = press_item["t"]
+            rel_time_ms = max(
+                last_rel_ms,
+                int(round((press_item["t"] - pressure_start_t) * 1000)),
             )
-            csv_writer.writerow(csv_row)
-            csv_file_obj.flush()   # 即时落盘, 防止异常终止时缓冲丢失
+            last_rel_ms = rel_time_ms
+            return {
+                "press_item": press_item,
+                "rel_ms": rel_time_ms,
+                "base": base_sub_arr,
+                "total": total_press_val,
+                "angle": pzt_angle_deg,
+                "cop_x": cop_curr_x,
+                "cop_y": cop_curr_y,
+                "origin_x": origin_x,
+                "origin_y": origin_y,
+                "dx": cop_delta_x_filt,
+                "dy": cop_delta_y_filt,
+                "state": cop_state,
+                "contact": contact_init,
+                "display_contact": contact_init_display,
+                "refined": refined,
+                "gradient": gradient_arr,
+                "table_angle": (-pzt_angle_deg) % 360.0,
+                "region_mask": region_mask,
+                "regions": region_list,
+                "centroid": centroid_xy,
+                "cal_fx": cal_fx_val,
+                "cal_fy": cal_fy_val,
+                "cal_fz": cal_fz_val,
+                "cal_angle": cal_angle_deg,
+            }
 
-        # ---- 更新绘图 (限速到 MAIN_PLOT_FPS Hz) ----
-        now = time.perf_counter()
-        if now - _last_plot_t >= PLOT_INTERVAL_S:
-            plot.set_data(
-                pzt_angle_deg, force_angle_deg,
-                base_sub_arr, total_press_val,
-                cop_curr_x, cop_curr_y, origin_x, origin_y,
-                cop_delta_x_filt, cop_delta_y_filt,
-                force_fx_filt, force_fy_filt, force_fz_filt,
-                cal_fx_val, cal_fy_val, cal_fz_val,
-                cop_state=cop_state,
-                gradient=gradient_arr,
-                contact_init=contact_init_display,
-                refined=refined,
-                pzt_table_angle_deg=pzt_table_angle_deg,
-                region_mask=region_mask,
-                regions=region_list,
-                centroid=centroid_xy,
+        def write_snapshot(snapshot, force_item):
+            """写一行 CSV；force_item=None 表示该压力帧没有匹配力帧。"""
+            nonlocal row_count, force_fx_filt, force_fy_filt
+            nonlocal force_fz_filt, force_angle_deg
+            nonlocal first_saved_press_t, previous_saved_press_t
+
+            press_timestamp = float(snapshot["press_item"]["t"])
+            if first_saved_press_t is None:
+                csv_rel_ms = 0.0
+                csv_delta_ms = 0.0
+            else:
+                csv_rel_ms = max(
+                    0.0,
+                    round((press_timestamp - first_saved_press_t) * 1000.0, 6),
+                )
+                csv_delta_ms = max(
+                    0.0,
+                    round((press_timestamp - previous_saved_press_t) * 1000.0, 6),
+                )
+
+            if force_item is None:
+                force_data = nan6
+                force_ts = float("nan")
+                row_fx = row_fy = row_fz = float("nan")
+                row_angle = float("nan")
+            else:
+                force_data = force_item["data"]
+                force_ts = force_item["t"]
+                raw_fx, raw_fy, raw_fz = force_data[:3]
+                buf_force_fx.append(raw_fx)
+                buf_force_fy.append(raw_fy)
+                buf_force_fz.append(raw_fz)
+                force_fx_filt = float(np.median(buf_force_fx))
+                force_fy_filt = float(np.median(buf_force_fy))
+                force_fz_filt = float(np.median(buf_force_fz))
+                force_angle_deg = pzt.compute_6Dforce_angle(
+                    force_fx_filt, force_fy_filt
+                )
+                row_fx, row_fy, row_fz = (
+                    force_fx_filt, force_fy_filt, force_fz_filt
+                )
+                row_angle = force_angle_deg
+
+            csv_writer.writerow(build_csv_row(
+                press_timestamp=press_timestamp,
+                rel_ms=csv_rel_ms,
+                delta_ms=csv_delta_ms,
+                ch_data=snapshot["base"],
+                force_data=force_data,
+                force_timestamp=force_ts,
+                delta_cop_x=snapshot["dx"],
+                delta_cop_y=snapshot["dy"],
+                delta_force_x=row_fx,
+                delta_force_y=row_fy,
+                delta_force_z=row_fz,
+                adc_angle=snapshot["angle"],
+                force_angle=row_angle,
+                fx_cal=snapshot["cal_fx"],
+                fy_cal=snapshot["cal_fy"],
+                force_cal_angle=snapshot["cal_angle"],
+                cop_state=snapshot["state"],
+                adc_sum=snapshot["total"],
+                valid=1 if snapshot["state"] > 0 else 0,
+            ))
+            csv_file_obj.flush()
+            row_count += 1
+            if first_saved_press_t is None:
+                first_saved_press_t = press_timestamp
+            previous_saved_press_t = press_timestamp
+
+        def drain_pending(now):
+            """按压力时间顺序一对一匹配力帧。"""
+            nonlocal last_force_seq
+            while pending_press:
+                snapshot = pending_press[0]
+                press_ts = snapshot["press_item"]["t"]
+                force_item = match_closest(
+                    buf_force,
+                    press_ts,
+                    MAIN_MAX_TIME_DIFF_S,
+                    min_seq=last_force_seq,
+                )
+                if force_item is not None:
+                    pending_press.popleft()
+                    last_force_seq = force_item["seq"]
+                    write_snapshot(snapshot, force_item)
+                    continue
+                if now - press_ts > MAIN_MAX_TIME_DIFF_S:
+                    pending_press.popleft()
+                    continue
+                break
+
+        def percentile_ms(values, percentile):
+            if not values:
+                return float("nan")
+            return float(np.percentile(values, percentile) * 1000.0)
+
+        def log_timing_stats(now):
+            """每秒报告压力采集真实频率、延迟和错误累计值。"""
+            nonlocal last_stats_log_t, last_stats_frames
+            if now - last_stats_log_t < MAIN_TIMING_LOG_INTERVAL_S:
+                return
+            stats = sensor_press.get_timing_stats()
+            elapsed = now - last_stats_log_t
+            frame_count = stats["frames"]
+            fps = (frame_count - last_stats_frames) / elapsed
+            tx_p50 = percentile_ms(stats["tx_intervals_s"], 50)
+            tx_p95 = percentile_ms(stats["tx_intervals_s"], 95)
+            latency_p50 = percentile_ms(stats["latencies_s"], 50)
+            latency_p95 = percentile_ms(stats["latencies_s"], 95)
+            print(
+                "⏱ 压力时序: "
+                f"{fps:.1f} Hz, 请求间隔 P50/P95="
+                f"{tx_p50:.2f}/{tx_p95:.2f} ms, 响应延迟 P50/P95="
+                f"{latency_p50:.2f}/{latency_p95:.2f} ms, "
+                f"超时={stats['response_timeouts']}, "
+                f"CRC={stats['crc_errors']}, 状态={stats['status_errors']}, "
+                f"队列丢帧={stats['queue_drops']}, "
+                f"跳过周期={stats['schedule_skips']}"
             )
-            if contact_init:
-                plot.append_full_data(
-                    rel_time_ms,
-                    pzt_angle_deg, total_press_val,
-                    cop_delta_x_filt, cop_delta_y_filt,
-                    force_angle_deg,
-                    force_fz_filt, force_fx_filt, force_fy_filt,
-                    cal_angle_deg, cal_fx_val, cal_fy_val, cal_fz_val)
-            _last_plot_t = now
+            last_stats_log_t = now
+            last_stats_frames = frame_count
 
-        elapsed = time.perf_counter() - loop_start_s
-        time.sleep(max(0, 1/MAIN_TARGET_FPS - elapsed))   # 限速 100Hz, 让 Qt 主线程有 CPU 跑 GUI
+        while not g_main_stop_flag.is_set():
+            loop_start_s = time.perf_counter()
+            if thread_press.error is not None:
+                raise RuntimeError(f"压力采集线程异常: {thread_press.error}")
+            if thread_force is not None and thread_force.error is not None:
+                raise RuntimeError(f"六维力采集线程异常: {thread_force.error}")
+            new_items = buf_press.get_after(last_press_seq)
+            latest_snapshot = None
 
-    # F12 资源清理: 关闭串口 (close 内含线程 join, 由 try 兜底)
-    if has_press:
-        try:
-            sensor_press.close()
-        except Exception:
-            pass
-    if has_force:
-        try:
-            sensor_force.close()
-        except Exception:
-            pass
+            for press_item in new_items:
+                last_press_seq = press_item["seq"]
+                latest_snapshot = process_pressure(press_item)
+                if has_force:
+                    pending_press.append(latest_snapshot)
+                else:
+                    write_snapshot(latest_snapshot, None)
 
-    csv_file_obj.close()
-    row_count = sum(1 for _ in open(csv_path)) - 1
-    if row_count <= 0:
-        os.remove(csv_path)
-        print("⚠️ 无有效数据，CSV 已删除")
-    else:
-        print(f"✅ CSV已关闭（{row_count} 行）")
+            if has_force:
+                drain_pending(time.perf_counter())
+
+            log_timing_stats(time.perf_counter())
+
+            if latest_snapshot is not None:
+                now = time.perf_counter()
+                if now - last_plot_t >= plot_interval_s:
+                    plot.set_data(
+                        latest_snapshot["angle"], force_angle_deg,
+                        latest_snapshot["base"], latest_snapshot["total"],
+                        latest_snapshot["cop_x"], latest_snapshot["cop_y"],
+                        latest_snapshot["origin_x"], latest_snapshot["origin_y"],
+                        latest_snapshot["dx"], latest_snapshot["dy"],
+                        force_fx_filt, force_fy_filt, force_fz_filt,
+                        latest_snapshot["cal_fx"], latest_snapshot["cal_fy"],
+                        latest_snapshot["cal_fz"],
+                        cop_state=latest_snapshot["state"],
+                        gradient=latest_snapshot["gradient"],
+                        contact_init=latest_snapshot["display_contact"],
+                        refined=latest_snapshot["refined"],
+                        pzt_table_angle_deg=latest_snapshot["table_angle"],
+                        region_mask=latest_snapshot["region_mask"],
+                        regions=latest_snapshot["regions"],
+                        centroid=latest_snapshot["centroid"],
+                    )
+                    if latest_snapshot["contact"]:
+                        plot.append_full_data(
+                            latest_snapshot["rel_ms"],
+                            latest_snapshot["angle"], latest_snapshot["total"],
+                            latest_snapshot["dx"], latest_snapshot["dy"],
+                            force_angle_deg,
+                            force_fz_filt, force_fx_filt, force_fy_filt,
+                            latest_snapshot["cal_angle"],
+                            latest_snapshot["cal_fx"], latest_snapshot["cal_fy"],
+                            latest_snapshot["cal_fz"],
+                        )
+                    last_plot_t = now
+
+            elapsed = time.perf_counter() - loop_start_s
+            time.sleep(max(0.001, 1 / MAIN_TARGET_FPS - elapsed))
+
+    finally:
+        g_main_stop_flag.set()
+        if thread_press is not None and thread_press.is_alive():
+            thread_press.join(timeout=2)
+        if thread_force is not None and thread_force.is_alive():
+            thread_force.join(timeout=2)
+        for task in rezero_threads:
+            if task.is_alive():
+                task.join(timeout=1)
+        for sensor in (sensor_press, sensor_force):
+            if sensor is not None:
+                try:
+                    sensor.close()
+                except Exception:
+                    pass
+        if csv_file_obj is not None:
+            csv_file_obj.close()
+        if csv_path is not None:
+            if row_count == 0 and os.path.exists(csv_path):
+                os.remove(csv_path)
+                print("⚠️ 无数据，CSV 已删除")
+            elif row_count > 0:
+                print(f"✅ CSV已关闭（{row_count} 行）")
+
+
+def _data_thread_entry(plot, error_queue):
+    try:
+        data_loop(plot)
+    except Exception as exc:
+        error_queue.put(exc)
+        g_main_stop_flag.set()
+
 
 # ===================== 主函数 =====================
 def main():
+    g_main_stop_flag.clear()
     app = QtWidgets.QApplication.instance()
     if app is None:
-        app = QtWidgets.QApplication(sys.argv)                          # argument vector
+        app = QtWidgets.QApplication(sys.argv)
 
     plot = RealTimePlot()
-    data_thread = threading.Thread(target=data_loop, args=(plot,))      # arguments 
+    errors = queue.Queue()
+    data_thread = threading.Thread(
+        target=_data_thread_entry, args=(plot, errors), daemon=True
+    )
     data_thread.start()
+
+    error_timer = QtCore.QTimer()
+
+    def poll_errors():
+        try:
+            exc = errors.get_nowait()
+        except queue.Empty:
+            return
+        print(f"❌ 数据线程异常: {exc}")
+        plot.win.setWindowTitle(f"RealTime — 数据线程异常: {exc}")
+        g_main_stop_flag.set()
+        app.quit()
+
+    error_timer.timeout.connect(poll_errors)
+    error_timer.start(100)
 
     try:
         app.exec()
     except KeyboardInterrupt:
         pass
     finally:
+        error_timer.stop()
         g_main_stop_flag.set()
-        data_thread.join(timeout=2)
+        data_thread.join(timeout=5)
         plot.plot_full_analysis(MAIN_SAVE_DIR)
+
 
 if __name__ == "__main__":
     main()

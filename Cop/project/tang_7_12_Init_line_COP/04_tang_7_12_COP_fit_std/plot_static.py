@@ -27,7 +27,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from tang_7_12_InitCOP_realtime_other_package import angle_difference
+from tangential_other_package import angle_difference
 
 
 # ===================================================================
@@ -71,7 +71,7 @@ PLOT_COLUMNS = ["Fy_cal", "delta_Force_Y"]
 ROW_START = 1000
 ROW_END = None
 
-# X 轴列名/列号（None=用第 0 列，即 timestamp）
+    # X 轴列名/列号（None=用第 0 列，即 rel_ms）
 X_COLUMN = "rel_ms"
 
 # 图表标题（None=自动用文件名生成）
@@ -96,9 +96,9 @@ PLOT_MODE = "full_analysis"
 # 以下为代码，一般不需要修改
 # ===================================================================
 
-# CSV 列名 → 索引映射（与 table.py TABLE_CSV_HEADER 一致）
+# CSV 列名 → 索引映射（与 table.py TABLE_CSV_HEADER 一致；旧CSV仍按实际表头解析）
 _COLUMN_NAMES = [
-    "timestamp", "rel_ms", "adc_sum",
+    "rel_ms", "delta_ms", "adc_sum",
     *(f"ch{i}" for i in range(1, 85)),
     "Fx", "Fy", "Fz", "Mx", "My", "Mz",
     "press_t", "force_t", "dt",
@@ -116,14 +116,20 @@ _ANGLE_COLUMNS = {"ADC_angle", "Force_angle", "Force_cal_angle"}
 
 def _resolve_column(col, header: list) -> int:
     """将列名或列号解析为列索引"""
+    clean_header = [name.strip() for name in header]
     if isinstance(col, int):
-        return col
-    col_str = str(col).strip()
-    if col_str.isdigit():
-        return int(col_str)
-    if col_str in _NAME_TO_IDX:
-        return _NAME_TO_IDX[col_str]
-    raise ValueError(f"未知列名: {col_str}，请用 -l 查看可用列名")
+        idx = col
+    else:
+        col_str = str(col).strip()
+        if col_str.isdigit():
+            idx = int(col_str)
+        elif col_str in clean_header:
+            return clean_header.index(col_str)
+        else:
+            raise ValueError(f"未知列名: {col_str}，请用 -l 查看可用列名")
+    if idx < 0 or idx >= len(clean_header):
+        raise ValueError(f"列号越界: {idx}，当前 CSV 共 {len(clean_header)} 列")
+    return idx
 
 
 def _resolve_columns(cols, header: list) -> list:
@@ -135,7 +141,8 @@ def _scan_csv_dir(csv_dir: str) -> list:
     if not os.path.isdir(csv_dir):
         return []
     files = [os.path.join(csv_dir, f) for f in os.listdir(csv_dir)
-             if f.endswith('.csv') and not f.startswith('_')]
+             if f.endswith('.csv')
+             and not f.startswith('_')]
     files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return files
 
@@ -208,9 +215,20 @@ def load_csv(path: str):
     """读取 CSV，返回 (header, data_2d_array)"""
     with open(path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
-        header = next(reader)
+        try:
+            header = next(reader)
+        except StopIteration as exc:
+            raise ValueError(f"CSV 文件为空且没有表头: {path}") from exc
         rows = [row for row in reader if row]
-    data = np.array(rows, dtype=np.float64)
+    if not rows:
+        return header, np.empty((0, len(header)), dtype=np.float64)
+    bad_row = next((i for i, row in enumerate(rows, 2) if len(row) != len(header)), None)
+    if bad_row is not None:
+        raise ValueError(f"CSV 第 {bad_row} 行列数与表头不一致: {path}")
+    try:
+        data = np.asarray(rows, dtype=np.float64)
+    except ValueError as exc:
+        raise ValueError(f"CSV 含非数值数据: {path}: {exc}") from exc
     return header, data
 
 
@@ -316,6 +334,8 @@ def plot_static(csv_paths: list, plot_cols: list, x_col, row_start=None, row_end
         r0 = row_start if row_start is not None else 0
         r1 = row_end if row_end is not None else data.shape[0]
         data_slice = data[r0:r1, :]
+        if data_slice.shape[0] == 0:
+            raise ValueError(f"所选行范围没有数据: {csv_path} [{r0}:{r1}]")
         print(f"   行: [{r0}:{r1}] → {data_slice.shape[0]} 行")
         print(f"   列: {[header[i] for i in col_indices]}  |  X: {header[x_idx]}")
 
@@ -467,6 +487,8 @@ def plot_full_analysis(csv_path: str, save_path=None, row_start=None, row_end=No
     r0 = row_start if row_start is not None else 0
     r1 = row_end if row_end is not None else data.shape[0]
     data = data[r0:r1, :]
+    if data.shape[0] == 0:
+        raise ValueError(f"所选行范围没有数据: {csv_path} [{r0}:{r1}]")
 
     name_to_idx = {name.strip(): i for i, name in enumerate(header)}
 
