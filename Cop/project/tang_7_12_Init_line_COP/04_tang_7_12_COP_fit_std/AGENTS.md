@@ -4,9 +4,10 @@
 
 ## 0. 代码风格
 
-- 通用压力采集、CoP、角度、梯度和标定 API 放在 `tangential_package.py`；不得依赖 Qt。
-- 完整应用额外使用的六维力、同步、CSV、GUI 和生命周期封装放在
-  `tangential_other_package.py`，并复用最小 API，不实现第二套算法。
+- 规范源码位于 `src/tangential/`；根目录旧模块只能作为兼容转发层，不得新增第二套实现。
+- 公共压力 API 位于 `src/tangential/api.py`，通过 `src/tangential/__init__.py`
+  暴露；导入 `tangential` 不得隐式加载 Qt。
+- 六维力、同步、CSV、GUI 和完整会话按功能分层，并复用公共 API。
 - `example.py` 是最小示例：终端固定显示 12×7 ADC、min、max、sum、mean、copX、copY、angle。
 - `main.py` 是完整示例，必须保留显式采集 `while` 循环；循环只编排会话对象的公开方法。
 
@@ -18,14 +19,14 @@
 - 当前模块树：
 
   ```text
+  pyproject.toml
+  src/tangential/
   main.py
-  data.py
-  table.py
-  realtime.py
+  example.py
   fit.py
   plot_static.py
-  tangential_other_package.py
-  tangential_package.py
+  data.py / table.py / realtime.py             # 兼容层
+  tangential_*_package.py                      # 兼容层
   fit_coefs.bin
   requirements.txt
   tests/
@@ -105,7 +106,8 @@ CSV格式固定为 `108` 列，不得随意增删或重排：
 
 - `PressureSensor.read_frame()`、`decode()`及其下游接口兼容。
 - 84个压力通道的原始线序不变。
-- CSV为108列，表头、列顺序和字段含义不变。
+- CSV为108列，表头、列顺序和字段含义不变；规范定义位于
+  `src/tangential/storage/csv.py`。
 - 不改变现有 CoP、标定算法、模型加载方式和 `fit_coefs.bin` 的模型输出。
 - 压力时间戳必须是真实合法帧解析时间；不能用 GUI时间、CSV写盘时间或固定频率替代。
 - GUI不能参与采样调度；压力和力串口分别只能有一个消费者。
@@ -146,7 +148,8 @@ QT_QPA_PLATFORM=offscreen MPLCONFIGDIR=/tmp/pzt-mplconfig \
 
 /home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python -m py_compile \
   main.py example.py data.py table.py realtime.py fit.py plot_static.py \
-  tangential_other_package.py tangential_package.py
+  tangential_other_package.py tangential_package.py \
+  $(find src/tangential -name '*.py' -print)
 
 git diff --check
 ```

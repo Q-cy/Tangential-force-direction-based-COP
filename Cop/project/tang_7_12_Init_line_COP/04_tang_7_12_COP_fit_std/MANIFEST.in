@@ -1,0 +1,3 @@
+include fit_coefs.bin
+include readme.md
+recursive-include src/tangential *.py

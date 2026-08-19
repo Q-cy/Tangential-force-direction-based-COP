@@ -1,4 +1,4 @@
-# Tested with Python 3.11
+# Python 3.11 完整开发/GUI环境；wheel 的核心依赖由 pyproject.toml 管理。
 numpy==2.4.3
 scipy==1.17.1
 pyserial==3.5

@@ -3,11 +3,23 @@
 本项目采集 12×7 压阻阵列和六维力传感器，计算整帧/分区 CoP，加载
 `fit_coefs.bin` 实时标定 Fx、Fy、Fz，并保存 108 列 CSV。
 
-## 环境
+## 安装
 
 - Python 3.11
 - Linux 串口：压力 `/dev/ttyUSB0`，六维力 `/dev/ttyUSB1`
-- 依赖版本见 `requirements.txt`
+- `requirements.txt` 是开发和完整 GUI 环境
+
+普通用户推荐安装 wheel。核心压力 API 不安装 GUI：
+
+```bash
+python -m pip install tangential_sensor-0.1.0-py3-none-any.whl
+```
+
+需要完整 GUI 时安装可选依赖：
+
+```bash
+python -m pip install "tangential_sensor-0.1.0-py3-none-any.whl[full]"
+```
 
 推荐使用独立环境：
 
@@ -21,12 +33,22 @@ python -m pip install -r requirements.txt
 
 ## API 示例
 
-最小示例只依赖 `tangential_package.py`，采集压力帧并计算 CoP、角度、梯度和
+最小示例通过公开的 `tangential` 包采集压力帧并计算 CoP、角度、梯度和
 `fit_coefs.bin` 标定结果。终端每帧原位刷新固定的 12×7 ADC 矩阵以及
 min、max、sum、mean、copX、copY、angle 和标定力：
 
 ```bash
 python example.py
+```
+
+用户代码只需要一个公开入口：
+
+```python
+from tangential import TangentialSensor
+
+with TangentialSensor() as sensor:
+    sample = sensor.read()
+    print(sample.matrix, sample.cop_x, sample.cop_y, sample.angle)
 ```
 
 完整示例保留原来的双传感器、时间匹配、CSV 和 PyQtGraph 功能：
@@ -39,6 +61,35 @@ python main.py
 同步、统计和 GUI 生命周期由 `TangentialFrameProcessor`、
 `FullAcquisitionSession` 等类封装。完整应用直接复用最小 API 的单帧处理器，
 不会维护第二套 CoP、梯度或拟合算法。
+
+## 项目架构
+
+规范实现位于 `src/tangential/`：
+
+```text
+src/tangential/
+├── __init__.py                  # 用户公共 API
+├── api.py                       # TangentialSensor / TangentialSample
+├── config.py                    # 配置和模型资源路径
+├── sensors/                     # 压力与六维力串口驱动
+├── processing/                  # CoP、梯度和运行时标定
+├── acquisition/                 # 时间戳缓存与同步
+├── storage/                     # 108列 CSV
+├── gui/                         # 可选 PyQtGraph GUI
+└── full.py                      # 完整采集会话
+```
+
+根目录的兼容模块只转发到 `src/tangential/`，新的功能只在标准包中实现。
+
+构建 wheel：
+
+```bash
+python -m pip wheel . --no-deps --no-build-isolation -w dist
+```
+
+wheel 可以同时包含 Python 模块和平台相关 `.so`。当前版本保持纯 Python，
+因此生成的 `py3-none-any.whl` 更容易跨机器安装；以后只需把确有必要的核心算法
+编译成 `.so` 并继续封装在同一个 wheel 中。
 
 压力传感器是必需设备：连接失败时程序退出，且不会创建空 CSV。六维力传感器
 是可选设备；启动时需要在 1 秒内收集 10 个有效帧完成零点校准。连接或校零失败

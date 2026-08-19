@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tangential-sensor"
+version = "0.1.0"
+description = "12x7 tactile pressure acquisition and tangential force processing API"
+readme = "readme.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pyserial",
+]
+
+[project.optional-dependencies]
+full = [
+    "pyqtgraph",
+    "matplotlib",
+    "PyQt5",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/tangential" = ["fit_coefs.bin"]

@@ -5,6 +5,16 @@ import numpy as np
 from scipy.optimize import curve_fit, differential_evolution
 # TODO(deprecated): differential_evolution 死代码 - 当前未使用
 from scipy.interpolate import PchipInterpolator
+try:
+    from tangential.processing.calibration import (
+        apply_fit_predict_multi,
+        load_fit_coefs,
+    )
+except ModuleNotFoundError:
+    from src.tangential.processing.calibration import (
+        apply_fit_predict_multi,
+        load_fit_coefs,
+    )
 
 
 # ===================== Config =====================
@@ -464,53 +474,9 @@ def save_coefs(fit_results, path):
     print(f"  Coefs saved: {path} ({os.path.getsize(path)} bytes, {total_outputs} outputs)")
 
 def load_coefs(path):
-    """Load fit coefs from .bin. Returns (fit_type, n_inputs, params_list, split_sign).
-    Each entry in params_list is a 3-tuple (params, fit_type_str, split_bool)."""
-    _ID_MAP = {0: "sigmoid", 1: "poly", 2: "exp_log", 3: "pchip",
-               4: "sym_exp", 5: "sym_log", 6: "exp"}
+    """兼容旧接口，复用 SDK 的运行时模型读取器。"""
+    return load_fit_coefs(path)
 
-    with open(path, "rb") as f:
-        n_inputs = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
-        n_outputs = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
-
-        # Read per-output metadata
-        meta = []  # list of (fit_type_str, n_params, split)
-        for _ in range(n_outputs):
-            fid = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
-            npar = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
-            spl = int(np.frombuffer(f.read(4), dtype=np.int32)[0]) == 1
-            meta.append((_ID_MAP.get(fid, "poly"), npar, spl))
-
-        # Read per-output params
-        params_list = []
-        for ft, npar, spl in meta:
-            if ft in ("sym_exp", "sym_log"):
-                p_neg = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                p_pos = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append(((p_neg, p_pos), ft, spl))
-            elif ft == "pchip":
-                from scipy.interpolate import PchipInterpolator
-                x_knots = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                y_knots = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append((PchipInterpolator(x_knots, y_knots), ft, spl))
-            elif ft == "exp_log":
-                p_neg = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                p_pos = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append(((p_neg, p_pos), ft, spl))
-            elif ft == "exp":
-                p = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append((p, ft, spl))
-            elif spl:
-                p_pos = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                p_neg = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append(((p_pos, p_neg), ft, spl))
-            else:
-                p = np.frombuffer(f.read(npar * 8), dtype=np.float64).copy()
-                params_list.append((p, ft, spl))
-
-    first_ft = meta[0][0] if meta else "poly"
-    first_split = meta[0][2] if meta else False
-    return first_ft, n_inputs, params_list, first_split
 
 def _resolve_entry(p, fit_type, split_sign):
     """If p is a 3-tuple (params, ft, sp) from new load_coefs, use per-entry metadata.
@@ -563,44 +529,10 @@ def apply_predict(x_val, params_list, fit_type, split_sign=False):
 
 
 def apply_predict_multi(x_vals_list, params_list, fit_type, split_sign=False):
-    """Predict with different input per output. x_vals_list: list of scalars, one per output."""
-    results = []
-    for i, p in enumerate(params_list):
-        x = float(x_vals_list[i]) if i < len(x_vals_list) else float(x_vals_list[0])
-        params, ft, sp = _resolve_entry(p, fit_type, split_sign)
-        if ft == "pchip":
-            results.append(float(params(x)))
-        elif ft in ("sym_exp", "sym_log"):
-            p_neg, p_pos = params
-            if x < 0:
-                fn = exp_func if ft == "sym_exp" else log_func
-                results.append(float(-fn(-x, *p_neg)))
-            else:
-                fn = exp_func if ft == "sym_exp" else log_func
-                results.append(float(fn(x, *p_pos)))
-        elif ft == "exp_log":
-            p_neg, p_pos = params
-            if x < 0:
-                results.append(float(exp_func(x, *p_neg)))
-            else:
-                results.append(float(log_func(x, *p_pos)))
-        elif ft == "exp":
-            a, b, c, xm, xs = params
-            results.append(float(-exp_func((x - xm) / xs, a, b, c)))
-        elif sp:
-            psel = params[0] if x >= 0 else params[1]
-            if ft == "sigmoid":
-                results.append(float(sigmoid(x, *psel)))
-            else:
-                basis = np.array([x**j for j in range(len(psel))])
-                results.append(float(np.dot(psel, basis)))
-        else:
-            if ft == "sigmoid":
-                results.append(float(sigmoid(x, *params)))
-            else:
-                basis = np.array([x**j for j in range(len(params))])
-                results.append(float(np.dot(params, basis)))
-    return results
+    """兼容旧接口，复用 SDK 的运行时预测器。"""
+    return apply_fit_predict_multi(
+        x_vals_list, params_list, fit_type, split_sign
+    )
 
 
 # ===================== Write back CSV =====================

@@ -6,6 +6,8 @@ import unittest
 from unittest import mock
 
 import data as data_module
+from src.tangential.sensors import force as force_module
+from src.tangential.sensors import pressure as pressure_module
 
 from data import (
     FORCE_FRAME_QUEUE_SIZE,
@@ -380,11 +382,11 @@ class PressureTimingTests(unittest.TestCase):
             stop_event.wait()
 
         with mock.patch.object(
-            data_module.multiprocessing,
+            pressure_module.multiprocessing,
             "get_context",
             return_value=fake_context,
         ) as get_context, mock.patch.object(
-            data_module,
+            pressure_module,
             "_pressure_process_main",
             side_effect=fake_process_entry,
         ):
@@ -415,11 +417,11 @@ class PressureTimingTests(unittest.TestCase):
             args[6].put(("error", "cannot open pressure port"))
 
         with mock.patch.object(
-            data_module.multiprocessing,
+            pressure_module.multiprocessing,
             "get_context",
             return_value=fake_context,
         ), mock.patch.object(
-            data_module,
+            pressure_module,
             "_pressure_process_main",
             side_effect=failing_process_entry,
         ):
@@ -436,11 +438,11 @@ class PressureTimingTests(unittest.TestCase):
             args[7].wait()
 
         with mock.patch.object(
-            data_module.multiprocessing,
+            pressure_module.multiprocessing,
             "get_context",
             return_value=fake_context,
         ), mock.patch.object(
-            data_module,
+            pressure_module,
             "_pressure_process_main",
             side_effect=failing_process_entry,
         ):
@@ -862,9 +864,9 @@ class ForceTimingTests(unittest.TestCase):
             stop_event.wait()
 
         with mock.patch.object(
-            data_module.multiprocessing, "get_context", return_value=fake_context
+            force_module.multiprocessing, "get_context", return_value=fake_context
         ), mock.patch.object(
-            data_module, "_force_process_main", side_effect=fake_process_entry
+            force_module, "_force_process_main", side_effect=fake_process_entry
         ):
             sensor = SixAxisForceSensor(_startup_timeout_s=0.5)
             try:

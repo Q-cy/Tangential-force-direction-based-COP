@@ -1,11 +1,19 @@
 """完整 API 示例：显式保留采集循环，具体功能由 package 提供。"""
 
-from tangential_other_package import (
-    FullAcquisitionSession,
-    FullApplicationConfig,
-    FullApplicationRunner,
-    g_main_stop_flag,
-)
+try:
+    from tangential.full import (
+        FullAcquisitionSession,
+        FullApplicationConfig,
+        FullApplicationRunner,
+        g_main_stop_flag,
+    )
+except ModuleNotFoundError:
+    from src.tangential.full import (
+        FullAcquisitionSession,
+        FullApplicationConfig,
+        FullApplicationRunner,
+        g_main_stop_flag,
+    )
 
 
 def data_loop(

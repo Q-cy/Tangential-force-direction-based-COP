@@ -225,7 +225,7 @@ class ExampleAndMainStructureTests(unittest.TestCase):
         source = path.read_text(encoding="utf-8")
         return ast.parse(source, filename=filename), source
 
-    def test_example_only_uses_minimal_package_and_no_qt_or_full_package(self):
+    def test_example_only_uses_public_package_and_no_qt_or_full_package(self):
         tree, _ = self.parse("example.py")
         project_imports = set()
         forbidden_fragments = ("Qt", "pyqtgraph", "tangential_other_package")
@@ -249,9 +249,9 @@ class ExampleAndMainStructureTests(unittest.TestCase):
                     f"example.py 不应导入 {module}",
                 )
 
-        self.assertEqual(project_imports, {"tangential_package"})
+        self.assertEqual(project_imports, {"tangential"})
 
-        package_tree, _ = self.parse("tangential_package.py")
+        package_tree, _ = self.parse("src/tangential/api.py")
         imported_modules = {
             node.module or ""
             for node in ast.walk(package_tree)
