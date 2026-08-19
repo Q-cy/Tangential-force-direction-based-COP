@@ -135,6 +135,49 @@ class TimedPressureSerial:
         self.is_open = False
 
 
+class ThreadBackedProcess:
+    """在单元测试中模拟 multiprocessing.Process 的生命周期。"""
+
+    def __init__(self, target, args):
+        self.target = target
+        self.args = args
+        self.daemon = False
+        self.terminated = False
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(
+            target=self.target, args=self.args, daemon=True
+        )
+        self._thread.start()
+
+    def join(self, timeout=None):
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def is_alive(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def terminate(self):
+        self.terminated = True
+
+
+class FakeMultiprocessingContext:
+    def __init__(self, real_context):
+        self.real_context = real_context
+        self.process = None
+
+    def Queue(self, maxsize=0):
+        return self.real_context.Queue(maxsize=maxsize)
+
+    def Event(self):
+        return self.real_context.Event()
+
+    def Process(self, target, args):
+        self.process = ThreadBackedProcess(target, args)
+        return self.process
+
+
 class ProtocolTests(unittest.TestCase):
     def test_pressure_fragment_and_sticky_frames(self):
         sensor = pressure_parser()
@@ -211,6 +254,121 @@ class PressureTimingTests(unittest.TestCase):
             readiness_waiter=serial_port.wait_readable,
             **kwargs,
         )
+
+    def test_fake_serial_keeps_thread_backend(self):
+        serial_port = TimedPressureSerial(response_delay_s=0.001)
+        with mock.patch.object(data_module.multiprocessing, "get_context") as get_context:
+            sensor = self.make_sensor(serial_port)
+            try:
+                frame = sensor.read_frame(timeout_s=0.1)
+                self.assertIsNotNone(frame)
+                self.assertFalse(sensor._use_process)
+                self.assertTrue(sensor._io_thread.is_alive())
+            finally:
+                sensor.close()
+        get_context.assert_not_called()
+
+    def test_production_backend_uses_spawn_and_forwards_frame_stats(self):
+        real_context = data_module.multiprocessing.get_context("spawn")
+        fake_context = FakeMultiprocessingContext(real_context)
+        expected_frame = {
+            "request_seq": 7,
+            "tx_t": 10.0,
+            "rx_t": 10.006,
+            "latency_s": 0.006,
+            "raw": b"raw",
+        }
+
+        def fake_process_entry(
+            port, period_s, timeout_s, queue_size,
+            frame_queue, status_queue, startup_queue, stop_event,
+        ):
+            self.assertEqual(port, data_module.PRESSURE_SENSOR_PORT)
+            self.assertEqual(period_s, data_module.PRESSURE_PERIOD_S)
+            self.assertEqual(timeout_s, data_module.PRESSURE_RESPONSE_TIMEOUT_S)
+            self.assertEqual(queue_size, data_module.PRESSURE_FRAME_QUEUE_SIZE)
+            startup_queue.put(("ready", None))
+            frame_queue.put(expected_frame)
+            status_queue.put(("stats", {
+                "frames": 1,
+                "queue_drops": 3,
+                "tx_intervals_s": [0.005],
+                "rx_intervals_s": [0.006],
+                "latencies_s": [0.006],
+            }))
+            stop_event.wait()
+
+        with mock.patch.object(
+            data_module.multiprocessing,
+            "get_context",
+            return_value=fake_context,
+        ) as get_context, mock.patch.object(
+            data_module,
+            "_pressure_process_main",
+            side_effect=fake_process_entry,
+        ):
+            sensor = PressureSensor(_startup_timeout_s=0.5)
+            try:
+                frame = sensor.read_frame(timeout_s=0.5)
+                self.assertEqual(frame, expected_frame)
+                deadline = time.monotonic() + 0.5
+                stats = sensor.get_timing_stats()
+                while stats["frames"] != 1 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    stats = sensor.get_timing_stats()
+                self.assertEqual(stats["frames"], 1)
+                self.assertEqual(stats["queue_drops"], 3)
+                self.assertEqual(stats["rx_intervals_s"], [0.006])
+            finally:
+                sensor.close()
+
+        get_context.assert_called_once_with("spawn")
+        self.assertIsNotNone(fake_context.process)
+        self.assertFalse(fake_context.process.terminated)
+
+    def test_production_startup_error_is_synchronous(self):
+        real_context = data_module.multiprocessing.get_context("spawn")
+        fake_context = FakeMultiprocessingContext(real_context)
+
+        def failing_process_entry(*args):
+            args[6].put(("error", "cannot open pressure port"))
+
+        with mock.patch.object(
+            data_module.multiprocessing,
+            "get_context",
+            return_value=fake_context,
+        ), mock.patch.object(
+            data_module,
+            "_pressure_process_main",
+            side_effect=failing_process_entry,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cannot open pressure port"):
+                PressureSensor(_startup_timeout_s=0.5)
+
+    def test_production_runtime_error_is_raised_by_read_frame(self):
+        real_context = data_module.multiprocessing.get_context("spawn")
+        fake_context = FakeMultiprocessingContext(real_context)
+
+        def failing_process_entry(*args):
+            args[6].put(("ready", None))
+            args[5].put(("error", "poll loop stopped"))
+            args[7].wait()
+
+        with mock.patch.object(
+            data_module.multiprocessing,
+            "get_context",
+            return_value=fake_context,
+        ), mock.patch.object(
+            data_module,
+            "_pressure_process_main",
+            side_effect=failing_process_entry,
+        ):
+            sensor = PressureSensor(_startup_timeout_s=0.5)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "poll loop stopped"):
+                    sensor.read_frame(timeout_s=0.5)
+            finally:
+                sensor.close()
 
     def test_open_port_uses_nonblocking_serial(self):
         fake = mock.Mock()

@@ -7,6 +7,7 @@ import time
 import struct
 import os
 import select
+import multiprocessing
 from collections import deque
 import queue
 import threading
@@ -38,15 +39,19 @@ class PressureSensor:
     def __init__(self, serial_instance=None, period_s=PRESSURE_PERIOD_S,
                  response_timeout_s=PRESSURE_RESPONSE_TIMEOUT_S,
                  queue_size=PRESSURE_FRAME_QUEUE_SIZE,
-                 readiness_waiter=None):
+                 readiness_waiter=None, port=None, _use_process=None,
+                 _mp_context=None, _process_factory=None, _startup_timeout_s=2.0,
+                 _frame_sink=None, _status_sink=None):
         if period_s <= 0 or response_timeout_s <= 0 or queue_size <= 0:
             raise ValueError("压力采集周期、响应超时和队列长度必须大于 0")
 
         self.ser = None
-        self.port = PRESSURE_SENSOR_PORT
+        self.port = port or PRESSURE_SENSOR_PORT
         self._rx_buf = bytearray()
         self._rx_lock = threading.Lock()
         self._frame_queue = queue.Queue(maxsize=queue_size)
+        self._frame_sink = _frame_sink
+        self._status_sink = _status_sink
         self._period_s = float(period_s)
         self._response_timeout_s = float(response_timeout_s)
         # 仅供无文件描述符的测试 fake 使用。生产路径保持 None，必须走
@@ -75,16 +80,170 @@ class PressureSensor:
         self._latencies = deque(maxlen=1000)
         self._last_tx_t = None
         self._last_rx_t = None
+        self._last_stats_publish_t = None
+        self._closed = False
+        self._io_thread = None
+        self._process = None
+        self._ipc_frame_queue = None
+        self._ipc_status_queue = None
+        self._ipc_startup_queue = None
+        self._mp_stop_event = None
+        self._process_startup_timeout_s = float(_startup_timeout_s)
+        self._process_factory = _process_factory
+        self._mp_context = _mp_context
 
-        if serial_instance is None:
-            self.open_port()
+        if _use_process is None:
+            use_process = serial_instance is None and _frame_sink is None
         else:
-            self.ser = serial_instance
+            use_process = bool(_use_process)
+        self._use_process = use_process
 
-        self._io_thread = threading.Thread(
-            target=self._io_loop, name="pressure-io", daemon=True
+        if self._use_process:
+            self._start_process(queue_size)
+        else:
+            if serial_instance is None:
+                self.open_port()
+            else:
+                self.ser = serial_instance
+            self._io_thread = threading.Thread(
+                target=self._io_loop, name="pressure-io", daemon=True
+            )
+            self._io_thread.start()
+
+    def _start_process(self, queue_size):
+        """启动独立采集进程，并同步等待子进程完成串口初始化。"""
+        context = self._mp_context or multiprocessing.get_context("spawn")
+        self._ipc_frame_queue = context.Queue(maxsize=queue_size)
+        # 统计不是数据通道，使用小的有界队列即可；子进程不会因统计拥塞而阻塞采集。
+        self._ipc_status_queue = context.Queue(maxsize=8)
+        self._ipc_startup_queue = context.Queue(maxsize=1)
+        self._mp_stop_event = context.Event()
+        process_factory = self._process_factory or context.Process
+        self._process = process_factory(
+            target=_pressure_process_main,
+            args=(
+                self.port,
+                self._period_s,
+                self._response_timeout_s,
+                queue_size,
+                self._ipc_frame_queue,
+                self._ipc_status_queue,
+                self._ipc_startup_queue,
+                self._mp_stop_event,
+            ),
         )
-        self._io_thread.start()
+        try:
+            self._process.daemon = True
+        except (AttributeError, AssertionError):
+            pass
+        try:
+            self._process.start()
+            message = self._ipc_startup_queue.get(
+                timeout=self._process_startup_timeout_s
+            )
+        except Exception:
+            self._stop_process(join_timeout=0.5)
+            self._close_ipc_queues()
+            raise
+
+        kind, detail = message
+        if kind != "ready":
+            self._stop_process(join_timeout=0.5)
+            self._close_ipc_queues()
+            raise RuntimeError(f"压力串口启动失败: {detail}")
+
+    def _stop_process(self, join_timeout=1.0):
+        if self._mp_stop_event is not None:
+            self._mp_stop_event.set()
+        if self._process is None:
+            return
+        try:
+            self._process.join(timeout=join_timeout)
+        except Exception:
+            pass
+        try:
+            alive = self._process.is_alive()
+        except Exception:
+            alive = False
+        if alive:
+            # 只终止由本 PressureSensor 创建的子进程。
+            try:
+                self._process.terminate()
+                self._process.join(timeout=join_timeout)
+            except Exception:
+                pass
+
+    def _close_ipc_queues(self):
+        ipc_queues = (
+            self._ipc_frame_queue,
+            self._ipc_status_queue,
+            self._ipc_startup_queue,
+        )
+        for ipc_queue in ipc_queues:
+            if ipc_queue is None:
+                continue
+            try:
+                # 不等待 multiprocessing.Queue 的 feeder 线程排空，避免 close()
+                # 因积压数据而阻塞采集退出。
+                ipc_queue.cancel_join_thread()
+            except Exception:
+                pass
+            try:
+                ipc_queue.close()
+            except Exception:
+                continue
+        self._ipc_frame_queue = None
+        self._ipc_status_queue = None
+        self._ipc_startup_queue = None
+
+    def _drain_process_status(self):
+        if self._ipc_status_queue is None:
+            return
+        while True:
+            try:
+                kind, payload = self._ipc_status_queue.get_nowait()
+            except queue.Empty:
+                return
+            if kind == "stats":
+                self._apply_stats(payload)
+            elif kind == "error":
+                self._error = RuntimeError(f"压力串口子进程异常: {payload}")
+
+    def _apply_stats(self, snapshot):
+        with self._stats_lock:
+            for name, value in snapshot.items():
+                if name in ("tx_intervals_s", "rx_intervals_s", "latencies_s"):
+                    continue
+                if name in self._stats:
+                    self._stats[name] = value
+            if "tx_intervals_s" in snapshot:
+                self._tx_intervals = deque(snapshot["tx_intervals_s"], maxlen=1000)
+            if "rx_intervals_s" in snapshot:
+                self._rx_intervals = deque(snapshot["rx_intervals_s"], maxlen=1000)
+            if "latencies_s" in snapshot:
+                self._latencies = deque(snapshot["latencies_s"], maxlen=1000)
+
+    def _stats_snapshot(self):
+        with self._stats_lock:
+            result = dict(self._stats)
+            result["tx_intervals_s"] = list(self._tx_intervals)
+            result["rx_intervals_s"] = list(self._rx_intervals)
+            result["latencies_s"] = list(self._latencies)
+            return result
+
+    def _publish_stats(self, force=False):
+        """子进程非阻塞同步统计，统计拥塞不能阻塞压力轮询。"""
+        if self._status_sink is None:
+            return
+        now = time.perf_counter()
+        if not force and self._last_stats_publish_t is not None:
+            if now - self._last_stats_publish_t < 0.2:
+                return
+        try:
+            self._status_sink.put_nowait(("stats", self._stats_snapshot()))
+            self._last_stats_publish_t = now
+        except queue.Full:
+            pass
 
     def open_port(self):
         """打开固定路径的串口;失败抛错(由 main.py 捕获)"""
@@ -143,6 +302,12 @@ class PressureSensor:
             self._stats["frames"] += 1
 
     def _queue_frame(self, frame):
+        if getattr(self, "_frame_sink", None) is not None:
+            try:
+                self._frame_sink.put_nowait(frame)
+            except queue.Full:
+                self._add_stat("queue_drops")
+            return
         try:
             self._frame_queue.put_nowait(frame)
         except queue.Full:
@@ -229,6 +394,7 @@ class PressureSensor:
                         "latency_s": latency_s,
                         "raw": payload,
                     })
+                    self._publish_stats()
                 elif not self._stop_event.is_set():
                     self._add_stat("response_timeouts")
 
@@ -241,6 +407,7 @@ class PressureSensor:
                     self._stop_event.wait(self._period_s - elapsed)
                 else:
                     self._add_stat("schedule_skips")
+                self._publish_stats()
         except Exception as exc:
             self._error = exc
             self._stop_event.set()
@@ -297,6 +464,31 @@ class PressureSensor:
         """返回带请求/接收时间的完整压力帧；超时返回 None。"""
         if timeout_s is not None and timeout_s < 0:
             raise ValueError("timeout_s 不能小于 0")
+        if self._use_process:
+            deadline = (
+                None if timeout_s is None
+                else time.monotonic() + timeout_s
+            )
+            while True:
+                self._drain_process_status()
+                if self._error is not None:
+                    raise self._error
+                if self._process is not None and not self._process.is_alive():
+                    if self._stop_event.is_set():
+                        return None
+                    self._error = RuntimeError("压力串口子进程已退出")
+                    raise self._error
+                if deadline is None:
+                    wait_s = 0.1
+                else:
+                    wait_s = max(0.0, min(0.1, deadline - time.monotonic()))
+                try:
+                    return self._ipc_frame_queue.get(timeout=wait_s)
+                except queue.Empty:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return None
+                    if self._stop_event.is_set():
+                        return None
         while True:
             try:
                 wait_s = 0.1 if timeout_s is None else timeout_s
@@ -311,6 +503,7 @@ class PressureSensor:
 
     def get_timing_stats(self):
         """返回累计计数及最近最多 1000 帧的时序样本快照。"""
+        self._drain_process_status()
         with self._stats_lock:
             result = dict(self._stats)
             result["tx_intervals_s"] = list(self._tx_intervals)
@@ -327,11 +520,67 @@ class PressureSensor:
         return out
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
         self._stop_event.set()
-        if self._io_thread.is_alive():
-            self._io_thread.join(timeout=1)
-        if self.ser and self.ser.is_open:
-            self.ser.close()
+        if self._use_process:
+            self._stop_process(join_timeout=1)
+            self._drain_process_status()
+            self._close_ipc_queues()
+        else:
+            if self._io_thread is not None and self._io_thread.is_alive():
+                self._io_thread.join(timeout=1)
+            if self.ser and self.ser.is_open:
+                self.ser.close()
+
+
+def _pressure_process_main(port, period_s, response_timeout_s, queue_size,
+                           frame_queue, status_queue, startup_queue,
+                           stop_event):
+    """spawn 子进程入口：子进程内部仍使用 PressureSensor 的本地线程模式。"""
+    sensor = None
+    try:
+        sensor = PressureSensor(
+            serial_instance=None,
+            period_s=period_s,
+            response_timeout_s=response_timeout_s,
+            queue_size=queue_size,
+            port=port,
+            _use_process=False,
+            _status_sink=status_queue,
+        )
+        startup_queue.put(("ready", None))
+        while not stop_event.is_set():
+            frame = sensor.read_frame(timeout_s=0.05)
+            if frame is not None:
+                try:
+                    frame_queue.put_nowait(frame)
+                except queue.Full:
+                    # 这是进程间数据通道溢出，不是子进程内部线程队列溢出。
+                    sensor._add_stat("queue_drops")
+                sensor._publish_stats()
+            if sensor._error is not None:
+                try:
+                    status_queue.put_nowait(("error", str(sensor._error)))
+                except queue.Full:
+                    pass
+                break
+            if sensor._io_thread is not None and not sensor._io_thread.is_alive():
+                try:
+                    status_queue.put_nowait(("error", "压力 I/O 线程意外退出"))
+                except queue.Full:
+                    pass
+                break
+    except Exception as exc:
+        try:
+            startup_queue.put(("error", f"{type(exc).__name__}: {exc}"))
+        except Exception:
+            pass
+    finally:
+        if sensor is not None:
+            sensor._publish_stats(force=True)
+            sensor.close()
 
 # ===================== 六维力传感器 =====================
 class SixAxisForceSensor:
