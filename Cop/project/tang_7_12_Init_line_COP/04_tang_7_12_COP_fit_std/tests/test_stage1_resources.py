@@ -3,13 +3,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from src.tangential.config import (
+from tangential.config import (
     FullApplicationConfig,
     default_model_path,
     default_save_dir,
 )
-from src.tangential.full import FullAcquisitionSession
-from src.tangential.processing.calibration import FitCalibrationModel
+from tangential.full import FullAcquisitionSession
+from tangential.processing.calibration import FitCalibrationModel
 
 
 class Stage1ResourceTests(unittest.TestCase):

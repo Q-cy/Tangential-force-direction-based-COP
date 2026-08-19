@@ -17,6 +17,12 @@ def compute_vector_angle(x: float, y: float) -> float:
     return angle + 360.0 if angle < 0 else angle
 
 
+def angle_difference(a: float, b: float) -> float:
+    """返回两个 0~360 度方向角之间的最小绝对环绕误差。"""
+    difference = abs(float(a) - float(b)) % 360.0
+    return min(difference, 360.0 - difference)
+
+
 @dataclass
 class TangentialSample:
     """一个合法压力帧及其全部最小 API 计算结果。"""

@@ -14,6 +14,9 @@ dependencies = [
     "pyserial",
 ]
 
+[project.scripts]
+tangential = "tangential.cli:main"
+
 [project.optional-dependencies]
 full = [
     "pyqtgraph",

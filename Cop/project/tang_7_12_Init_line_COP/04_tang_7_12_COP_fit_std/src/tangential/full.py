@@ -21,20 +21,6 @@ from .sensors.pressure import PressureSensor
 from .storage.csv import auto_get_csv_path, build_csv_row, init_csv_file
 
 
-DEFAULT_CONFIG = FullApplicationConfig()
-MAIN_SAVE_DIR = DEFAULT_CONFIG.save_dir
-model_path = DEFAULT_CONFIG.model_path
-MAIN_CAL_DIM = DEFAULT_CONFIG.cal_dim
-MAIN_REFINE_REZERO_FORCE = DEFAULT_CONFIG.refine_rezero_force
-MAIN_TARGET_FPS = DEFAULT_CONFIG.target_fps
-MAIN_PLOT_FPS = DEFAULT_CONFIG.plot_fps
-MAIN_MAX_TIME_DIFF_S = DEFAULT_CONFIG.max_time_diff_s
-MAIN_TIMING_LOG_INTERVAL_S = DEFAULT_CONFIG.timing_log_interval_s
-MAIN_REGION_MODE = DEFAULT_CONFIG.region_mode
-MAIN_ZERO_SAMPLE_COUNT = DEFAULT_CONFIG.zero_sample_count
-MAIN_ZERO_TIMEOUT_S = DEFAULT_CONFIG.zero_timeout_s
-MAIN_REZERO_TIMEOUT_S = DEFAULT_CONFIG.rezero_timeout_s
-
 g_main_stop_flag = threading.Event()
 
 
@@ -58,16 +44,6 @@ def _construct_sensor(factory, port):
         return factory(port=port)
     except TypeError:
         return factory()
-
-
-def compute_6Dforce_angle(fx: float, fy: float) -> float:
-    """兼容旧调用方；统一复用最小 API 的向量角度实现。"""
-    return compute_vector_angle(fx, fy)
-
-
-def angle_difference(a1: float, a2: float) -> float:
-    diff = abs(a1 - a2)
-    return min(diff, 360.0 - diff)
 
 
 class PressureThread(threading.Thread):
@@ -127,7 +103,7 @@ class ForceThread(threading.Thread):
 
 
 class FullAcquisitionSession:
-    """完整应用的一次采集会话；主循环由 main.py 显式驱动。"""
+    """完整应用的一次采集会话；循环由 acquisition_loop 显式驱动。"""
 
     def __init__(
         self,
@@ -400,7 +376,7 @@ class FullAcquisitionSession:
             self.force_fx_filt = float(np.median(self.force_fx_values))
             self.force_fy_filt = float(np.median(self.force_fy_values))
             self.force_fz_filt = float(np.median(self.force_fz_values))
-            self.force_angle_deg = compute_6Dforce_angle(
+            self.force_angle_deg = compute_vector_angle(
                 self.force_fx_filt, self.force_fy_filt
             )
             row_fx = self.force_fx_filt
@@ -656,3 +632,31 @@ class FullApplicationRunner:
             g_main_stop_flag.set()
             data_thread.join(timeout=5)
             plot.plot_full_analysis(self.config.save_dir)
+
+
+def acquisition_loop(
+    plot,
+    stop_event=None,
+    config=None,
+    session_factory=FullAcquisitionSession,
+    **kwargs,
+):
+    """运行完整采集循环；Qt 线程和测试都通过这个正式入口调用。"""
+    active_stop_event = g_main_stop_flag if stop_event is None else stop_event
+    session = session_factory(
+        plot,
+        config=config or FullApplicationConfig(),
+        stop_event=active_stop_event,
+        **kwargs,
+    )
+    try:
+        session.start()
+        while not session.should_stop():
+            session.check_errors()
+            session.process_new_pressure_frames()
+            session.drain_force_matches()
+            session.log_timing_stats()
+            session.update_plot()
+            session.wait_for_next_iteration()
+    finally:
+        session.close()

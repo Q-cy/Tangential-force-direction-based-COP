@@ -1,10 +1,10 @@
 import unittest
 
-from src.tangential.processing.calibration import (
+from tangential.processing.calibration import (
     apply_fit_predict_multi,
     FitCalibrationModel,
 )
-from table import TABLE_CSV_HEADER, build_csv_row
+from tangential.storage.csv import TABLE_CSV_HEADER, build_csv_row
 
 
 class RegressionTests(unittest.TestCase):

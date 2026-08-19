@@ -5,23 +5,25 @@ import time
 import unittest
 from unittest import mock
 
-import data as data_module
-from src.tangential.sensors import force as force_module
-from src.tangential.sensors import pressure as pressure_module
+import tangential.sensors.pressure as data_module
+from tangential.acquisition.buffer import TimestampedBuffer, match_closest
+from tangential.sensors import force as force_module
+from tangential.sensors import pressure as pressure_module
 
-from data import (
+from tangential.sensors.force import (
     FORCE_FRAME_QUEUE_SIZE,
     FORCE_PERIOD_S,
     FORCE_RESPONSE_TIMEOUT_S,
     FORCE_TARGET_HZ,
+    FORCE_SENSOR_PORT,
+    SixAxisForceSensor,
+)
+from tangential.sensors.pressure import (
     PRESSURE_PERIOD_S,
     PRESSURE_RESPONSE_TIMEOUT_S,
     PRESSURE_TARGET_HZ,
     PRESSURE_FRAME_QUEUE_SIZE,
     PressureSensor,
-    SixAxisForceSensor,
-    TimestampedBuffer,
-    match_closest,
 )
 
 
@@ -848,7 +850,7 @@ class ForceTimingTests(unittest.TestCase):
             port, period_s, timeout_s, queue_size,
             frame_queue, status_queue, startup_queue, stop_event,
         ):
-            self.assertEqual(port, data_module.FORCE_SENSOR_PORT)
+            self.assertEqual(port, FORCE_SENSOR_PORT)
             self.assertEqual(period_s, FORCE_PERIOD_S)
             self.assertEqual(timeout_s, FORCE_RESPONSE_TIMEOUT_S)
             self.assertEqual(queue_size, FORCE_FRAME_QUEUE_SIZE)

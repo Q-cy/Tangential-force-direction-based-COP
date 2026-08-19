@@ -9,24 +9,24 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/pzt-test-mplconfig")
 import numpy as np
 from pyqtgraph.Qt import QtWidgets
 
-from plot_static import _resolve_column, load_csv
-from realtime import RealTimePlot
+from tangential.plotting import load_csv, resolve_column
+from tangential.gui.realtime import RealTimePlot
 
 
 class StaticPlotTests(unittest.TestCase):
     def test_resolve_column_uses_new_header_positions(self):
         header = ["rel_ms", "delta_ms", "adc_sum", "valid"]
-        self.assertEqual(_resolve_column("rel_ms", header), 0)
-        self.assertEqual(_resolve_column("delta_ms", header), 1)
+        self.assertEqual(resolve_column("rel_ms", header), 0)
+        self.assertEqual(resolve_column("delta_ms", header), 1)
 
     def test_resolve_column_uses_actual_legacy_header(self):
         header = ["timestamp", "ADC_angle", "ADC_mag", "Force_angle", "valid"]
-        self.assertEqual(_resolve_column("Force_angle", header), 3)
-        self.assertEqual(_resolve_column("3", header), 3)
+        self.assertEqual(resolve_column("Force_angle", header), 3)
+        self.assertEqual(resolve_column("3", header), 3)
         with self.assertRaisesRegex(ValueError, "未知列名"):
-            _resolve_column("missing", header)
+            resolve_column("missing", header)
         with self.assertRaisesRegex(ValueError, "列号越界"):
-            _resolve_column(9, header)
+            resolve_column(9, header)
 
     def test_empty_csv_with_header_has_stable_shape(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as file_obj:

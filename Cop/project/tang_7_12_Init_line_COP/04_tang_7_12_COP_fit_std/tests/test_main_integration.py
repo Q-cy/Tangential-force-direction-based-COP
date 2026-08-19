@@ -7,11 +7,12 @@ import unittest
 
 import numpy as np
 
-import main
-from data import TimestampedBuffer
-from tangential_other_package import (
+from tangential.acquisition.buffer import TimestampedBuffer
+from tangential.full import (
     FullApplicationConfig,
     PressureThread,
+    acquisition_loop,
+    g_main_stop_flag,
 )
 
 
@@ -64,7 +65,7 @@ class FakePressure:
         if self.exhausted_at is None:
             self.exhausted_at = now
         if now - self.exhausted_at > 0.06:
-            main.g_main_stop_flag.set()
+            g_main_stop_flag.set()
         time.sleep(min(timeout_s, 0.001))
         return None
 
@@ -159,7 +160,7 @@ def read_csvs(directory):
 
 class MainLoopIntegrationTests(unittest.TestCase):
     def setUp(self):
-        main.g_main_stop_flag.clear()
+        g_main_stop_flag.clear()
         FakePressure.instances.clear()
         FakeForce.instances.clear()
         FakePressure.frames = 4
@@ -174,7 +175,7 @@ class MainLoopIntegrationTests(unittest.TestCase):
             target_fps=1000,
             max_time_diff_s=0.015,
         )
-        main.data_loop(
+        acquisition_loop(
             PlotStub(),
             config=config,
             pressure_factory=FakePressure,
@@ -192,7 +193,7 @@ class MainLoopIntegrationTests(unittest.TestCase):
                 model_path=os.path.join(directory, "missing.bin"),
             )
             with self.assertRaisesRegex(RuntimeError, "压力传感器未连接"):
-                main.data_loop(
+                acquisition_loop(
                     PlotStub(),
                     config=config,
                     pressure_factory=MissingPressure,
@@ -257,9 +258,9 @@ class MainLoopIntegrationTests(unittest.TestCase):
             def decode(raw):
                 return raw
 
-        main.g_main_stop_flag.clear()
+        g_main_stop_flag.clear()
         thread = PressureThread(
-            BrokenSensor(), TimestampedBuffer(), main.g_main_stop_flag
+            BrokenSensor(), TimestampedBuffer(), g_main_stop_flag
         )
         thread.start()
         thread.join(timeout=1)
@@ -277,7 +278,7 @@ class MainLoopIntegrationTests(unittest.TestCase):
                 target_fps=1000,
             )
             with self.assertRaisesRegex(RuntimeError, "plot failed"):
-                main.data_loop(
+                acquisition_loop(
                     ExplodingPlot(),
                     config=config,
                     pressure_factory=FakePressure,

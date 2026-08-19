@@ -142,12 +142,13 @@ def apply_fit_predict_multi(x_values, params_list, fit_type, split_sign=False):
 
 class FitCalibrationModel:
     def __init__(self, fit_type=None, params_list=None, split_sign=False,
-                 path=None, error=None):
+                 path=None, error=None, n_inputs=1):
         self.fit_type = fit_type
         self.params_list = params_list
         self.split_sign = bool(split_sign)
         self.path = path
         self.error = error
+        self.n_inputs = int(n_inputs)
 
     @property
     def available(self):
@@ -158,8 +159,11 @@ class FitCalibrationModel:
         if not path or not os.path.exists(path):
             return cls(path=path)
         try:
-            fit_type, _, params_list, split_sign = load_fit_coefs(path)
-            return cls(fit_type, params_list, split_sign, path=path)
+            fit_type, n_inputs, params_list, split_sign = load_fit_coefs(path)
+            return cls(
+                fit_type, params_list, split_sign, path=path,
+                n_inputs=n_inputs,
+            )
         except Exception as exc:
             return cls(path=path, error=exc)
 
@@ -168,19 +172,10 @@ class FitCalibrationModel:
         """从 wheel 内置 package resource 加载模型，不依赖源码路径。"""
         resource_name = "tangential.resources/fit_coefs.bin"
         try:
-            try:
-                resource_package = "tangential.resources"
-                resource = resources.files(resource_package).joinpath(
-                    "fit_coefs.bin"
-                )
-            except ModuleNotFoundError:
-                # 源码测试可能以 ``src.tangential`` 导入；正式 wheel 始终
-                # 使用上面的标准包名。
-                resource_package = f"{__package__.split('.')[0]}.tangential.resources"
-                resource = resources.files(resource_package).joinpath(
-                    "fit_coefs.bin"
-                )
-            fit_type, _, params_list, split_sign = load_fit_coefs(
+            resource = resources.files("tangential.resources").joinpath(
+                "fit_coefs.bin"
+            )
+            fit_type, n_inputs, params_list, split_sign = load_fit_coefs(
                 resource.read_bytes()
             )
             return cls(
@@ -188,6 +183,7 @@ class FitCalibrationModel:
                 params_list,
                 split_sign,
                 path=resource_name,
+                n_inputs=n_inputs,
             )
         except Exception as exc:
             return cls(path=resource_name, error=exc)
@@ -198,8 +194,61 @@ class FitCalibrationModel:
         inputs = [dx, dy]
         if cal_dim == "3D":
             inputs.append(total)
+        resolved_entries = [
+            _resolve_entry(entry, self.fit_type, self.split_sign)
+            for entry in self.params_list
+        ]
+        if (
+            self.n_inputs > 1
+            and resolved_entries
+            and all(entry[1] == "poly" for entry in resolved_entries)
+        ):
+            values = []
+            inputs = np.asarray(inputs[:self.n_inputs], dtype=np.float64)
+            first_params, _, first_split = resolved_entries[0]
+            term_count = (
+                len(first_params[0]) if first_split else len(first_params)
+            )
+            order = _infer_poly_order(term_count, self.n_inputs)
+            for params, _, current_split in resolved_entries:
+                if current_split:
+                    params = params[0] if inputs[0] >= 0 else params[1]
+                values.append(float(np.dot(params, _poly_basis(inputs, order))))
+            values.extend([float("nan")] * (3 - len(values)))
+            return tuple(float(value) for value in values[:3])
         values = list(apply_fit_predict_multi(
             inputs, self.params_list, self.fit_type, self.split_sign
         ))
         values.extend([float("nan")] * (3 - len(values)))
         return tuple(float(value) for value in values[:3])
+
+
+def _poly_basis(values, order):
+    """Build the training module's constant/total-degree polynomial basis."""
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    columns = [1.0]
+    if order >= 1:
+        columns.extend(values[index] for index in range(len(values)))
+    if order >= 2:
+        columns.extend(
+            values[i] * values[j]
+            for i in range(len(values))
+            for j in range(i, len(values))
+        )
+    if order >= 3:
+        columns.extend(
+            values[i] * values[j] * values[k]
+            for i in range(len(values))
+            for j in range(i, len(values))
+            for k in range(j, len(values))
+        )
+    return np.asarray(columns, dtype=np.float64)
+
+
+def _infer_poly_order(term_count, n_inputs):
+    for order in (1, 2, 3):
+        if len(_poly_basis(np.zeros(n_inputs), order)) == term_count:
+            return order
+    raise ValueError(
+        f"无法从 {n_inputs} 个输入和 {term_count} 个系数推断 poly 阶数"
+    )

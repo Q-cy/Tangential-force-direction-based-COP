@@ -8,6 +8,7 @@ from .api import (
     TangentialFrameProcessor,
     TangentialSample,
     TangentialSensorAPI,
+    angle_difference,
     compute_vector_angle,
     format_terminal_sample,
 )
@@ -15,6 +16,8 @@ from .config import FullApplicationConfig
 from .processing.calibration import FitCalibrationModel
 from .processing.cop import PRSensorAngle
 from .sensors.pressure import PressureSensor
+from .training import TrainingConfig, TrainingResult, train_model
+from .plotting import PlotConfig, PlotResult, plot_csv, plot_full_analysis
 
 TangentialSensor = TangentialSensorAPI
 
@@ -29,7 +32,15 @@ __all__ = [
     "PRSensorAngle",
     "PressureSensor",
     "compute_vector_angle",
+    "angle_difference",
     "format_terminal_sample",
+    "TrainingConfig",
+    "TrainingResult",
+    "train_model",
+    "PlotConfig",
+    "PlotResult",
+    "plot_csv",
+    "plot_full_analysis",
 ]
 
 __version__ = "0.2.0"

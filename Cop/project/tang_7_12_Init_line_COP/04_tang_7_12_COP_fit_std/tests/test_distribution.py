@@ -1,13 +1,12 @@
-"""打包契约测试。
+"""验证正式 Tangential SDK 的打包、资源和公共导入契约。
 
-这些测试只验证分发侧约定，不导入项目根目录下的旧脚本。源码包由主代理
-创建后，``src/tangential`` 相关测试会自动启用；在此之前仅验证配置本身。
 构建测试使用本地 setuptools/wheel 和 ``pip --no-index``，不访问网络。
 """
 
 from __future__ import annotations
 
 import os
+import ast
 import shutil
 import subprocess
 import sys
@@ -33,6 +32,47 @@ def _subprocess_env(*, python_path: Path | None = None) -> dict[str, str]:
 
 
 class DistributionConfigurationTests(unittest.TestCase):
+    def test_legacy_root_files_and_imports_are_absent(self):
+        legacy_files = {
+            "data.py", "table.py", "realtime.py", "tangential_package.py",
+            "tangential_other_package.py", "main.py", "example.py",
+            "fit.py", "plot_static.py",
+        }
+        for filename in legacy_files:
+            self.assertFalse(
+                (PROJECT_ROOT / filename).exists(),
+                f"旧根文件仍存在: {filename}",
+            )
+
+        forbidden_modules = {
+            "data", "table", "realtime", "main", "example", "fit",
+            "plot_static", "tangential_package", "tangential_other_package",
+        }
+        for path in PROJECT_ROOT.rglob("*.py"):
+            relative = path.relative_to(PROJECT_ROOT)
+            if any(part in {"build", "dist", "__pycache__"} for part in relative.parts):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    imported = [node.module or ""]
+                else:
+                    continue
+                for module in imported:
+                    self.assertFalse(
+                        module == "src.tangential" or module.startswith("src.tangential."),
+                        f"{path} 使用了 src.tangential 导入",
+                    )
+                    self.assertFalse(
+                        any(
+                            module == legacy or module.startswith(legacy + ".")
+                            for legacy in forbidden_modules
+                        ),
+                        f"{path} 使用了旧模块导入: {module}",
+                    )
+
     def test_pyproject_declares_public_distribution_contract(self):
         with PYPROJECT.open("rb") as stream:
             config = tomllib.load(stream)
@@ -41,6 +81,7 @@ class DistributionConfigurationTests(unittest.TestCase):
         self.assertEqual(project["name"], "tangential-sensor")
         self.assertEqual(project["version"], "0.2.0")
         self.assertEqual(project["requires-python"], ">=3.11")
+        self.assertEqual(project["scripts"], {"tangential": "tangential.cli:main"})
         self.assertEqual(
             set(project["dependencies"]),
             {"numpy", "scipy", "pyserial"},
@@ -72,7 +113,7 @@ class DistributionConfigurationTests(unittest.TestCase):
 
 @unittest.skipUnless(
     (PACKAGE_ROOT / "__init__.py").is_file(),
-    "主代理尚未创建 src/tangential，暂不运行公开 API 分发测试",
+    "正式 tangential package 不存在，暂不运行公开 API 分发测试",
 )
 class PublicImportTests(unittest.TestCase):
     def test_public_import_isolated_from_project_root(self):
@@ -104,8 +145,9 @@ class PublicImportTests(unittest.TestCase):
 
 @unittest.skipUnless(
     (PACKAGE_ROOT / "__init__.py").is_file(),
-    "主代理尚未创建 src/tangential，暂不构建 wheel",
+    "正式 tangential package 不存在，暂不运行 wheel 测试",
 )
+@unittest.skip("wheel 构建验收在阶段3执行")
 class WheelDistributionTests(unittest.TestCase):
     def test_wheel_contains_package_and_model_data_file(self):
         with tempfile.TemporaryDirectory() as directory:

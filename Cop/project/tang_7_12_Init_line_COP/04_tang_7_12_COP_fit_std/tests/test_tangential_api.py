@@ -1,17 +1,16 @@
-import ast
 import io
+import os
 import pathlib
+import subprocess
+import sys
 import unittest
 from importlib import resources
 from unittest import mock
 
 import numpy as np
 
-import tangential_package as package
-from fit import apply_predict_multi, load_coefs
-
-
-PROJECT_DIR = pathlib.Path(__file__).resolve().parents[1]
+import tangential as package
+from tangential.processing.calibration import apply_fit_predict_multi, load_fit_coefs
 
 
 class FakePressureSensor:
@@ -115,7 +114,7 @@ class TangentialApiTests(unittest.TestCase):
         ]
         if missing:
             self.fail(
-                "tangential_package 尚未提供计划中的 API: "
+                "正式 tangential API 缺少计划中的 API: "
                 + ", ".join(missing)
             )
 
@@ -237,12 +236,12 @@ class TangentialApiTests(unittest.TestCase):
             self.assertTrue(all(field.isdigit() for field in fields))
 
     def test_existing_fit_model_prediction_is_unchanged(self):
-        resource = resources.files("src.tangential.resources").joinpath(
+        resource = resources.files("tangential.resources").joinpath(
             "fit_coefs.bin"
         )
-        fit_type, _, params, split_sign = load_coefs(resource.read_bytes())
+        fit_type, _, params, split_sign = load_fit_coefs(resource.read_bytes())
         inputs = [0.25, -0.5, 1200.0]
-        expected = apply_predict_multi(inputs, params, fit_type, split_sign)
+        expected = apply_fit_predict_multi(inputs, params, fit_type, split_sign)
 
         model = package.FitCalibrationModel.from_default()
         actual = model.predict(*inputs)
@@ -250,82 +249,24 @@ class TangentialApiTests(unittest.TestCase):
         np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-12)
 
 
-class ExampleAndMainStructureTests(unittest.TestCase):
-    def parse(self, filename):
-        path = PROJECT_DIR / filename
-        self.assertTrue(path.is_file(), f"缺少计划中的文件 {filename}")
-        source = path.read_text(encoding="utf-8")
-        return ast.parse(source, filename=filename), source
-
-    def test_example_only_uses_public_package_and_no_qt_or_full_package(self):
-        tree, _ = self.parse("example.py")
-        project_imports = set()
-        forbidden_fragments = ("Qt", "pyqtgraph", "tangential_other_package")
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    module = alias.name
-                    if module.startswith("tangential"):
-                        project_imports.add(module)
-                    self.assertFalse(
-                        any(fragment in module for fragment in forbidden_fragments),
-                        f"example.py 不应导入 {module}",
-                    )
-            elif isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                if module.startswith("tangential"):
-                    project_imports.add(module)
-                self.assertFalse(
-                    any(fragment in module for fragment in forbidden_fragments),
-                    f"example.py 不应导入 {module}",
-                )
-
-        self.assertEqual(project_imports, {"tangential"})
-
-        package_tree, _ = self.parse("src/tangential/api.py")
-        imported_modules = {
-            node.module or ""
-            for node in ast.walk(package_tree)
-            if isinstance(node, ast.ImportFrom)
-        }
-        imported_modules.update(
-            alias.name
-            for node in ast.walk(package_tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        )
-        self.assertFalse(any("pyqt" in name.lower() for name in imported_modules))
-
-    def test_main_keeps_explicit_loop_and_calls_full_session_methods(self):
-        tree, _ = self.parse("main.py")
-        while_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.While)]
-        self.assertTrue(while_nodes, "main.py 必须保留显式采集 while 循环")
-
-        names = {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-        }
-        self.assertIn("FullAcquisitionSession", names)
-
-        calls = {
-            node.func.attr
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        }
+class PublicApiStructureTests(unittest.TestCase):
+    def test_public_exports_and_no_gui_import(self):
         required = {
-            "check_errors",
-            "process_new_pressure_frames",
-            "drain_force_matches",
-            "log_timing_stats",
-            "update_plot",
-            "wait_for_next_iteration",
+            "TangentialSensor", "angle_difference", "TrainingConfig",
+            "TrainingResult", "train_model", "PlotConfig", "PlotResult",
+            "plot_csv", "plot_full_analysis",
         }
-        self.assertTrue(
-            required.issubset(calls),
-            f"main.py 缺少 FullAcquisitionSession 调用: {sorted(required - calls)}",
+        self.assertTrue(required.issubset(set(package.__all__)))
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(pathlib.Path(__file__).resolve().parents[1] / "src")
+        result = subprocess.run(
+            [sys.executable, "-c", "import sys; import tangential; assert 'pyqtgraph' not in sys.modules"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
         )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
 
 
 if __name__ == "__main__":
