@@ -34,6 +34,14 @@ def make_pressure_frame(values):
     return bytes(frame)
 
 
+def make_force_frame(values=(1, 2, 3, 4, 5, 6)):
+    return (
+        b"\x49\xaa"
+        + b"".join(struct.pack("<f", value) for value in values)
+        + b"\x0d\x0a"
+    )
+
+
 def pressure_parser():
     sensor = PressureSensor.__new__(PressureSensor)
     sensor._rx_buf = bytearray()
@@ -135,6 +143,71 @@ class TimedPressureSerial:
     def reset_output_buffer(self):
         with self._lock:
             self.output_resets += 1
+
+    def close(self):
+        self.is_open = False
+
+
+class TimedForceSerial:
+    """在力请求后延迟返回28B普通帧。"""
+
+    def __init__(self, response_delay_s=0.003, respond=True):
+        self.response_delay_s = response_delay_s
+        self.respond = respond
+        self.is_open = True
+        self.write_times = []
+        self.overlapping_writes = 0
+        self.input_resets = 0
+        self.output_resets = 0
+        self._pending = b""
+        self._ready_at = None
+        self._outstanding = False
+        self._lock = threading.Lock()
+
+    def write(self, data):
+        with self._lock:
+            if self._outstanding:
+                self.overlapping_writes += 1
+            now = time.perf_counter()
+            self.write_times.append(now)
+            self._outstanding = True
+            if self.respond:
+                self._pending = make_force_frame()
+                self._ready_at = now + self.response_delay_s
+            return len(data)
+
+    def wait_readable(self, timeout_s):
+        deadline = time.perf_counter() + timeout_s
+        while time.perf_counter() < deadline:
+            with self._lock:
+                if self._pending and time.perf_counter() >= self._ready_at:
+                    return True
+            time.sleep(min(0.0001, max(0.0, deadline - time.perf_counter())))
+        with self._lock:
+            return bool(
+                self._pending and time.perf_counter() >= self._ready_at
+            )
+
+    def read(self, size):
+        with self._lock:
+            if not self._pending or time.perf_counter() < self._ready_at:
+                return b""
+            chunk = self._pending[:size]
+            self._pending = self._pending[size:]
+            if not self._pending:
+                self._ready_at = None
+                self._outstanding = False
+            return chunk
+
+    def reset_input_buffer(self):
+        with self._lock:
+            self.input_resets += 1
+            self._pending = b""
+            self._ready_at = None
+            self._outstanding = False
+
+    def reset_output_buffer(self):
+        self.output_resets += 1
 
     def close(self):
         self.is_open = False
@@ -678,6 +751,135 @@ class PressureTimingTests(unittest.TestCase):
         self.assertEqual(frame["request_seq"], 1)
         self.assertGreaterEqual(stats["response_timeouts"], 1)
         self.assertGreaterEqual(serial_port.input_resets, 2)
+
+
+class ForceTimingTests(unittest.TestCase):
+    @staticmethod
+    def make_sensor(serial_port, **kwargs):
+        return SixAxisForceSensor(
+            serial_instance=serial_port,
+            readiness_waiter=serial_port.wait_readable,
+            **kwargs,
+        )
+
+    def test_default_force_rate_matches_pressure(self):
+        self.assertEqual(FORCE_TARGET_HZ, PRESSURE_TARGET_HZ)
+        self.assertEqual(FORCE_PERIOD_S, PRESSURE_PERIOD_S)
+        self.assertEqual(FORCE_RESPONSE_TIMEOUT_S, 0.050)
+        self.assertEqual(FORCE_FRAME_QUEUE_SIZE, 256)
+
+    def test_single_inflight_uses_complete_frame_receive_timestamp(self):
+        serial_port = TimedForceSerial(response_delay_s=0.003)
+        sensor = self.make_sensor(serial_port)
+        try:
+            frames = [sensor.read_frame(timeout_s=0.2) for _ in range(6)]
+            first_rx_t = frames[0]["rx_t"]
+            time.sleep(0.02)
+            self.assertEqual(frames[0]["rx_t"], first_rx_t)
+            self.assertEqual(
+                [frame["request_seq"] for frame in frames], list(range(6))
+            )
+            self.assertTrue(all(frame["latency_s"] >= 0.003 for frame in frames))
+        finally:
+            sensor.close()
+
+        intervals = [
+            b - a for a, b in zip(
+                serial_port.write_times, serial_port.write_times[1:]
+            )
+        ]
+        self.assertEqual(serial_port.overlapping_writes, 0)
+        self.assertGreaterEqual(statistics.median(intervals), 0.0045)
+        self.assertLess(statistics.median(intervals), 0.008)
+
+    def test_slow_force_response_reduces_rate_without_burst(self):
+        serial_port = TimedForceSerial(response_delay_s=0.008)
+        sensor = self.make_sensor(serial_port)
+        try:
+            frames = [sensor.read_frame(timeout_s=0.2) for _ in range(4)]
+            stats = sensor.get_timing_stats()
+        finally:
+            sensor.close()
+
+        intervals = [
+            b - a for a, b in zip(
+                serial_port.write_times, serial_port.write_times[1:]
+            )
+        ]
+        self.assertTrue(all(frame is not None for frame in frames))
+        self.assertEqual(serial_port.overlapping_writes, 0)
+        self.assertTrue(all(interval >= 0.007 for interval in intervals))
+        self.assertGreaterEqual(stats["schedule_skips"], 1)
+
+    def test_force_timeout_recovers_without_overlapping_requests(self):
+        serial_port = TimedForceSerial(respond=False)
+        sensor = self.make_sensor(
+            serial_port, period_s=0.010, response_timeout_s=0.020
+        )
+        try:
+            time.sleep(0.075)
+            stats = sensor.get_timing_stats()
+        finally:
+            sensor.close()
+
+        self.assertGreaterEqual(stats["response_timeouts"], 2)
+        self.assertEqual(serial_port.overlapping_writes, 0)
+        intervals = [
+            b - a for a, b in zip(
+                serial_port.write_times, serial_port.write_times[1:]
+            )
+        ]
+        self.assertTrue(all(interval >= 0.018 for interval in intervals))
+
+    def test_production_force_backend_forwards_frame_and_stats(self):
+        real_context = data_module.multiprocessing.get_context("spawn")
+        fake_context = FakeMultiprocessingContext(real_context)
+        expected = {
+            "request_seq": 3,
+            "tx_t": 5.0,
+            "rx_t": 5.006,
+            "latency_s": 0.006,
+            "data": [1.0] * 6,
+        }
+
+        def fake_process_entry(
+            port, period_s, timeout_s, queue_size,
+            frame_queue, status_queue, startup_queue, stop_event,
+        ):
+            self.assertEqual(port, data_module.FORCE_SENSOR_PORT)
+            self.assertEqual(period_s, FORCE_PERIOD_S)
+            self.assertEqual(timeout_s, FORCE_RESPONSE_TIMEOUT_S)
+            self.assertEqual(queue_size, FORCE_FRAME_QUEUE_SIZE)
+            startup_queue.put(("ready", None))
+            frame_queue.put(expected)
+            status_queue.put(("stats", {
+                "frames": 1,
+                "queue_drops": 0,
+                "tx_intervals_s": [0.005],
+                "rx_intervals_s": [0.006],
+                "latencies_s": [0.006],
+            }))
+            stop_event.wait()
+
+        with mock.patch.object(
+            data_module.multiprocessing, "get_context", return_value=fake_context
+        ), mock.patch.object(
+            data_module, "_force_process_main", side_effect=fake_process_entry
+        ):
+            sensor = SixAxisForceSensor(_startup_timeout_s=0.5)
+            try:
+                frame = sensor.read_frame(timeout_s=0.5)
+                self.assertEqual(frame, expected)
+                deadline = time.monotonic() + 0.5
+                stats = sensor.get_timing_stats()
+                while stats["frames"] != 1 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    stats = sensor.get_timing_stats()
+                self.assertEqual(stats["rx_intervals_s"], [0.006])
+            finally:
+                sensor.close()
+
+        self.assertFalse(fake_context.process.terminated)
 
 
 class TimestampedBufferTests(unittest.TestCase):

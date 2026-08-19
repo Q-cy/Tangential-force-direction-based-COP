@@ -19,11 +19,26 @@ python -m pip install -r requirements.txt
 
 本机已验证的 Conda 环境是 `TimeDrift_GRU`。
 
-## 运行
+## API 示例
+
+最小示例只依赖 `tangential_package.py`，采集压力帧并计算 CoP、角度、梯度和
+`fit_coefs.bin` 标定结果。终端每帧原位刷新固定的 12×7 ADC 矩阵以及
+min、max、sum、mean、copX、copY、angle 和标定力：
+
+```bash
+python example.py
+```
+
+完整示例保留原来的双传感器、时间匹配、CSV 和 PyQtGraph 功能：
 
 ```bash
 python main.py
 ```
+
+`main.py` 明确保留采集 `while` 循环；设备、CoP/标定处理、重新归零、CSV、
+同步、统计和 GUI 生命周期由 `TangentialFrameProcessor`、
+`FullAcquisitionSession` 等类封装。完整应用直接复用最小 API 的单帧处理器，
+不会维护第二套 CoP、梯度或拟合算法。
 
 压力传感器是必需设备：连接失败时程序退出，且不会创建空 CSV。六维力传感器
 是可选设备；启动时需要在 1 秒内收集 10 个有效帧完成零点校准。连接或校零失败

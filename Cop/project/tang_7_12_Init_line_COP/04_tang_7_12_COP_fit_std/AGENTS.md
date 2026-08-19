@@ -2,6 +2,14 @@
 
 本文是本目录的执行约束。修改代码前先阅读本文和相关模块；不要把它当作泛化的项目介绍。若代码现状与本文冲突，先核对实际实现、测试和用户要求，再更新本文或提出风险。
 
+## 0. 代码风格
+
+- 通用压力采集、CoP、角度、梯度和标定 API 放在 `tangential_package.py`；不得依赖 Qt。
+- 完整应用额外使用的六维力、同步、CSV、GUI 和生命周期封装放在
+  `tangential_other_package.py`，并复用最小 API，不实现第二套算法。
+- `example.py` 是最小示例：终端固定显示 12×7 ADC、min、max、sum、mean、copX、copY、angle。
+- `main.py` 是完整示例，必须保留显式采集 `while` 循环；循环只编排会话对象的公开方法。
+
 ## 1. 项目边界与环境
 
 - 项目名和工作目录：`04_tang_7_12_COP_fit_std`。
@@ -22,7 +30,6 @@
   requirements.txt
   tests/
   ```
-
 - 本项目可能与兄弟目录共用 Git 工作树。保护无关改动，不使用宽泛路径执行覆盖、删除或回退操作。
 
 ## 2. 压力采集约束
@@ -62,10 +69,14 @@ SixAxisForceSensor → ForceThread → TimestampedBuffer
 压力帧与力帧 → 时间匹配 → CSV中的力字段和标定字段
 ```
 
-- 两个采集线程分别负责压力和力设备；线程间共享数据必须通过带锁的 `TimestampedBuffer`。
+- 压力和六维力生产路径分别由独立 `spawn` 子进程负责串口 I/O；父进程的
+  `PressureThread`/`ForceThread` 只消费带真实 `rx_t` 的帧。测试注入串口时可退回本地线程。
+  线程间共享数据必须通过带锁的 `TimestampedBuffer`。
 - `TimestampedBuffer` 的帧具有单调递增 `seq`，使用 `get_after(seq)` 获取尚未处理的帧，使用 `find_closest(ts, max_diff_s, min_seq)` 做未使用力帧匹配。
 - 压力是主驱动。主循环约 `100 Hz` 批量处理全部新的压力帧；不能只取最新帧，也不能让 GUI 刷新节拍决定采样节拍。
 - GUI最高 `60 Hz`，只负责显示，不参与压力请求、串口读取或采样调度。
+- 六维力目标频率同为 `200 Hz`、周期 `5 ms`、响应超时 `50 ms`；实际频率由设备响应限制。
+  力帧的 `rx_t` 必须在完整 `49 AA ... 0D 0A` 帧确定后立即记录，用于 ±15 ms 匹配。
 - 有六维力时，在 `±15 ms`（`MAIN_MAX_TIME_DIFF_S=0.015`）内一对一匹配；一个力帧最多匹配一次。当前实现中，超过窗口未匹配的压力行不写入 CSV，但该压力帧仍必须推进阈值、CoP、精修、标定状态和 GUI。
 - 没有六维力时，每个合法压力帧都写入一行；力字段及其派生字段写 `NaN`。
 - 所有采集生命周期使用 `try/finally`：设置停止事件、停止并等待线程/进程、关闭串口和 CSV；仅在确实没有数据行时删除本次空文件。线程异常必须通知主线程，不能让 GUI在采集已静默死亡后继续显示。
@@ -134,7 +145,7 @@ QT_QPA_PLATFORM=offscreen MPLCONFIGDIR=/tmp/pzt-mplconfig \
 /home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python -m unittest discover -s tests -v
 
 /home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python -m py_compile \
-  main.py data.py table.py realtime.py fit.py plot_static.py \
+  main.py example.py data.py table.py realtime.py fit.py plot_static.py \
   tangential_other_package.py tangential_package.py
 
 git diff --check

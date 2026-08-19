@@ -1,15 +1,18 @@
 import csv
 import os
-import queue
 import tempfile
 import threading
 import time
 import unittest
-from unittest import mock
 
 import numpy as np
 
 import main
+from data import TimestampedBuffer
+from tangential_other_package import (
+    FullApplicationConfig,
+    PressureThread,
+)
 
 
 class PlotStub:
@@ -165,15 +168,18 @@ class MainLoopIntegrationTests(unittest.TestCase):
         FakeForce.initial_delay = 0.0
 
     def run_loop(self, directory, force_cls=FakeForce):
-        with (
-            mock.patch.object(main, "MAIN_SAVE_DIR", directory),
-            mock.patch.object(main, "PressureSensor", FakePressure),
-            mock.patch.object(main, "SixAxisForceSensor", force_cls),
-            mock.patch.object(main, "MAIN_TARGET_FPS", 1000),
-            mock.patch.object(main, "MAIN_MAX_TIME_DIFF_S", 0.015),
-            mock.patch.object(main, "_load_fit_model", return_value=(None, None, False)),
-        ):
-            main.data_loop(PlotStub())
+        config = FullApplicationConfig(
+            save_dir=directory,
+            fit_coefs_path=os.path.join(directory, "missing.bin"),
+            target_fps=1000,
+            max_time_diff_s=0.015,
+        )
+        main.data_loop(
+            PlotStub(),
+            config=config,
+            pressure_factory=FakePressure,
+            force_factory=force_cls,
+        )
 
     def test_pressure_required_failure_creates_no_csv(self):
         class MissingPressure:
@@ -181,12 +187,16 @@ class MainLoopIntegrationTests(unittest.TestCase):
                 raise OSError("missing")
 
         with tempfile.TemporaryDirectory() as directory:
-            with (
-                mock.patch.object(main, "MAIN_SAVE_DIR", directory),
-                mock.patch.object(main, "PressureSensor", MissingPressure),
-            ):
-                with self.assertRaisesRegex(RuntimeError, "压力传感器未连接"):
-                    main.data_loop(PlotStub())
+            config = FullApplicationConfig(
+                save_dir=directory,
+                fit_coefs_path=os.path.join(directory, "missing.bin"),
+            )
+            with self.assertRaisesRegex(RuntimeError, "压力传感器未连接"):
+                main.data_loop(
+                    PlotStub(),
+                    config=config,
+                    pressure_factory=MissingPressure,
+                )
             self.assertEqual(os.listdir(directory), [])
 
     def test_force_calibration_failure_degrades_to_pressure_only(self):
@@ -238,14 +248,6 @@ class MainLoopIntegrationTests(unittest.TestCase):
         self.assertTrue(FakePressure.instances[-1].closed)
         self.assertTrue(FakeForce.instances[-1].closed)
 
-    def test_data_thread_entry_reports_exception(self):
-        errors = queue.Queue()
-        main.g_main_stop_flag.clear()
-        with mock.patch.object(main, "data_loop", side_effect=RuntimeError("boom")):
-            main._data_thread_entry(PlotStub(), errors)
-        self.assertEqual(str(errors.get_nowait()), "boom")
-        self.assertTrue(main.g_main_stop_flag.is_set())
-
     def test_acquisition_thread_exposes_sensor_exception(self):
         class BrokenSensor:
             def read_frame(self, timeout_s=0.1):
@@ -256,7 +258,9 @@ class MainLoopIntegrationTests(unittest.TestCase):
                 return raw
 
         main.g_main_stop_flag.clear()
-        thread = main.PressureThread(BrokenSensor(), main.TimestampedBuffer())
+        thread = PressureThread(
+            BrokenSensor(), TimestampedBuffer(), main.g_main_stop_flag
+        )
         thread.start()
         thread.join(timeout=1)
         self.assertIsInstance(thread.error, OSError)
@@ -267,15 +271,18 @@ class MainLoopIntegrationTests(unittest.TestCase):
             instances = []
 
         with tempfile.TemporaryDirectory() as directory:
-            with (
-                mock.patch.object(main, "MAIN_SAVE_DIR", directory),
-                mock.patch.object(main, "PressureSensor", FakePressure),
-                mock.patch.object(main, "SixAxisForceSensor", FailedForce),
-                mock.patch.object(main, "MAIN_TARGET_FPS", 1000),
-                mock.patch.object(main, "_load_fit_model", return_value=(None, None, False)),
-            ):
-                with self.assertRaisesRegex(RuntimeError, "plot failed"):
-                    main.data_loop(ExplodingPlot())
+            config = FullApplicationConfig(
+                save_dir=directory,
+                fit_coefs_path=os.path.join(directory, "missing.bin"),
+                target_fps=1000,
+            )
+            with self.assertRaisesRegex(RuntimeError, "plot failed"):
+                main.data_loop(
+                    ExplodingPlot(),
+                    config=config,
+                    pressure_factory=FakePressure,
+                    force_factory=FailedForce,
+                )
             paths, rows = read_csvs(directory)
 
         self.assertEqual(len(paths), 1)
