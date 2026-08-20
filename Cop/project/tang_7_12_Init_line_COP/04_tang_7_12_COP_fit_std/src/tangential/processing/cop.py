@@ -9,7 +9,13 @@ from scipy.ndimage import generate_binary_structure, label
 
 
 class PRSensorAngle:
-    """压阻传感器：12×7（默认）PZT 阵列的 CoP 角度估计"""
+    """12×7（可配置尺寸）PZT 阵列的 CoP、角度、梯度和区域状态处理器。
+
+    输入是按行优先展开的 ADC 压力帧，坐标约定为 x=列、y=行，位移单位为
+    cell，角度单位为度。实例内部维护动态阈值、首次接触 origin、二次精修
+    状态以及多区域的跨帧跟踪状态；因此除明确标注为无状态的查询外，逐帧
+    处理方法会改变实例状态。
+    """
 
     def __init__(self, rows: int = 12, cols: int = 7,
                  total_threshold_factor: float = 3, pixel_threshold_factor: float = 5,
@@ -22,30 +28,32 @@ class PRSensorAngle:
                  region_match_dist: float = 5.0,
                  region_min_area: int = 4,
                  region_peak_ratio: float = 1, region_peak_dist: int = 3):
-        """
-        构造一个 PRSensorAngle 角度估计实例。
+        """构造一个带动态阈值和接触状态的阵列处理器。
 
-        :param rows: 传感器阵列行数（默认 12）。
-        :param cols: 传感器阵列列数（默认 7），输入 ADC 序列长度 = rows * cols。
-        :param total_threshold_factor: 动态低压阈值倍数：thresh = total_threshold_factor × mean(前 collect_frames 帧总压力)。
-                                值越大，越难被判定为"低压"。
-        :param pixel_threshold_factor: 逐像素动态阈值倍数：thresh = pixel_threshold_factor × 逐像素背景平均。
-                                值越大，接触判定越严格。
-        :param collect_frames: 学习动态阈值用的样本窗口大小（默认 20 帧）。
-                              0 = 不学阈值, _total_thresh 直接 = 0（首帧非零压力锁 origin）。
-        :param stability_frames: 阈值确定后，连续多少帧低压自动 reset_origin（默认 5）。
-        :param reset_at_frame: 在第 N 帧自动调一次 reset_origin() 后重新锁新 origin；
-                                0 = 禁用自动 reset（默认）。
-        :param refine_cnt: origin 锁定后，连续多少帧 CoP 稳定触发"二次精修"
-                                        （调用 reset_origin() 让下帧自然重新锁）。默认 10。
-                                        0 = 禁用精修。
-        :param refine_distance: 判定"稳定"的 CoP 与候选点欧氏距离阈值（cells，默认 0.1）。
-                                      0 = 禁用精修。
-        :param merge_ratio: 浅谷合并阈值：边界 cell 压力 ÷ min(两 region 峰值) > 此值视为浅谷（默认 0.8）。
-        :param region_match_dist: region 帧间追踪质心最大匹配距离（cells，默认 5.0）：质心距离 ≤ 此值继承稳定 id。
-        :param region_min_area: region 最小面积（cell 数，默认 4）：分割/追踪/合并统一过滤 < 此值的碎片 region。
-        :param region_peak_ratio: 附属 region 判据：region 峰值 < 此比例 × 更高 region 峰值（默认 0.6）且 COP 距离近 → 并入高 region。
-        :param region_peak_dist: 附属 region 判据：与更高 region 的 COP 距离（欧氏, cells）< 此值（默认 3）且峰值低 → 并入。
+        Args:
+            rows: 阵列行数；默认 12。
+            cols: 阵列列数；默认 7，输入长度必须为 ``rows*cols``。
+            total_threshold_factor: 总压力动态阈值倍数，阈值为背景总压力均值
+                乘此值。
+            pixel_threshold_factor: 逐像素动态阈值倍数，阈值为逐像素背景均值
+                乘此值。
+            collect_frames: 背景阈值学习帧数；0 表示不学习并将阈值设为 0。
+            stability_frames: 连续低压多少帧后自动清除全局 origin。
+            reset_at_frame: 第 N 个处理帧自动清除 origin；0 禁用。
+            refine_cnt: CoP 稳定多少帧后触发二次精修；0 禁用。
+            refine_distance: 稳定判定的 CoP 欧氏距离，单位为 cell；0 禁用精修。
+            merge_ratio: 相邻区域浅谷合并比例阈值。
+            region_match_dist: 区域跨帧质心最大匹配距离，单位为 cell。
+            region_min_area: 区域最小面积，单位为 cell 数。
+            region_peak_ratio: 附属低峰区域相对高峰区域的合并比例阈值。
+            region_peak_dist: 附属区域与高峰区域 CoP 的最大距离，单位为 cell。
+
+        Returns:
+            None。
+
+        Side Effects:
+            初始化阈值学习窗口、全局接触状态、精修状态和区域 tracker；后续
+            帧处理会继续修改这些状态。
         """
         self.rows = rows
         self.cols = cols
@@ -95,16 +103,22 @@ class PRSensorAngle:
     # ---------- 公共 API ----------
 
     def get_all(self, adc_data) -> tuple[float, float, float, float, float]:
-        """
-        输入 rows*cols 个 ADC 值，一次性输出 (angle, dx, dy, cop_x, cop_y)。
+        """处理一帧 ADC 并返回角度、相对位移和当前 CoP。
 
-        :param adc_data: list/np.array，长度为 rows*cols 的 ADC 原始数据
-        :return: (angle, dx, dy, cop_x, cop_y)
-            · angle:     PZT 角度（0~360°）
-            · dx:        CoP X 方向位移（列方向，cells）
-            · dy:        CoP Y 方向位移（行方向，cells）
-            · cop_x/y:   当前帧 CoP（rows*cols cell 坐标）
-        :raises ValueError: ADC 数据长度不等于 rows*cols 时抛出
+        Args:
+            adc_data: list 或 ndarray，长度为 ``rows*cols`` 的原始 ADC 序列。
+
+        Returns:
+            tuple：``(angle, dx, dy, cop_x, cop_y)``；angle 为 0..360 度，
+            dx/dy 为相对 origin 的 cell 位移，cop_x/cop_y 为当前压力加权
+            中心，x 为列坐标、y 为行坐标。
+
+        Raises:
+            ValueError: ADC 长度不等于 ``rows*cols``。
+
+        Side Effects:
+            更新帧计数、动态阈值接触状态和二次精修状态；调用 ``get_cop`` 本身
+            不再额外改变状态。
         """
         expected = self.rows * self.cols
         if len(adc_data) != expected:
@@ -116,11 +130,17 @@ class PRSensorAngle:
         return angle, dx, dy, cop_x, cop_y
 
     def get_cop(self, adc_data) -> tuple[float, float]:
-        """计算当前帧 CoP (cop_x, cop_y)，不影响 origin/精修状态。
+        """计算当前帧压力加权中心，不改变 origin 或精修状态。
 
-        :param adc_data: list/np.array，长度为 rows*cols 的 ADC 原始数据
-        :return: (cop_x, cop_y)，cell 单位；总压力为 0 时返回 (0.0, 0.0)
-        :raises ValueError: ADC 数据长度不等于 rows*cols 时抛出
+        Args:
+            adc_data: list 或 ndarray，长度为 ``rows*cols`` 的原始 ADC 序列。
+
+        Returns:
+            tuple[float, float]：``(cop_x, cop_y)``，单位为 cell，x 为列、y
+            为行；总压力为 0 时返回 ``(0.0, 0.0)``。
+
+        Raises:
+            ValueError: ADC 长度不正确。
         """
         expected = self.rows * self.cols
         if len(adc_data) != expected:
@@ -134,16 +154,37 @@ class PRSensorAngle:
         return cop_x, cop_y
 
     def get_gradient(self, adc_data) -> np.ndarray:
-        """便捷接口：计算当前帧的 2D 梯度。等价于 compute_gradient(adc_data)。"""
+        """计算一帧 ADC 的二维空间梯度。
+
+        Args:
+            adc_data: list 或 ndarray，长度为 ``rows*cols`` 的原始 ADC 序列。
+
+        Returns:
+            np.ndarray：shape 为 ``(rows, cols, 2)``，最后一维依次为列方向
+            ``grad_x`` 和行方向 ``grad_y``，单位为 ADC 差值。
+
+        Raises:
+            ValueError: ADC 长度不正确。
+        """
         gradient = self._compute_gradient(adc_data)
         return gradient
 
     def get_origin(self) -> tuple[float | None, float | None]:
-        """返回首次接触 origin：(origin_x, origin_y)；未锁时均为 None。"""
+        """读取当前全局接触 origin。
+
+        Returns:
+            tuple：``(origin_x, origin_y)``，单位为 cell；尚未锁定接触时两个
+            值均为 ``None``。
+        """
         return self._origin_x, self._origin_y
 
     def get_state(self) -> int:
-        """返回 CoP 状态：0=未接触, 1=已接触/粗略, 2=已精修。"""
+        """读取全局 CoP 接触状态。
+
+        Returns:
+            int：0 表示未锁定接触，1 表示已接触但未完成精修，2 表示已完成
+            二次精修；不修改内部状态。
+        """
         if self._refined:
             return 2
         if self._contact_init:
@@ -154,6 +195,15 @@ class PRSensorAngle:
         """清掉首次接触 origin 与低压计数，同时清掉二次精修状态（候选点、稳定计数、已精修标志）；
         阈值（若已确定）保留。
         注意: 不清 _region_states (per-region 状态独立管理, 由 reset_region_origin 处理)。
+        Args:
+            None。
+
+        Returns:
+            None。
+
+        Side Effects:
+            清除全局 origin、接触标志、低压计数和精修候选；已确定的动态阈值
+            以及独立的 ``_region_states`` 保留不变。
         """
         self._origin_x = None
         self._origin_y = None
@@ -166,6 +216,17 @@ class PRSensorAngle:
 
     def get_region_state(self, region_id: int) -> dict:
         """获取 region 的状态字典；首次访问时建空状态。
+
+        Args:
+            region_id: 区域稳定整数标识。
+
+        Returns:
+            dict：该区域的可变状态字典；首次访问会创建并返回初始状态。
+            字段包括 ``origin_x/y``、接触/精修状态、足迹坐标、最近两帧 CoP
+            和 stale 帧数。
+
+        Side Effects:
+            首次访问未知 id 时向 ``_region_states`` 注册一个新状态。
 
         每个 region 状态: {origin_x, origin_y, contact_init, refine_cand_x,
                           refine_cand_y, refine_curr, refined, coords,
@@ -188,10 +249,17 @@ class PRSensorAngle:
         return s
 
     def dynamic_threshold(self, frame2d: np.ndarray) -> None:
-        """外部 API: 同时更新两类阈值（总压 + 逐像素）。main 流程每帧调用一次。
-        内部委托:
-          - self._dynamic_total_threshold(total_pressure)  → 更新 _total_thresh
-          - self._dynamic_pixel_threshold(frame2d)         → 更新 _pixel_thresh
+        """用一帧二维压力数据更新总压和逐像素动态阈值。
+
+        Args:
+            frame2d: shape ``(rows, cols)`` 的二维 ADC/压力 ndarray。
+
+        Returns:
+            None。
+
+        Side Effects:
+            在锁保护下累积背景历史；达到 ``collect_frames`` 后设置
+            ``_total_thresh`` 和 ``_pixel_thresh``。应由上层每个压力帧调用一次。
         """
         total_pressure = float(np.sum(frame2d))
         self._dynamic_total_threshold(total_pressure)
@@ -199,6 +267,18 @@ class PRSensorAngle:
 
     # ---------- 内部算法 ----------
     def _dynamic_total_threshold(self, total_pressure: float) -> None:
+        """根据总压力样本更新全局低压阈值。
+
+        Args:
+            total_pressure: 当前帧所有 cell ADC 之和，无量纲 ADC 总量。
+
+        Returns:
+            None。
+
+        Side Effects:
+            在未确定阈值时写入历史窗口；窗口满后将阈值固定为背景均值乘倍数，
+            非正结果回退到 10。
+        """
         with self._lock:
             # collect_frames=0: 跳过历史累积, _total_thresh 直接 = 0
             # (低压判定 `total_pressure < 0` 永不触发, 几乎所有帧都视为"非低")
@@ -214,6 +294,18 @@ class PRSensorAngle:
                         self._total_thresh = 10
 
     def _dynamic_pixel_threshold(self, frame2d: np.ndarray) -> None:
+        """根据二维背景样本更新逐像素阈值矩阵。
+
+        Args:
+            frame2d: shape ``(rows, cols)`` 的二维 ADC 压力帧。
+
+        Returns:
+            None。
+
+        Side Effects:
+            以在线均值更新 ``_pixel_avg_buffer``；采样完成后固定
+            ``_pixel_thresh``，非正阈值位置回退到 10.0。
+        """
         with self._lock:
             if self.collect_frames <= 0:
                 if self._pixel_thresh is None:
@@ -233,11 +325,29 @@ class PRSensorAngle:
 
     @staticmethod
     def _compute_cop_angle(px: float, py: float) -> float:
+        """按 CoP 位移坐标约定计算方向角。
+
+        Args:
+            px: x 方向位移，单位为 cell。
+            py: y 方向位移，单位为 cell；内部按传感器坐标约定取反。
+
+        Returns:
+            float：0..360 度方向角。
+        """
         angle = PRSensorAngle._compute_angle(px, -py)
         return angle
 
     @staticmethod
     def _compute_angle(x: float, y: float) -> float:
+        """将二维向量转换为 [0, 360) 度角。
+
+        Args:
+            x: 向量 x 分量。
+            y: 向量 y 分量。
+
+        Returns:
+            float：``atan2(y, x)`` 转换后的角度，负角度加 360。
+        """
         epsilon = 1e-8
         angle = np.degrees(np.arctan2(y, x + epsilon))
         if angle < 0:
@@ -247,8 +357,16 @@ class PRSensorAngle:
     def _compute_cop(self, frame2d: np.ndarray, total_pressure: float) -> tuple[float, float]:
         """计算 2D 帧的 CoP (X, Y) — 压力加权中心, 几何意义.
 
-        输入:  (rows × cols) 帧 + 总压力 total_pressure
-        输出:  (cop_x, cop_y) 浮动位置, 已是 cell 单位
+        Args:
+            frame2d: shape ``(rows, cols)`` 的二维压力/ADC 数组。
+            total_pressure: ``frame2d`` 的总压力，必须为非零值。
+
+        Returns:
+            tuple[float, float]：压力加权中心 ``(cop_x, cop_y)``，单位为 cell，
+            x 为列方向、y 为行方向。
+
+        Raises:
+            ZeroDivisionError: ``total_pressure`` 为 0 时由除法产生。
         """
         x_grid = np.tile(np.arange(self.cols), (self.rows, 1))
         y_grid = np.repeat(np.arange(self.rows), self.cols).reshape(self.rows, self.cols)
@@ -264,8 +382,12 @@ class PRSensorAngle:
         不变）时形心位置不变。mask 与 _compute_region_BFS 同款
         (5×_pixel_thresh)。无接触返回 None。
 
-        :param frame2d: (rows × cols) 2D 压力帧
-        :return: (centroid_x, centroid_y) cell 单位, x = 列索引, y = 行索引
+        Args:
+            frame2d: shape ``(rows, cols)`` 的二维压力帧。
+
+        Returns:
+            tuple[float, float] | None：接触 mask 的等权形心，单位为 cell，
+            x 为列索引、y 为行索引；没有超过阈值的 cell 时返回 ``None``。
         """
         threshold = self._pixel_thresh if self._pixel_thresh is not None else 10.0
         mask = frame2d > 3 * threshold
@@ -275,6 +397,23 @@ class PRSensorAngle:
         return float(cs.mean()), float(rs.mean())
 
     def _compute_delta_cop(self, raw_frame) -> tuple[float, float]:
+        """计算单接触全局 CoP 相对 origin 的位移并推进接触状态机。
+
+        Args:
+            raw_frame: list 或 ndarray，长度为 ``rows*cols`` 的一维 ADC 压力帧。
+
+        Returns:
+            tuple[float, float]：``(delta_x, delta_y)``，单位为 cell，分别为
+            当前 CoP 减去全局 origin 的列/行位移；未接触、低压复位或零压力时
+            返回 ``(0.0, 0.0)``。
+
+        Side Effects:
+            增加帧计数，可能按低压稳定帧或指定帧号清除 origin，并可能在
+            CoP 稳定达到 ``refine_cnt`` 时把候选点设为新 origin。
+
+        Raises:
+            ValueError: 输入长度无法 reshape 为 ``(rows, cols)``。
+        """
         self._frame_count += 1
         if self._reset_at_frame > 0 and self._frame_count == self._reset_at_frame:
             self.reset_origin()
@@ -352,12 +491,15 @@ class PRSensorAngle:
     def _compute_gradient(self, adc_data) -> np.ndarray:
         """计算压力帧的 2D 梯度（中心差分）
 
-        :param adc_data: list/np.array，长度为 rows*cols 的 ADC 原始数据
-        :return: np.ndarray，shape (rows, cols, 2) — 最后一维是 (grad_x, grad_y)
-            · grad_x = 右 - 左（列方向）
-            · grad_y = 上 - 下（行方向）
-            · 边界单元使用单侧差分（缺失邻居用中心值代替，等价于中心差分退化）
-        :raises ValueError: ADC 数据长度不等于 rows*cols 时抛出
+        Args:
+            adc_data: list 或 ndarray，长度为 ``rows*cols`` 的一维 ADC 数据。
+
+        Returns:
+            np.ndarray：shape ``(rows, cols, 2)``；最后一维为 ``(grad_x, grad_y)``。
+            grad_x 为右减左，grad_y 为上减下，单位为 ADC 差值；边界使用单侧差分。
+
+        Raises:
+            ValueError: ADC 数据长度不等于 ``rows*cols``。
         """
         expected = self.rows * self.cols
         if len(adc_data) != expected:
@@ -380,12 +522,19 @@ class PRSensorAngle:
         return np.stack([grad_x, grad_y], axis=-1)
 
     def _merge_shallow_regions(self, region_mask, frame2d):
-        """合并浅谷相邻 region
-        输入： region_mask 存储 cell 属于哪个 region 的 array
-        输出：
-        边界 cell 压力 ≥ _merge_ratio × min(两 region 峰值) 的数量
-        > 边界总对数的一半 → 视为浅谷（材料噪声）→ 合并；否则为深谷（独立接触）→ 保留。
-        返回重编号为连续 1..M 的 region_mask。
+        """按区域边界压力合并由浅谷分隔的相邻区域。
+
+        Args:
+            region_mask: shape ``(rows, cols)`` 的整数标签矩阵，0 为背景，
+                正整数为区域编号。
+            frame2d: 与 ``region_mask`` 同形状的二维 ADC 压力帧。
+
+        Returns:
+            np.ndarray：与输入同形状的标签矩阵；满足浅谷条件的区域被并入，
+            输出标签重新编号为连续的 1..M。区域数不超过输入区域数。
+
+        Side Effects:
+            仅创建局部并查集状态，不修改传入数组。
         """
         n = int(region_mask.max())          # region_mask 为 int array
         if n <= 1:
@@ -423,12 +572,32 @@ class PRSensorAngle:
         parent = list(range(n + 1))
 
         def find(a):
+            """查找区域标签在并查集中的根并执行路径压缩。
+
+            Args:
+                a: 并查集标签整数。
+
+            Returns:
+                int：标签所属集合的根标签。
+            """
             while parent[a] != a:
                 parent[a] = parent[parent[a]]
                 a = parent[a]
             return a
 
         def union(a, b):
+            """将两个区域标签所在的并查集合并。
+
+            Args:
+                a: 第一个区域标签。
+                b: 第二个区域标签。
+
+            Returns:
+                None；若两标签已在同一集合则不改变 parent。
+
+            Side Effects:
+                修改外层局部并查集 ``parent``。
+            """
             ra, rb = find(a), find(b)
             if ra != rb:
                 parent[ra] = rb
@@ -463,12 +632,22 @@ class PRSensorAngle:
         return merged
 
     def _grow_from_peaks(self, markers, frame2d, mask):
+        """从峰值种子按压力优先进行四邻域区域生长。
+
+        Args:
+            markers: shape ``(rows, cols)`` 的整数种子标签矩阵，正整数是
+                区域种子，0 表示未标记。
+            frame2d: shape ``(rows, cols)`` 的二维 ADC 压力矩阵。
+            mask: shape 同上的 bool mask；只有 ``True`` cell 可被生长占领。
+
+        Returns:
+            np.ndarray：shape ``(rows, cols)`` 的 int32 标签矩阵；0 为背景，
+            正整数表示所属峰区域。
+
+        Side Effects:
+            只创建局部优先队列和标签矩阵，不修改输入数组。高压力 cell 优先
+            出队，因而波谷通常形成区域边界。
         """
-        输入：markers 峰 ID 矩阵；frame2d ADC 矩阵；mask boolarray
-        输出：labeled 存储 cell 属于哪个 region 的 array
-        BFS 峰生长: 种子先标号, 优先队列按 -压力
-        （高压力 cell 先被占领 → region 从峰一圈圈扩散, 波谷最后长到 → 天然边界）。
-        4 邻扩散, 只长入 mask 内且未标号的 cell。"""
         rows, cols = self.rows, self.cols
         labeled = np.zeros((rows, cols), dtype=np.int32)
         heap = []
@@ -508,12 +687,19 @@ class PRSensorAngle:
         _compute_region_cop 分割后做。
         面积 < self._region_min_area 的碎片 region 统一过滤（__init__ 参数 region_min_area）。
 
-        :param frame2d: (rows, cols) 2D 压力帧
-        :return: list[dict]，按 area 降序，每个 dict 包含:
+        Args:
+            frame2d: shape ``(rows, cols)`` 的二维压力帧。
+
+        Returns:
+            list[dict]：按区域面积降序排列；每项包含:
             · 'coords':         list[(row, col), ...] — 该域所有 cell 坐标
             · 'area':           int，区域内 cell 数（== len(coords)）
             · 'bbox':           (cmin, rmin, cmax, rmax) — 最小外接矩形（可能有空洞）
             · 'peak':           float — 区域内最高压力
+
+        Side Effects:
+            无；该方法只使用当前阈值和输入帧计算局部区域，不修改全局接触
+            origin 或区域 tracker。
         """
         threshold = self._pixel_thresh if self._pixel_thresh is not None else 10.0
         mask = frame2d > 3 * threshold
@@ -544,6 +730,16 @@ class PRSensorAngle:
             ring[(dr, dc)] = padded2[2+dr:2+dr+rows-1, 2+dc:2+dc+cols-1]
 
         def _corner(offsets):
+            """计算 2×2 峰候选角点外圈的均值和最大值。
+
+            Args:
+                offsets: 外圈相对偏移列表；每项是 ``ring`` 字典中的
+                    ``(dr, dc)`` 二元组。
+
+            Returns:
+                tuple[np.ndarray, np.ndarray]：外圈数组的逐元素均值和最大值，
+                用于判断 2×2 块是否为峰种子。
+            """
             cells = [ring[o] for o in offsets]
             return (sum(cells) / len(cells), np.maximum.reduce(cells))   # (均值, 最大值)
 
@@ -624,8 +820,11 @@ class PRSensorAngle:
         流程: 先调用 self._compute_region_BFS(frame2d) 取得每个 region 的几何信息,
             再对每个 region 在 frame2d 上算压力加权中心。
 
-        :param frame2d: (rows, cols) 2D 压力帧
-        :return: list[dict]，按 peak 降序，每个 dict 包含:
+        Args:
+            frame2d: shape ``(rows, cols)`` 的二维压力帧。
+
+        Returns:
+            list[dict]：按 peak 降序，每个 dict 包含:
             · 'coords':         list[(row, col), ...] — 该域所有 cell 坐标
             · 'area':           int，区域内 cell 数（== len(coords)）
             · 'bbox':           (cmin, rmin, cmax, rmax) — 最小外接矩形（可能有空洞）
@@ -640,6 +839,9 @@ class PRSensorAngle:
         归并不要求相邻; 被并入的 region 从结果中移除（region 数可能减少）。
 
         退化: coords 非空但 total_pressure == 0 时, cop 退化为几何中心 (rs.mean(), cs.mean())
+
+        Side Effects:
+            不修改 ``_region_states``；只在返回字典内部合并 coords 并重算区域特征。
 
         用法:
             for region in p._compute_region_cop(frame2d):
@@ -709,10 +911,20 @@ class PRSensorAngle:
             - 本帧不再出现的 region 保留 3 帧 stale 缓冲 (frames_since_seen>3 才删),
               短暂丢失 id 不丢; 调用 reset_region_origin(region_id) 可单独清掉"已放手"
 
-            :param frame2d: (rows, cols) 2D 压力帧
-            :return: list[dict]，按 area 降序，每个 dict 包含 _compute_region_cop 输出
+            Args:
+                frame2d: shape ``(rows, cols)`` 的二维压力帧。
+
+            Returns:
+                list[dict]：按区域面积降序；每项包含 ``_compute_region_cop`` 的
                     + 'delta': (delta_x, delta_y) — 该域 CoP 与其 origin 的差
                     + 'id':    稳定 region 标识 (跨帧不随面积排名变化)
+
+            Side Effects:
+                更新每个区域的 origin、精修计数、最近 CoP 和 stale 帧计数；连续
+                超过 3 帧未出现的区域从 ``_region_states`` 删除。
+
+            Raises:
+                ValueError: 输入帧形状不符合当前 rows/cols 时由区域处理抛出。
 
             用法:
                 for region in p._compute_region_delta_cop(frame2d):

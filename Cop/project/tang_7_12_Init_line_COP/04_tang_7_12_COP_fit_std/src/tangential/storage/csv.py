@@ -1,4 +1,8 @@
-# file_name: table.py
+"""完整采集 CSV 的唯一表头、文件初始化和行构造函数。
+
+CSV 列顺序是对外数据格式的一部分；采集和离线工具都应复用本模块，
+不要在其他模块手工拼接 108 列行数据。
+"""
 
 import os
 import csv
@@ -37,10 +41,21 @@ TABLE_CSV_HEADER = [  # CSV 文件表头（84通道 + 时间差 + 力/角度/标
 ]
 
 def auto_get_csv_path(save_dir: str) -> str:
-    """
-    自动生成不重复的CSV文件路径（格式：COP_test_MMDD_1.csv, COP_test_MMDD_2.csv...）
-    :param save_dir: 保存目录
-    :return: 完整的CSV文件路径
+    """在保存目录中生成当天不重复的 CSV 文件路径。
+
+    Args:
+        save_dir (str): 保存目录路径；目录不存在时会创建。
+
+    Returns:
+        str: 形如 ``<save_dir>/COP_test_MMDD_N.csv`` 的第一个未占用路径，
+            其中 ``MMDD`` 为本地日期，``N`` 从 1 开始。
+
+    Raises:
+        OSError: 保存目录无法创建或访问时抛出。
+
+    Side Effects:
+        调用 ``os.makedirs(..., exist_ok=True)`` 创建目录；只检查路径存在性，
+        不创建最终 CSV 文件。
     """
     from datetime import datetime
     os.makedirs(save_dir, exist_ok=True)
@@ -53,10 +68,23 @@ def auto_get_csv_path(save_dir: str) -> str:
         idx += 1
 
 def init_csv_file(file_path: str) -> tuple[csv.writer, object]:
-    """
-    初始化CSV文件，写入表头并返回writer和文件对象
-    :param file_path: CSV文件路径
-    :return: (csv_writer, csv_file_object)
+    """创建并初始化 CSV 文件，写入唯一固定表头。
+
+    Args:
+        file_path (str): 要写入的 CSV 文件路径；以写入模式打开，已有文件
+            内容会被覆盖。
+
+    Returns:
+        tuple[csv.writer, TextIO]: CSV writer 和保持打开状态的文本文件对象。
+            调用方负责持续写入、flush，并最终调用文件对象的 ``close``。
+
+    Raises:
+        OSError: 文件无法创建或打开时抛出。
+        UnicodeError: 文件编码初始化失败时可能抛出。
+
+    Side Effects:
+        以 UTF-8、换行兼容模式打开文件，写入 ``TABLE_CSV_HEADER``，并向
+        标准输出打印初始化路径。
     """
     csv_file_obj = open(file_path, "w", encoding="utf-8", newline="")
     csv_writer = csv.writer(csv_file_obj)
@@ -85,9 +113,44 @@ def build_csv_row(
     adc_sum: float = 0.0,          # ADC 84通道之和
     valid: int = 0,                # 有效行标记: 1=接触帧有效, 0=无效 (训练筛选用)
 ) -> list:
-    """
-    构造符合表头格式的CSV行数据
-    :return: 完整的CSV行列表
+    """按 ``TABLE_CSV_HEADER`` 顺序构造一行完整 CSV 数据。
+
+    Args:
+        press_timestamp (float): 压力帧原始时间戳，单位为秒。
+        rel_ms (float): 相对首个保存压力帧的时间，单位为毫秒。
+        delta_ms (float): 与上一保存压力帧的时间差，单位为毫秒。
+        ch_data (Sequence): 84 个压力 ADC 通道值，按原始线序排列。
+        force_data (Sequence): 六维力值 ``[Fx, Fy, Fz, Mx, My, Mz]``。
+        force_timestamp (float): 力帧原始时间戳，单位为秒；无匹配时可为
+            ``NaN``。
+        delta_cop_x (float): CoP X 偏移分量。
+        delta_cop_y (float): CoP Y 偏移分量。
+        delta_force_x (float): 力 X 偏移/滤波分量。
+        delta_force_y (float): 力 Y 偏移/滤波分量。
+        delta_force_z (float): 力 Z 偏移/滤波分量。
+        adc_angle (float): 压力阵列方向角，单位为度。
+        force_angle (float): 六维力方向角，单位为度。
+        fx_cal (float | None): 标定后的切向力 X，单位由模型定义；默认
+            ``None``，输出 ``NaN``。
+        fy_cal (float | None): 标定后的切向力 Y；默认 ``None``，输出
+            ``NaN``。
+        force_cal_angle (float | None): 标定后的方向角，单位为度；默认
+            ``None``，输出 ``NaN``。
+        cop_state (int): CoP 接触状态，默认 0。
+        adc_sum (float): 84 通道 ADC 总和，默认 0.0。
+        valid (int): 有效行标记，默认 0；通常 1 表示接触帧有效。
+
+    Returns:
+        list: 按固定 108 列顺序排列的 CSV 行列表。时间戳差 ``dt`` 由压力
+            和力时间戳的绝对差计算，单位为秒。
+
+    Raises:
+        TypeError: 输入序列无法展开或数值无法参与时间计算时可能抛出。
+        ValueError: 输入容器或元素不符合调用方约定时可能抛出。
+
+    Notes:
+        本函数不写文件、不校验通道数量，也不修改输入序列；通道数量和数据
+        类型由调用方保证。
     """
     # 计算时间差
     dt = abs(press_timestamp - force_timestamp)

@@ -1,4 +1,8 @@
-"""Tangential SDK 的唯一命令行入口。"""
+"""Tangential SDK 的唯一命令行入口。
+
+本模块只负责参数解析、子命令分派和顶层错误码；具体采集、绘图和训练
+逻辑由对应的公共模块实现。
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,15 @@ VERSION = "0.2.0"
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """创建完整的 ``tangential`` 命令行参数解析器。
+
+    Returns:
+        argparse.ArgumentParser: 包含 ``example``、``app``、``plot`` 和
+        ``fit`` 四个必选子命令的解析器。
+
+    Side Effects:
+        仅在内存中构造解析器和参数定义，不读取硬件或文件。
+    """
     parser = argparse.ArgumentParser(
         prog="tangential",
         description="12×7 PZT 压力阵列与六维力采集、分析和标定工具",
@@ -75,6 +88,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _handle_example(args: argparse.Namespace) -> int:
+    """执行最小压力采集示例并持续刷新终端显示。
+
+    Args:
+        args (argparse.Namespace): ``_build_parser`` 生成的参数对象，使用
+            ``pressure_port``、``model`` 和 ``timeout`` 字段。
+
+    Returns:
+        int: 正常循环不会返回；若循环被外部方式结束，约定成功码为 0。
+
+    Raises:
+        Exception: 传感器连接、模型加载、读取或渲染错误向上抛出，由
+            ``main`` 转换为错误码 1。
+
+    Side Effects:
+        打开压力传感器并持续向标准输出写入 12×7 ADC 和计算结果；离开
+        ``with`` 块时关闭传感器。
+    """
     from . import FixedTerminalRenderer, TangentialSensor
 
     with TangentialSensor(
@@ -89,6 +119,22 @@ def _handle_example(args: argparse.Namespace) -> int:
 
 
 def _handle_app(args: argparse.Namespace) -> int:
+    """根据命令行参数启动完整采集和实时 GUI 应用。
+
+    Args:
+        args (argparse.Namespace): 包含压力/六维力端口、保存目录、模型路径
+            和毫秒同步窗口的解析参数。
+
+    Returns:
+        int: 完整应用正常退出时的进程成功码 ``0``。
+
+    Raises:
+        Exception: 配置、Qt、设备、采集或文件错误向上抛出，由 ``main``
+            转换为错误码 1。
+
+    Side Effects:
+        创建 Qt 应用、打开传感器、运行采集会话并写入 CSV/实时图像。
+    """
     from .config import FullApplicationConfig
     from .full import FullApplicationRunner, acquisition_loop
 
@@ -104,6 +150,15 @@ def _handle_app(args: argparse.Namespace) -> int:
 
 
 def _parse_columns(value: str | None):
+    """把逗号分隔的列名参数解析为去空白后的列表。
+
+    Args:
+        value (str | None): CLI 的 ``--columns`` 原始值；空值或只含空白项
+            时视为空配置。
+
+    Returns:
+        list[str] | None: 非空列名列表；没有有效列名时返回 ``None``。
+    """
     if not value:
         return None
     columns = [item.strip() for item in value.split(",") if item.strip()]
@@ -111,6 +166,22 @@ def _parse_columns(value: str | None):
 
 
 def _handle_plot(args: argparse.Namespace) -> int:
+    """执行文件列表、普通 CSV 绘图或完整分析绘图子命令。
+
+    Args:
+        args (argparse.Namespace): 包含目录、文件、列、行范围、输出路径、
+            模式和 ``--list`` 等字段的解析参数。
+
+    Returns:
+        int: 成功完成列表或绘图后返回 ``0``。
+
+    Raises:
+        Exception: CSV 解析、参数校验、绘图依赖或输出文件错误向上抛出，
+            由 ``main`` 转换为错误码 1。
+
+    Side Effects:
+        ``--list`` 时向标准输出打印 JSON；绘图模式可能写入 PNG 和误差 CSV。
+    """
     from . import plotting
 
     if args.list:
@@ -150,6 +221,23 @@ def _handle_plot(args: argparse.Namespace) -> int:
 
 
 def _handle_fit(args: argparse.Namespace) -> int:
+    """执行离线拟合并输出模型、评估图和可选 CSV 写回结果。
+
+    Args:
+        args (argparse.Namespace): 包含 XY/Z 输入、模型输出、拟合维度、拟合
+            类型、筛选和写回保护选项的解析参数。
+
+    Returns:
+        int: 训练及输出成功完成时返回 ``0``。
+
+    Raises:
+        Exception: 输入数据、拟合、模型写出或受保护写回失败时向上抛出，
+            由 ``main`` 转换为错误码 1。
+
+    Side Effects:
+        读取训练 CSV，写入模型和评估图；只有指定 ``--write-back`` 且满足
+        ``--force`` 保护条件时才修改 CSV。
+    """
     from .training import TrainingConfig, train_model
 
     result = train_model(TrainingConfig(
@@ -177,7 +265,20 @@ def _handle_fit(args: argparse.Namespace) -> int:
 
 
 def main(argv=None) -> int:
-    """解析参数并执行子命令；参数错误由 argparse 返回2。"""
+    """解析命令行参数、执行子命令并统一转换进程退出码。
+
+    Args:
+        argv (Sequence[str] | None): 待解析的参数序列；``None`` 时由
+            ``argparse`` 从 ``sys.argv`` 读取。
+
+    Returns:
+        int: 成功返回 ``0``；未捕获的运行时异常打印到标准错误并返回 ``1``；
+            argparse 的参数错误仍按其约定终止并使用 ``2``。
+
+    Side Effects:
+        可能打开硬件、创建 Qt、读取/写入 CSV、模型或图片，具体由子命令决定。
+        ``KeyboardInterrupt`` 被视为正常停止并返回 ``0``。
+    """
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)

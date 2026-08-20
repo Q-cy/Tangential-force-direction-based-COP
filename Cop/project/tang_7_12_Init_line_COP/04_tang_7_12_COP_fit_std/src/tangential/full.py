@@ -1,4 +1,8 @@
-"""完整采集示例使用的线程、会话、CSV、同步和 GUI 辅助层。"""
+"""完整采集应用的线程、会话、同步、CSV 和 GUI 辅助层。
+
+本模块依赖可选的 Qt/PyQtGraph，仅在运行完整 GUI 应用时使用。压力和六维
+力分别由各自的传感器对象读取，父线程通过时间戳缓存按压力帧顺序处理。
+"""
 
 import inspect
 import os
@@ -25,7 +29,23 @@ g_main_stop_flag = threading.Event()
 
 
 def _construct_sensor(factory, port):
-    """构造真实传感器并保留无参测试工厂的注入能力。"""
+    """按工厂签名构造传感器并兼容无参测试工厂。
+
+    Args:
+        factory (callable): 传感器类或工厂；可能接受 ``port`` 关键字，或
+            完全不接受端口参数。
+        port (str): 要传给支持端口参数的工厂的串口路径。
+
+    Returns:
+        object: 工厂创建的传感器实例。
+
+    Raises:
+        Exception: 工厂签名检查失败且调用工厂失败时，工厂原始异常向上传播。
+        TypeError: 工厂参数不兼容且回退调用仍失败时可能抛出。
+
+    Side Effects:
+        调用一次传感器工厂，可能打开串口或创建子进程；不修改工厂对象。
+    """
     try:
         signature = inspect.signature(factory)
     except (TypeError, ValueError):
@@ -47,7 +67,30 @@ def _construct_sensor(factory, port):
 
 
 class PressureThread(threading.Thread):
+    """从压力传感器读取合法帧并写入父进程时间戳缓存。
+
+    Attributes:
+        sensor (object): 提供 ``read_frame`` 和 ``decode`` 的压力传感器。
+        buffer (TimestampedBuffer): 接收解码后压力帧的缓存。
+        stop_event (threading.Event): 请求线程停止的事件。
+        error (BaseException | None): 线程未处理异常；正常运行时为 ``None``。
+    """
+
     def __init__(self, sensor, buffer, stop_event):
+        """初始化压力消费线程，不立即启动线程。
+
+        Args:
+            sensor (object): 压力传感器实例。
+            buffer (TimestampedBuffer): 压力帧目标缓存。
+            stop_event (threading.Event): 线程循环使用的停止事件。
+
+        Returns:
+            None: 初始化线程对象和错误状态。
+
+        Side Effects:
+            调用 ``threading.Thread`` 初始化；不会读取串口或启动线程，需由
+            调用方显式调用 ``start``。
+        """
         super().__init__(daemon=True, name="pressure-consumer")
         self.sensor = sensor
         self.buffer = buffer
@@ -55,6 +98,15 @@ class PressureThread(threading.Thread):
         self.error = None
 
     def run(self):
+        """持续读取、解码并缓存压力帧直到停止或发生异常。
+
+        Returns:
+            None: 线程结束后返回；单帧类型/长度错误会跳过该帧。
+
+        Side Effects:
+            调用传感器的 ``read_frame``/``decode``，向缓存追加带 ``t``、
+            ``data``、请求序号和时序元数据的帧；未处理异常保存到 ``error``。
+        """
         try:
             while not self.stop_event.is_set():
                 frame = self.sensor.read_frame(timeout_s=0.1)
@@ -78,7 +130,29 @@ class PressureThread(threading.Thread):
 
 
 class ForceThread(threading.Thread):
+    """从六维力传感器读取合法普通帧并写入时间戳缓存。
+
+    Attributes:
+        sensor (object): 提供 ``read_frame`` 的六维力传感器。
+        buffer (TimestampedBuffer): 接收六维力帧的缓存。
+        stop_event (threading.Event): 请求线程停止的事件。
+        error (BaseException | None): 线程未处理异常；正常运行时为 ``None``。
+    """
+
     def __init__(self, sensor, buffer, stop_event):
+        """初始化六维力消费线程，不立即启动线程。
+
+        Args:
+            sensor (object): 六维力传感器实例。
+            buffer (TimestampedBuffer): 六维力帧目标缓存。
+            stop_event (threading.Event): 线程循环使用的停止事件。
+
+        Returns:
+            None: 初始化线程对象和错误状态。
+
+        Side Effects:
+            只初始化线程对象；不会读取串口或启动线程。
+        """
         super().__init__(daemon=True, name="force-consumer")
         self.sensor = sensor
         self.buffer = buffer
@@ -86,6 +160,15 @@ class ForceThread(threading.Thread):
         self.error = None
 
     def run(self):
+        """持续读取并缓存六维力帧直到停止或发生异常。
+
+        Returns:
+            None: 线程结束后返回。
+
+        Side Effects:
+            调用传感器 ``read_frame``，把六维力数据和时序元数据追加到缓存；
+            未处理异常保存到 ``error``。
+        """
         try:
             while not self.stop_event.is_set():
                 frame = self.sensor.read_frame(timeout_s=0.1)
@@ -103,7 +186,20 @@ class ForceThread(threading.Thread):
 
 
 class FullAcquisitionSession:
-    """完整应用的一次采集会话；循环由 acquisition_loop 显式驱动。"""
+    """完整应用的一次采集会话；循环由 ``acquisition_loop`` 显式驱动。
+
+    Attributes:
+        plot: 提供实时显示方法 ``set_data``、``append_full_data`` 的绘图对象。
+        config (FullApplicationConfig): 设备、时序、模型和输出配置。
+        stop_event (threading.Event): 会话停止信号。
+        sensor_press/sensor_force: 压力/六维力传感器实例；六维力不可用时为
+            ``None``。
+        buf_press/buf_force (TimestampedBuffer | None): 两路输入缓存。
+        csv_writer/csv_file_obj/csv_path: 当前 CSV 输出资源。
+        has_force (bool): 是否已启用六维力通道。
+        pending_press (deque): 等待六维力一对一匹配的压力样本队列。
+        latest_sample: 最近处理的压力样本，供 GUI 使用。
+    """
 
     def __init__(
         self,
@@ -113,6 +209,26 @@ class FullAcquisitionSession:
         pressure_factory=PressureSensor,
         force_factory=SixAxisForceSensor,
     ):
+        """初始化完整采集会话及其运行时状态。
+
+        Args:
+            plot (object): 实时绘图对象。
+            config (FullApplicationConfig | None): 会话配置；为 ``None`` 时
+                创建默认配置。
+            stop_event (threading.Event | None): 外部停止事件；为 ``None`` 时
+                使用模块级 ``g_main_stop_flag``。
+            pressure_factory (callable): 压力传感器工厂，默认
+                ``PressureSensor``。
+            force_factory (callable): 六维力传感器工厂，默认
+                ``SixAxisForceSensor``。
+
+        Returns:
+            None: 只建立会话状态，不连接设备、不创建 CSV。
+
+        Side Effects:
+            创建内部队列、锁、统计计数器和停止状态；实际资源由 ``start``
+            创建，由 ``close`` 释放。
+        """
         self.plot = plot
         self.config = config or FullApplicationConfig()
         self.stop_event = stop_event or g_main_stop_flag
@@ -162,6 +278,20 @@ class FullAcquisitionSession:
         self._closed = False
 
     def start(self):
+        """连接设备、初始化模型/CSV并启动采集线程。
+
+        Returns:
+            FullAcquisitionSession: 当前已启动会话，便于链式调用。
+
+        Raises:
+            RuntimeError: 压力传感器连接失败时抛出；压力是必需设备。
+            Exception: 压力 CSV、模型、线程或其他启动步骤失败时向上传播。
+
+        Side Effects:
+            清除停止事件，连接压力传感器；六维力连接或校零失败时关闭该
+            通道并降级为压力模式；创建 CSV、处理器和后台线程。重复调用在
+            已启动状态下直接返回当前会话。
+        """
         if self._started:
             return self
         self.stop_event.clear()
@@ -249,9 +379,27 @@ class FullAcquisitionSession:
         return self
 
     def should_stop(self) -> bool:
+        """查询会话是否收到停止请求。
+
+        Returns:
+            bool: ``stop_event`` 当前状态；已设置时为 ``True``。
+        """
         return self.stop_event.is_set()
 
     def check_errors(self):
+        """检查后台压力/六维力线程是否报告未处理异常。
+
+        Returns:
+            None: 两个线程均无异常时返回。
+
+        Raises:
+            RuntimeError: 任一消费线程的 ``error`` 不为 ``None``，异常信息会
+                包含对应通道名称。
+
+        Side Effects:
+            更新本轮 ``iteration_started_t``，供主循环的节拍等待使用；不清除
+            线程错误状态。
+        """
         self.iteration_started_t = time.perf_counter()
         if self.thread_press is not None and self.thread_press.error is not None:
             raise RuntimeError(f"压力采集线程异常: {self.thread_press.error}")
@@ -259,11 +407,25 @@ class FullAcquisitionSession:
             raise RuntimeError(f"六维力采集线程异常: {self.thread_force.error}")
 
     def schedule_rezero(self, reason: str):
-        """从 ForceThread 缓冲区取新帧，合并并发归零请求。"""
+        """异步安排一次基于新六维力普通帧的 Fx/Fy 重新归零。
+
+        Args:
+            reason (str): 触发原因，用于日志，例如 CoP 精修或力卸载。
+
+        Returns:
+            None: 请求被忽略、合并或已启动后台归零任务时均无返回值。
+
+        Side Effects:
+            若六维力通道可用且会话未停止，创建并启动一个 daemon 线程；该线程
+            从 ``buf_force`` 读取新的普通帧，收集配置数量后调用
+            ``sensor_force.add_zero_bias``。单一锁会把并发请求合并，校零不足
+            时仅打印失败日志。
+        """
         if not self.has_force or self.stop_event.is_set():
             return
 
         def worker():
+            """收集新六维力帧并在数量足够时更新 Fx/Fy 零偏。"""
             if not self.rezero_guard.acquire(blocking=False):
                 print(f"ℹ️ {reason}归零请求已合并到正在执行的任务")
                 return
@@ -300,6 +462,23 @@ class FullAcquisitionSession:
         task.start()
 
     def _process_pressure(self, press_item):
+        """处理单个缓存压力帧并更新接触/精修/相对时间状态。
+
+        Args:
+            press_item (dict): 压力缓存帧，必须含 ``t`` 和 ``data``，可含
+                ``request_seq``、``tx_t``、``latency_s``。
+
+        Returns:
+            TangentialSample: 经过 CoP、梯度、状态机、平滑和标定处理的样本；
+                ``rel_ms`` 会基于真实接收时间设置为单调不减毫秒值。
+
+        Raises:
+            Exception: 单帧处理器或归零调度相关错误向上传播。
+
+        Side Effects:
+            更新处理器状态、首帧时间、相对时间、上一接触/精修状态；状态
+            边沿可能创建异步重新归零任务。
+        """
         metadata = {
             "request_seq": press_item.get("request_seq", -1),
             "tx_t": press_item.get("tx_t", float("nan")),
@@ -329,6 +508,18 @@ class FullAcquisitionSession:
         return sample
 
     def process_new_pressure_frames(self) -> int:
+        """按缓存序号顺序处理所有尚未消费的压力帧。
+
+        Returns:
+            int: 本次调用实际处理的压力帧数量。
+
+        Raises:
+            RuntimeError: 单帧处理或后台错误检查相关异常向上传播。
+
+        Side Effects:
+            推进 ``last_press_seq``，更新 ``latest_sample``；有六维力时将样本
+            放入待匹配队列，无六维力时立即写入 NaN 力字段的 CSV 行。
+        """
         new_items = self.buf_press.get_after(self.last_press_seq)
         processed = 0
         for press_item in new_items:
@@ -343,6 +534,26 @@ class FullAcquisitionSession:
         return processed
 
     def write_snapshot(self, sample, force_item):
+        """把压力样本和可选匹配力帧写成一行 108 列 CSV。
+
+        Args:
+            sample (TangentialSample): 要保存的压力样本，使用其真实 ``rx_t``、
+                ADC、CoP、角度和标定结果。
+            force_item (dict | None): 已匹配六维力帧，需含 ``t`` 和长度至少为
+                6 的 ``data``；为 ``None`` 时六维力及其派生字段写为 ``NaN``。
+
+        Returns:
+            None: 写入并刷新当前 CSV 文件。
+
+        Raises:
+            AttributeError: 会话尚未成功初始化 CSV，或样本缺字段时可能抛出。
+            OSError: CSV 写入或刷新失败时抛出。
+            ValueError: 力帧数据无法转换为所需数值时可能抛出。
+
+        Side Effects:
+            通过唯一的 ``build_csv_row`` 构造行，写入并 flush 文件；更新已
+            保存时间、力中值滤波状态和 ``row_count``。
+        """
         press_timestamp = float(sample.rx_t)
         if self.first_saved_press_t is None:
             csv_rel_ms = 0.0
@@ -412,6 +623,20 @@ class FullAcquisitionSession:
         self.previous_saved_press_t = press_timestamp
 
     def drain_force_matches(self, now=None):
+        """按待处理压力队列顺序匹配并保存六维力帧。
+
+        Args:
+            now (float | None): 当前单调时钟秒数；为 ``None`` 时调用
+                ``time.perf_counter`` 获取。用于判断等待是否超过匹配窗口。
+
+        Returns:
+            None: 匹配和写入通过副作用完成。
+
+        Side Effects:
+            对队首压力样本寻找未消费且时间差不超过配置窗口的最近力帧；匹配
+            成功时推进 ``last_force_seq`` 并写 CSV。当前实现对超过等待窗口
+            的未匹配样本移出待匹配队列但不写入 CSV；无六维力通道时直接返回。
+        """
         if not self.has_force:
             return
         now = time.perf_counter() if now is None else now
@@ -435,11 +660,35 @@ class FullAcquisitionSession:
 
     @staticmethod
     def _percentile_ms(values, percentile):
+        """计算秒值序列的指定百分位并转换为毫秒。
+
+        Args:
+            values (Sequence[float]): 以秒为单位的数值序列。
+            percentile (float): NumPy 百分位参数，通常为 50 或 95。
+
+        Returns:
+            float: 以毫秒为单位的百分位；输入为空时返回 ``NaN``。
+
+        Raises:
+            ValueError: ``percentile`` 超出 NumPy 允许范围时可能抛出。
+        """
         if not values:
             return float("nan")
         return float(np.percentile(values, percentile) * 1000.0)
 
     def _print_pressure_stats(self, stats, fps):
+        """格式化并打印压力传感器时序统计。
+
+        Args:
+            stats (Mapping): ``PressureSensor.get_timing_stats`` 返回的统计字典。
+            fps (float): 当前日志区间内的实际压力帧率，单位为 Hz。
+
+        Returns:
+            None: 统计写入标准输出。
+
+        Raises:
+            KeyError: ``stats`` 缺少日志所需字段时抛出。
+        """
         print(
             "⏱ 压力时序: "
             f"{fps:.1f} Hz, 请求间隔 P50/P95="
@@ -455,6 +704,18 @@ class FullAcquisitionSession:
         )
 
     def _print_force_stats(self, stats, fps):
+        """格式化并打印六维力传感器时序统计。
+
+        Args:
+            stats (Mapping): ``SixAxisForceSensor.get_timing_stats`` 返回的统计字典。
+            fps (float): 当前日志区间内的实际六维力帧率，单位为 Hz。
+
+        Returns:
+            None: 统计写入标准输出。
+
+        Raises:
+            KeyError: ``stats`` 缺少日志所需字段时抛出。
+        """
         print(
             "⏱ 六维力时序: "
             f"{fps:.1f} Hz, 请求间隔 P50/P95="
@@ -473,6 +734,20 @@ class FullAcquisitionSession:
         )
 
     def log_timing_stats(self, now=None):
+        """按配置间隔打印压力和六维力时序统计。
+
+        Args:
+            now (float | None): 当前单调时钟秒数；为 ``None`` 时自动读取。
+
+        Returns:
+            None: 未到日志间隔时静默返回，否则打印本区间帧率、延迟和错误计数。
+
+        Raises:
+            AttributeError/KeyError: 传感器未初始化或统计字典缺字段时可能抛出。
+
+        Side Effects:
+            读取传感器统计并更新 ``last_stats_log_t`` 及上一统计区间的帧数。
+        """
         now = time.perf_counter() if now is None else now
         if now - self.last_stats_log_t < self.config.timing_log_interval_s:
             return
@@ -494,6 +769,19 @@ class FullAcquisitionSession:
         self.last_stats_log_t = now
 
     def update_plot(self):
+        """按 GUI 频率限制刷新最新压力样本和力/标定曲线。
+
+        Returns:
+            None: 没有样本或尚未到绘图周期时直接返回。
+
+        Raises:
+            AttributeError: 绘图对象缺少所需更新方法时抛出。
+            Exception: 绘图层更新失败时向上传播。
+
+        Side Effects:
+            可能调用 ``plot.set_data`` 和 ``plot.append_full_data``，更新绘图
+            时间；刷新后清除 ``latest_sample``，但不影响 CSV 或串口采集。
+        """
         sample = self.latest_sample
         if sample is None:
             return
@@ -546,11 +834,29 @@ class FullAcquisitionSession:
         self.latest_sample = None
 
     def wait_for_next_iteration(self):
+        """根据目标主循环频率等待下一次会话迭代。
+
+        Returns:
+            None: 睡眠至少 1 ms 或当前周期剩余时间。
+
+        Side Effects:
+            调用 ``time.sleep`` 阻塞当前主采集循环；不阻塞传感器消费线程。
+        """
         started = self.iteration_started_t or time.perf_counter()
         elapsed = time.perf_counter() - started
         time.sleep(max(0.001, 1.0 / self.config.target_fps - elapsed))
 
     def close(self):
+        """幂等地停止会话并释放线程、传感器、CSV 和空文件资源。
+
+        Returns:
+            None: 重复调用直接返回。
+
+        Side Effects:
+            设置停止事件，等待消费/归零线程，关闭两个传感器和 CSV；若本次
+            没有写入任何行则删除已创建的空 CSV，否则打印已保存行数。清理
+            传感器时的单项关闭异常会被忽略以保证继续释放其他资源。
+        """
         if self._closed:
             return
         self._closed = True
@@ -579,14 +885,52 @@ class FullAcquisitionSession:
 
 
 class FullApplicationRunner:
-    """Qt 生命周期和数据线程错误转发；不包含采集 while 循环。"""
+    """管理 Qt 生命周期并把采集线程异常转发到 GUI 主线程。
+
+    该类不包含采集 ``while`` 循环；循环由传入的 ``worker_target``（通常是
+    ``acquisition_loop``）执行。
+
+    Attributes:
+        worker_target (callable): 接受绘图对象、停止事件和配置的采集入口。
+        config (FullApplicationConfig): 传给采集入口的配置。
+        plot_factory (callable): 创建实时绘图对象的工厂。
+    """
 
     def __init__(self, worker_target, config=None, plot_factory=RealTimePlot):
+        """初始化 Qt 应用运行器。
+
+        Args:
+            worker_target (callable): 采集工作函数；通常为
+                ``acquisition_loop``。
+            config (FullApplicationConfig | None): 采集配置；为 ``None`` 时
+                创建默认配置。
+            plot_factory (callable): 无参绘图对象工厂，默认 ``RealTimePlot``。
+
+        Returns:
+            None: 保存工作函数、配置和绘图工厂。
+
+        Side Effects:
+            只初始化 Python 对象；不会创建 Qt 应用、窗口或后台线程。
+        """
         self.worker_target = worker_target
         self.config = config or FullApplicationConfig()
         self.plot_factory = plot_factory
 
     def run(self):
+        """创建 Qt 窗口并运行 GUI 事件循环直到退出。
+
+        Returns:
+            None: Qt 事件循环退出后完成线程等待和绘图分析。
+
+        Raises:
+            Exception: 绘图对象创建或最终完整分析失败时可能抛出；采集线程
+                内部异常会通过窗口日志和停止事件处理。
+
+        Side Effects:
+            清除全局停止事件，创建 QApplication/绘图窗口，启动 daemon 采集
+            线程和错误轮询定时器；退出时停止定时器、等待采集线程，并调用
+            ``plot_full_analysis``。
+        """
         g_main_stop_flag.clear()
         app = QtWidgets.QApplication.instance()
         if app is None:
@@ -595,6 +939,7 @@ class FullApplicationRunner:
         errors = queue.Queue()
 
         def worker():
+            """在线程中执行采集入口并把异常放入线程安全队列。"""
             try:
                 self.worker_target(
                     plot,
@@ -612,6 +957,7 @@ class FullApplicationRunner:
         error_timer = QtCore.QTimer()
 
         def poll_errors():
+            """在 Qt 主线程轮询采集线程错误并请求应用退出。"""
             try:
                 exc = errors.get_nowait()
             except queue.Empty:
@@ -641,7 +987,29 @@ def acquisition_loop(
     session_factory=FullAcquisitionSession,
     **kwargs,
 ):
-    """运行完整采集循环；Qt 线程和测试都通过这个正式入口调用。"""
+    """运行完整采集循环并在退出时可靠关闭会话。
+
+    Args:
+        plot (object): 实时绘图对象，传给 ``FullAcquisitionSession``。
+        stop_event (threading.Event | None): 外部停止事件；为 ``None`` 时使用
+            模块级 ``g_main_stop_flag``。
+        config (FullApplicationConfig | None): 完整会话配置；为 ``None`` 时
+            创建默认配置。
+        session_factory (callable): 会话工厂，默认 ``FullAcquisitionSession``；
+            测试可注入替代实现。
+        **kwargs: 继续传给会话工厂的其他构造参数，例如设备工厂。
+
+    Returns:
+        None: 停止事件设置或会话循环结束后返回。
+
+    Raises:
+        Exception: 会话启动、错误检查、压力处理、匹配、绘图或等待失败时
+            向上传播；无论是否异常都会执行 ``session.close``。
+
+    Side Effects:
+        创建并启动会话，按顺序执行错误检查、压力帧处理、力匹配、统计和
+        GUI 更新循环；最终释放线程、传感器、CSV 和其他会话资源。
+    """
     active_stop_event = g_main_stop_flag if stop_event is None else stop_event
     session = session_factory(
         plot,

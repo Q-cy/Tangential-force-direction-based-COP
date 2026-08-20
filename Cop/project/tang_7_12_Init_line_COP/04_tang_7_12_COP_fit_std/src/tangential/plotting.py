@@ -28,6 +28,24 @@ class PlotConfig:
     ``files`` 可以是路径、路径列表、逗号分隔的路径，或 ``all``、
     ``latest:N``、文件索引/索引范围。``rows`` 可以是 ``(start, stop)``、
     ``slice`` 或 ``"start:stop"``。
+
+    Attributes:
+        files: CSV path selector; ``None`` scans the default directory.
+        directory: Base directory for relative paths and selectors.
+        columns: Header names or zero-based indices to draw in ``plot`` mode.
+        rows: Half-open data-row range, or ``None`` for all rows.
+        x_column: Header name/index for the x-axis; ``None`` uses column 0.
+        title: Optional figure title.
+        save_path: Optional output PNG path; otherwise derived from the first
+            input CSV.
+        error_ref: Optional reference header/index used for error metrics.
+        mode: ``"plot"`` for custom plots or ``"full_analysis"`` for 4×2.
+        highlight_valid: Segment by ``valid`` or fallback ``CoP_state``.
+        show_annotations: Annotate active-segment starts and error extrema.
+        force_min: Minimum absolute force for force-filtered comparisons.
+
+    Side Effects:
+        Construction performs no file I/O and imports no plotting backend.
     """
 
     files: str | Path | Sequence[str | Path] | None = None
@@ -46,7 +64,14 @@ class PlotConfig:
 
 @dataclass(frozen=True)
 class CSVFileInfo:
-    """目录扫描结果，不包含任何命令行输出行为。"""
+    """Metadata returned for one scanned CSV file.
+
+    Attributes:
+        path: Resolved CSV path.
+        modified_at: Local datetime from filesystem modification time.
+        size_bytes: File size in bytes.
+        row_count: Number of non-header lines counted in the file.
+    """
 
     path: Path
     modified_at: _datetime.datetime
@@ -56,7 +81,14 @@ class CSVFileInfo:
 
 @dataclass(frozen=True)
 class PlotResult:
-    """绘图结果及可选误差报告文件。"""
+    """Paths and diagnostics produced by a plotting operation.
+
+    Attributes:
+        save_path: PNG path written by the plot operation.
+        files: Ordered input CSV paths used.
+        error_path: Optional CSV containing scalar error metrics.
+        errors: Dictionaries with ``pred``, ``ref`` and ``results`` keys.
+    """
 
     save_path: Path
     files: tuple[Path, ...]
@@ -65,7 +97,17 @@ class PlotResult:
 
 
 def scan_csv(directory: str | Path | None = None) -> list[Path]:
-    """扫描目录中的 CSV，按修改时间从新到旧返回路径。"""
+    """Scan a directory for ordinary CSVs in newest-first order.
+
+    Args:
+        directory: Directory to scan; ``None`` means ``Path.cwd()/data``.
+    Returns:
+        Paths for regular, non-underscore-prefixed ``.csv`` files, sorted by
+        descending modification time and then path.
+    Raises:
+        FileNotFoundError: If the directory does not exist.
+        NotADirectoryError: If the path is not a directory.
+    """
 
     root = Path(directory) if directory is not None else Path.cwd() / "data"
     if not root.exists():
@@ -82,7 +124,17 @@ def scan_csv(directory: str | Path | None = None) -> list[Path]:
 
 
 def list_files(directory: str | Path | None = None) -> list[CSVFileInfo]:
-    """返回目录 CSV 的结构化信息，不打印、不退出。"""
+    """Return structured metadata for CSVs without CLI output or exit calls.
+
+    Args:
+        directory: Directory passed to :func:`scan_csv`, or ``None`` for the
+            default data directory.
+    Returns:
+        Newest-first :class:`CSVFileInfo` list.
+    Raises:
+        FileNotFoundError/NotADirectoryError: If the directory is invalid.
+        OSError: If a CSV cannot be opened or inspected.
+    """
 
     result = []
     for path in scan_csv(directory):
@@ -104,6 +156,18 @@ def list_files(directory: str | Path | None = None) -> list[CSVFileInfo]:
 
 
 def _resolve_explicit_path(value: str | Path, directory: Path) -> Path:
+    """Resolve and validate one explicit CSV path.
+
+    Args:
+        value: Absolute or relative path supplied by the caller.
+        directory: Base directory for relative values.
+    Returns:
+        Absolute resolved regular path with a case-insensitive ``.csv`` suffix.
+    Raises:
+        FileNotFoundError: If the path does not exist.
+        IsADirectoryError: If the path is a directory.
+        ValueError: If the suffix is not ``.csv``.
+    """
     path = Path(value)
     if not path.is_absolute():
         path = directory / path
@@ -121,7 +185,21 @@ def resolve_csvs(
     files: str | Path | Sequence[str | Path] | None = None,
     directory: str | Path | None = None,
 ) -> list[Path]:
-    """解析文件路径或目录选择表达式，返回有序 CSV 路径列表。"""
+    """Resolve CSV paths, selectors and inclusive index ranges.
+
+    Args:
+        files: Path, path sequence, comma-separated paths, ``all``,
+            ``latest:N``, zero-based index, or inclusive index range. ``None``
+            selects all CSVs in ``directory``.
+        directory: Base directory for relative paths and selectors; defaults to
+            ``Path.cwd()/data``.
+    Returns:
+        Ordered list of resolved CSV paths. No files are modified.
+    Raises:
+        FileNotFoundError/IsADirectoryError/ValueError: For invalid paths,
+            selectors or directory contents.
+        IndexError: If a numeric selector is outside the available list.
+    """
 
     root = Path(directory) if directory is not None else Path.cwd() / "data"
     if files is None:
@@ -198,7 +276,20 @@ resolve = resolve_csvs
 
 
 def load_csv(path: str | Path) -> tuple[list[str], np.ndarray]:
-    """按文件实际表头读取 CSV，返回 ``(header, float64_data)``。"""
+    """Load a numeric CSV using its actual header and row width.
+
+    Args:
+        path: UTF-8 CSV path; the first row is the header.
+    Returns:
+        ``(header, data)`` where ``header`` is a stripped string list and
+        ``data`` is a ``float64`` array of shape ``(n_rows, len(header))``.
+        An empty data section has shape ``(0, len(header))``.
+    Raises:
+        FileNotFoundError: If the file is absent.
+        IsADirectoryError: If ``path`` is a directory.
+        ValueError: For empty/invalid headers, non-UTF-8 text, inconsistent
+            row widths or non-numeric cells.
+    """
 
     csv_path = Path(path)
     if not csv_path.exists():
@@ -233,7 +324,16 @@ def load_csv(path: str | Path) -> tuple[list[str], np.ndarray]:
 
 
 def resolve_column(column: str | int, header: Sequence[str]) -> int:
-    """按实际表头解析列名或从 0 开始的列号。"""
+    """Resolve a header name or zero-based numeric column selector.
+
+    Args:
+        column: Header name, integer index, or numeric string index.
+        header: Actual CSV header sequence.
+    Returns:
+        Zero-based integer column index.
+    Raises:
+        ValueError: If the selector is unknown or outside header bounds.
+    """
 
     clean_header = [str(name).strip() for name in header]
     if isinstance(column, (int, np.integer)):
@@ -252,6 +352,16 @@ def resolve_column(column: str | int, header: Sequence[str]) -> int:
 
 
 def _resolve_columns(columns: Iterable[str | int], header: Sequence[str]) -> list[int]:
+    """Resolve all plotted selectors against one actual CSV header.
+
+    Args:
+        columns: Iterable of names or zero-based indices.
+        header: Actual CSV header sequence.
+    Returns:
+        Resolved integer indices in the input order.
+    Raises:
+        ValueError: If no columns are provided or any selector is invalid.
+    """
     columns = list(columns)
     if not columns:
         raise ValueError("plot 模式至少需要一列 columns")
@@ -259,6 +369,17 @@ def _resolve_columns(columns: Iterable[str | int], header: Sequence[str]) -> lis
 
 
 def _row_slice(rows: RowsSpec, size: int) -> tuple[int, int]:
+    """Normalize a half-open plotting row range and reject empty selections.
+
+    Args:
+        rows: ``None``, a step-1 ``slice``, ``"start:stop"`` or a
+            ``(start, stop)`` pair; bounds are zero-based data-row indices.
+        size: Number of available data rows.
+    Returns:
+        Clamped ``(start, stop)`` suitable for ``data[start:stop]``.
+    Raises:
+        ValueError: For malformed, negative, stepped, reversed or empty ranges.
+    """
     if rows is None:
         start, stop = 0, size
     elif isinstance(rows, slice):
@@ -289,7 +410,21 @@ def _row_slice(rows: RowsSpec, size: int) -> tuple[int, int]:
 def compute_errors(
     reference: Sequence[float], prediction: Sequence[float], *, is_angle: bool = False
 ) -> dict[str, Any]:
-    """计算 MAE、RMSE、MAPE、R² 等误差指标。"""
+    """Compute finite-sample regression or wrapped-angle error metrics.
+
+    Args:
+        reference: Reference sequence, converted to a ``float64`` array.
+        prediction: Predicted sequence with exactly the same shape.
+        is_angle: If true, use :func:`angle_difference` for absolute angular
+            error; otherwise use ordinary subtraction.
+    Returns:
+        Dictionary containing ``count`` and, with at least two finite pairs,
+        ``MAE``, ``MSE``, ``RMSE``, ``Max_Error``, ``Min_Error``, ``MAPE_%``,
+        ``R2``, ``Error_Std`` and ``Median_Error``. With fewer than two pairs,
+        returns ``{"count": n, "error": "数据点不足"}``.
+    Raises:
+        ValueError: If reference and prediction shapes differ.
+    """
 
     ref_values = np.asarray(reference, dtype=np.float64)
     pred_values = np.asarray(prediction, dtype=np.float64)
@@ -331,7 +466,15 @@ def compute_errors(
 
 
 def _load_matplotlib():
-    """惰性加载 Matplotlib 并强制离线 Agg 后端。"""
+    """Lazily load Matplotlib and force the non-interactive Agg backend.
+
+    Returns:
+        Imported ``matplotlib.pyplot`` module.
+    Raises:
+        ImportError: If the optional plotting dependency is unavailable.
+    Side Effects:
+        Imports Matplotlib and changes its backend to ``Agg`` for this process.
+    """
 
     import matplotlib
 
@@ -342,6 +485,15 @@ def _load_matplotlib():
 
 
 def _valid_column(header: Sequence[str], data: np.ndarray) -> np.ndarray | None:
+    """Find the validity mask column using the current CSV header.
+
+    Args:
+        header: Actual CSV header sequence.
+        data: Numeric data matrix of shape ``(n_rows, len(header))``.
+    Returns:
+        One-dimensional ``valid`` column, or the ``CoP_state`` fallback, or
+        ``None`` when neither column exists. No file I/O occurs.
+    """
     clean = [name.strip() for name in header]
     for name in ("valid", "CoP_state"):
         if name in clean:
@@ -350,6 +502,13 @@ def _valid_column(header: Sequence[str], data: np.ndarray) -> np.ndarray | None:
 
 
 def _split_segments(mask: np.ndarray) -> list[np.ndarray]:
+    """Split a boolean activity mask into contiguous index segments.
+
+    Args:
+        mask: One-dimensional boolean-like array of length ``n_rows``.
+    Returns:
+        Nonempty integer index arrays covering the original positions in order.
+    """
     changes = np.where(np.diff(mask.astype(np.int8)) != 0)[0] + 1
     return [part for part in np.split(np.arange(mask.size), changes) if part.size]
 
@@ -364,6 +523,23 @@ def _plot_segmented(
     active: np.ndarray | None,
     show_annotations: bool,
 ):
+    """Draw finite samples with optional active/inactive segment styling.
+
+    Args:
+        ax: Matplotlib axes object receiving the line and annotations.
+        x: One-dimensional x values.
+        y: One-dimensional y values with the same length as ``x``.
+        label: Legend label for the active series.
+        color: Matplotlib-compatible line color.
+        active: Optional boolean mask; inactive segments are faded.
+        show_annotations: Annotate selected active-segment starts when true.
+    Returns:
+        ``None``. The axes object is mutated as a plotting side effect; rows
+        with non-finite x/y values are omitted.
+    Raises:
+        ValueError: Possible from Matplotlib when supplied arrays or style
+            values are incompatible.
+    """
     finite = np.isfinite(x) & np.isfinite(y)
     if not np.any(finite):
         return
@@ -406,6 +582,22 @@ def _plot_segmented(
 
 
 def _write_error_csv(path: Path, error_results: Sequence[dict[str, Any]]) -> None:
+    """Write scalar error dictionaries to a diagnostic CSV.
+
+    Args:
+        path: Destination CSV path; its parent must already be creatable.
+        error_results: Dictionaries containing ``pred``, ``ref`` and a
+            metric ``results`` mapping. Entries with ``results['error']`` are
+            skipped from the output rows.
+    Returns:
+        ``None``.
+    Side Effects:
+        Creates or overwrites ``path`` with a fixed metric header and numeric
+        values formatted for human-readable reports.
+    Raises:
+        OSError: If the file cannot be opened or written.
+        KeyError: If a successful result lacks a required metric key.
+    """
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
         writer.writerow([
@@ -427,6 +619,18 @@ def _write_error_csv(path: Path, error_results: Sequence[dict[str, Any]]) -> Non
 
 
 def _output_path(config: PlotConfig, first_path: Path, *, full: bool) -> Path:
+    """Resolve and prepare the PNG output path for a plot.
+
+    Args:
+        config: Plot configuration; ``save_path`` overrides the derived name.
+        first_path: First input CSV, used to derive the default filename.
+        full: Select ``full_analysis_<stem>.png`` when true, otherwise
+            ``<stem>_plot.png``.
+    Returns:
+        Destination :class:`Path` whose parent directory exists.
+    Raises:
+        OSError: If the parent directory cannot be created.
+    """
     if config.save_path is not None:
         path = Path(config.save_path)
     else:
@@ -437,7 +641,24 @@ def _output_path(config: PlotConfig, first_path: Path, *, full: bool) -> Path:
 
 
 def plot_csv(config: PlotConfig) -> PlotResult:
-    """按 ``plot`` 配置绘制自定义列；``mode=full_analysis``转到全分析图。"""
+    """Plot selected columns from one or more CSVs and optionally compare errors.
+
+    Args:
+        config: :class:`PlotConfig` containing file selectors, actual header
+            names/indices, half-open row range, x-axis and output options.
+            ``mode='full_analysis'`` delegates to :func:`plot_full_analysis`.
+    Returns:
+        :class:`PlotResult` with the PNG path, input paths, optional error CSV,
+        and per-prediction error dictionaries.
+    Side Effects:
+        Lazily imports Matplotlib, writes a PNG, and writes a sibling
+        ``*_error.csv`` when at least one comparison is requested.
+    Raises:
+        TypeError: If ``config`` is not :class:`PlotConfig`.
+        ValueError: For invalid mode, columns or row range.
+        FileNotFoundError/IsADirectoryError: For missing or invalid CSV paths.
+        ImportError: If Matplotlib is unavailable.
+    """
 
     if not isinstance(config, PlotConfig):
         raise TypeError("plot_csv 需要 PlotConfig")
@@ -516,7 +737,26 @@ def plot_csv(config: PlotConfig) -> PlotResult:
 
 
 def plot_full_analysis(config: PlotConfig | str | Path) -> PlotResult:
-    """绘制 4×2 的 PZT/六维力全分析图，列均按实际表头读取。"""
+    """Draw the 4×2 PZT/force analysis figure using actual CSV headers.
+
+    Args:
+        config: :class:`PlotConfig` or one CSV path. A path creates default
+            ``full_analysis`` configuration; ``files`` uses only its first
+            resolved CSV. ``rows`` selects a half-open data-row range.
+    Returns:
+        :class:`PlotResult` containing the 4×2 PNG, the source path, and any
+        angle/Fx/Fy comparison metrics plus optional error CSV path.
+    Side Effects:
+        Lazily imports Matplotlib and writes the PNG and, when comparisons have
+        finite pairs, a sibling ``*_error.csv``. Missing optional series are
+        skipped, but at least one known series is required.
+    Raises:
+        TypeError: If ``config`` is neither a path nor :class:`PlotConfig`.
+        ValueError: For invalid rows, empty data, missing known series or bad
+            CSV content.
+        FileNotFoundError/IsADirectoryError/ImportError: For missing input or
+            plotting dependency.
+    """
 
     if isinstance(config, (str, Path)):
         config = PlotConfig(files=config, mode="full_analysis")
@@ -533,6 +773,14 @@ def plot_full_analysis(config: PlotConfig | str | Path) -> PlotResult:
     indices = {name: index for index, name in enumerate(clean_header)}
 
     def column(name: str) -> np.ndarray | None:
+        """Return one named series from the selected data rows.
+
+        Args:
+            name: Exact stripped header name.
+        Returns:
+            ``float64`` vector of length ``len(data)`` or ``None`` when absent.
+            This closure performs no file I/O.
+        """
         index = indices.get(name)
         return None if index is None else data[:, index].astype(np.float64)
 
@@ -563,6 +811,18 @@ def plot_full_analysis(config: PlotConfig | str | Path) -> PlotResult:
     errors: list[dict[str, Any]] = []
 
     def draw(axis, key: str, color: str, label: str, *, active_mask=active):
+        """Draw one optional analysis series on a Matplotlib axis.
+
+        Args:
+            axis: Matplotlib axes receiving the line.
+            key: Key in the local ``series`` mapping.
+            color: Matplotlib-compatible color.
+            label: Legend label.
+            active_mask: Optional boolean activity mask, defaulting to the
+                selected ``valid``/``CoP_state`` mask.
+        Returns:
+            ``None``; the axis is mutated when the series exists.
+        """
         values = series[key]
         if values is not None:
             mask = active_mask

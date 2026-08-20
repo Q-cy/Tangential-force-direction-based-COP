@@ -1,4 +1,11 @@
-"""pyqtgraph 实时绘图 — GPU 渲染, 100fps"""
+"""PyQtGraph 实时绘图组件。
+
+本模块只负责把父进程传入的压力、方向、梯度、CoP 和六维力状态绘制到
+Qt 窗口；串口读取、采样节拍、状态机和 CSV 写入由上层采集会话负责。
+阵列坐标统一使用 ``x=列``、``y=行``，单元中心分别位于 ``(c, r)``，
+并在表格和梯度视图中使用 ``invertY(True)`` 适配屏幕坐标。模块导入
+需要 PyQtGraph/PyQt5，基础 ``tangential`` API 不应直接导入本模块。
+"""
 import numpy as np
 from collections import deque
 import threading
@@ -19,6 +26,16 @@ REGION_PALETTE = [(0, 102, 255), (0, 204, 51), (255, 128, 0), (153, 0, 255),
                   (0, 204, 204), (255, 204, 0), (255, 0, 153), (255, 61, 61)]
 
 def _yrange(data, pad=0.1):
+    """根据有限数据计算带边距的纵轴范围。
+
+    Args:
+        data: 可迭代的数值序列；NaN 会被过滤。
+        pad: 在数据跨度两侧附加的相对边距，默认 ``0.1``。
+
+    Returns:
+        ``(low, high)`` 浮点元组。有效值少于两个时返回 ``(-1, 1)``；
+        所有值相等时使用跨度 1，避免 Qt 轴范围退化为零。
+    """
     clean = [v for v in data if v == v]  # filter NaN
     if len(clean) < 2: return -1, 1
     mn, mx = min(clean), max(clean)
@@ -27,8 +44,22 @@ def _yrange(data, pad=0.1):
 
 
 class CellGridItem(pg.GraphicsObject):
-    """84 个独立色块 + 数值文字，复现 matplotlib table 效果"""
+    """绘制 12×7 压力色块、网格和区域轮廓的 PyQtGraph 图元。
+
+    坐标中 ``x`` 对应列、``y`` 对应行；每个单元以 ``(c, r)`` 为中心，
+    边界位于半整数位置。数据和区域掩码由 :meth:`set_data` 与
+    :meth:`set_regions` 更新，绘制请求由 Qt/pyqtgraph 自动触发。
+    """
     def __init__(self, rows=12, cols=7):
+        """创建阵列图元并初始化零数据。
+
+        Args:
+            rows: 阵列行数，默认 12。
+            cols: 阵列列数，默认 7。
+
+        Returns:
+            ``None``。初始化 ``GraphicsObject``、数据数组、色阶和区域状态。
+        """
         pg.GraphicsObject.__init__(self)
         self.rows, self.cols = rows, cols
         self.data = np.zeros((rows, cols))
@@ -38,11 +69,37 @@ class CellGridItem(pg.GraphicsObject):
         self.region_frames = {}
 
     def set_data(self, data, vmax):
+        """替换压力矩阵并请求重绘。
+
+        Args:
+            data: 形状应为 ``(rows, cols)`` 的 ADC/压力数组。
+            vmax: 热力图最大色阶；小于 1 时按 1 处理。
+
+        Returns:
+            ``None``。
+
+        Side Effects:
+            更新内部数组和色阶，并调用 ``update()`` 让 Qt 安排重绘。
+        """
         self.data = data
         self.vmax = max(vmax, 1)
         self.update()
 
     def set_regions(self, region_mask, palette):
+        """设置区域掩码并重新计算区域边框线段。
+
+        Args:
+            region_mask: 与压力矩阵同形状的整数掩码；0 表示背景，正整数
+                表示区域编号。
+            palette: ``(R, G, B)`` 颜色序列，供区域编号循环取色。
+
+        Returns:
+            ``None``。
+
+        Side Effects:
+            覆盖 ``region_frames``，清除旧区域轮廓的逻辑状态，并请求 Qt
+            重绘。公共边会由后绘制的区域颜色覆盖。
+        """
         self.region_mask = region_mask
         self.region_palette = palette
         # 外框线段: region 与背景 0 / 阵列边缘 / 其他 region 相邻的边, 每个 region 一条闭合轮廓;
@@ -67,6 +124,20 @@ class CellGridItem(pg.GraphicsObject):
         self.update()
 
     def paint(self, p, opt, widget):
+        """在 Qt 提供的绘图上下文中绘制色块、网格和区域边框。
+
+        Args:
+            p: Qt 的 ``QPainter``，坐标系与图元局部坐标一致。
+            opt: Qt/pyqtgraph 的 ``StyleOptionGraphicsItem``；当前仅为接口参数。
+            widget: 发起绘制的 Qt widget；当前仅为接口参数。
+
+        Returns:
+            ``None``。绘图结果直接写入 Qt painter，不返回像素数据。
+
+        Side Effects:
+            修改 painter 的抗锯齿、画笔和画刷状态；pyqtgraph 调用方负责
+            painter 生命周期。
+        """
         p.setRenderHint(p.RenderHint.Antialiasing, False)
         w = self.cols
         h = self.rows
@@ -101,11 +172,25 @@ class CellGridItem(pg.GraphicsObject):
                 p.drawLine(QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2))
 
     def boundingRect(self):
+        """返回图元的局部包围矩形。
+
+        Returns:
+            ``QRectF(-0.5, -0.5, cols, rows)``，覆盖所有单元边界，供
+            Qt 进行更新区域和视图裁剪。
+        """
         return QtCore.QRectF(-0.5, -0.5, self.cols, self.rows)
 
     @staticmethod
     def _brush(t):
-        """白→浅红→红→深红，纯红色系"""
+        """把归一化压力值映射为白到深红的 Qt 画刷。
+
+        Args:
+            t: 归一化色阶值；会裁剪到 ``[0, 1]``。
+
+        Returns:
+            ``QBrush``，由相邻颜色控制点线性插值得到；异常范围不会抛出，
+            而是按端点颜色处理。
+        """
         t = max(0, min(1, t))
         pts = [(0.00, 255, 255, 255),   # 白
                (0.25, 255, 150, 150),   # 浅红
@@ -125,12 +210,35 @@ class CellGridItem(pg.GraphicsObject):
 
 
 class GridLinesItem(pg.GraphicsObject):
-    """纯网格线，避免 addLine 在 ViewBox 边界裁剪导致外圈视觉偏大"""
+    """只绘制 12×7 阵列网格线的 PyQtGraph 图元。
+
+    网格线位于半整数边界，独立于色块绘制，用于避免 ``addLine`` 在
+    ``ViewBox`` 边界裁剪时造成外圈视觉尺寸偏差。
+    """
     def __init__(self, rows=12, cols=7):
+        """创建网格图元。
+
+        Args:
+            rows: 网格行数，默认 12。
+            cols: 网格列数，默认 7。
+
+        Returns:
+            ``None``。
+        """
         pg.GraphicsObject.__init__(self)
         self.rows, self.cols = rows, cols
 
     def paint(self, p, opt, widget):
+        """在 Qt painter 中绘制所有横向和纵向网格线。
+
+        Args:
+            p: Qt ``QPainter``。
+            opt: Qt/pyqtgraph 绘制选项，当前不读取。
+            widget: 发起绘制的 Qt widget，当前不读取。
+
+        Returns:
+            ``None``；线条直接绘制到 Qt 场景。
+        """
         p.setRenderHint(p.RenderHint.Antialiasing, False)
         pen = QtGui.QPen(QtGui.QColor(128, 128, 128))
         pen.setCosmetic(True)
@@ -143,11 +251,33 @@ class GridLinesItem(pg.GraphicsObject):
             p.drawLine(QtCore.QPointF(-0.5, y), QtCore.QPointF(self.cols - 0.5, y))
 
     def boundingRect(self):
+        """返回覆盖整个阵列网格的局部矩形。
+
+        Returns:
+            ``QRectF(-0.5, -0.5, cols, rows)``。
+        """
         return QtCore.QRectF(-0.5, -0.5, self.cols, self.rows)
 
 
 class RealTimePlot:
+    """管理实时采集窗口、缓存曲线和 12×7 阵列可视化。
+
+    对外通过 :meth:`set_data` 接收最新状态，通过
+    :meth:`append_full_data` 保存静态分析所需历史数据；内部 Qt 定时器以
+    ``PLOT_TIMER_INTERVAL_MS`` 刷新图元。类不读取串口，也不决定采样频率。
+    所有 Qt 图元、窗口和历史列表都由实例拥有，调用 :meth:`plot_full_analysis`
+    时才按需导入 Matplotlib。
+    """
     def __init__(self):
+        """创建实时窗口、绘图图元、定时器和历史缓存。
+
+        Returns:
+            ``None``。构造过程会创建并显示 Qt 窗口，并启动定时刷新器。
+
+        Side Effects:
+            分配大量 PyQtGraph 图元；若 Qt 应用未初始化或 GUI 依赖缺失，
+            可能抛出 Qt/PyQtGraph 相关异常。
+        """
         self.rows, self.cols = 12, 7
         self.lock = threading.Lock()
         self._heat_vmax = 500.0   # 热力图色阶下限
@@ -171,6 +301,15 @@ class RealTimePlot:
         self.timer.start(PLOT_TIMER_INTERVAL_MS)
 
     def init_defaults(self):
+        """初始化最新一帧的方向、压力、CoP、力和区域显示状态。
+
+        Returns:
+            ``None``。
+
+        Side Effects:
+            重置所有 ``_`` 前缀的显示状态字段；不创建 Qt 图元，也不启动
+            定时器。通常只在构造阶段调用。
+        """
         self._pzt_angle_deg = 0.0           # PZT方向角度(度)
         self._force_angle_deg = 0.0         # 六维力方向角度(度)
         self._press_table_arr = np.zeros((12, 7))  # 压力表数据(12×7)
@@ -193,6 +332,15 @@ class RealTimePlot:
         self._centroid_xy = None             # 整帧形心（不加权, 品红菱形显示）
 
     def init_history(self):
+        """创建固定长度的时序和角度误差 deque。
+
+        Returns:
+            ``None``。
+
+        Side Effects:
+            清空并替换所有实时历史缓存；长度分别由
+            ``PLOT_HISTORY_LEN`` 与 ``PLOT_ERR_HISTORY_LEN`` 控制。
+        """
         hist_len = PLOT_HISTORY_LEN
         err_len = PLOT_ERR_HISTORY_LEN
         self.angle_error_history = deque(maxlen=err_len)
@@ -208,14 +356,39 @@ class RealTimePlot:
 
     # ===== 手工箭头工具 =====
     def _make_arrow_parts(self, plot):
-        """在 plot 上创建箭头杆+三角头，返回 (shaft, head_L, head_R) 三条 PlotDataItem"""
+        """在指定 plot 中创建一支由三条曲线组成的手工箭头。
+
+        Args:
+            plot: PyQtGraph ``PlotItem``，箭头的三个 ``PlotDataItem`` 将加入
+                其中。
+
+        Returns:
+            ``(shaft, head_L, head_R)`` 元组，分别为箭杆和三角箭头两条边。
+
+        Side Effects:
+            向 ``plot`` 添加三条空曲线；后续可由 :meth:`_update_arrow` 更新。
+        """
         shaft = plot.plot([], [], pen=pg.mkPen('k', width=3))
         hL = plot.plot([], [], pen=pg.mkPen('k', width=2))
         hR = plot.plot([], [], pen=pg.mkPen('k', width=2))
         return shaft, hL, hR
 
     def _update_arrow(self, parts, angle_deg, length, color, origin=(0.0, 0.0)):
-        """更新箭头：angle_deg=0=右, 90=上；尾部固定在 origin"""
+        """按方向、长度和起点更新手工箭头的三条曲线。
+
+        Args:
+            parts: ``(shaft, head_L, head_R)`` 三个 ``PlotDataItem``。
+            angle_deg: 角度（度）；0° 指向 +X 右方，90° 指向 +Y 上方。
+            length: 箭头长度，使用 plot 的数据坐标单位；小于 0.005 时隐藏。
+            color: Qt/pyqtgraph 可接受的画笔颜色。
+            origin: 箭尾 ``(x, y)`` 数据坐标，默认 ``(0, 0)``。
+
+        Returns:
+            ``None``。
+
+        Side Effects:
+            更新三条曲线的画笔和顶点；短箭头会清空曲线数据而不抛出异常。
+        """
         shaft, hL, hR = parts
         pen = pg.mkPen(color, width=3)
         shaft.setPen(pen); hL.setPen(pen); hR.setPen(pen)
@@ -239,9 +412,28 @@ class RealTimePlot:
 
     # ===== 布局 =====
     def build_layout(self):
+        """创建所有实时曲线、方向箭头、压力表和梯度图元。
+
+        Returns:
+            ``None``。
+
+        Side Effects:
+            创建并显示 ``GraphicsLayoutWidget``，加入 Qt/pyqtgraph 图元，
+            保存它们的句柄到实例属性，并建立阵列坐标范围。该方法不读取
+            传感器数据；调用失败通常表示 Qt 应用或 GUI 依赖未就绪。
+        """
         self.win = pg.GraphicsLayoutWidget(title="RealTime")
         self.win.resize(1900, 1050)
         def _style_plot(p, title):
+            """统一设置单个 PlotItem 的标题样式。
+
+            Args:
+                p: 要设置的 PyQtGraph ``PlotItem``。
+                title: 标题文本；当前同时作为 ``setTitle`` 的标题。
+
+            Returns:
+                ``None``；只改变 plot 的标题外观。
+            """
             p.setTitle(title, size='11pt', bold=True)
 
         # --- 左列 (col 0-1): PZT=红, Force=蓝 ---
@@ -391,6 +583,35 @@ class RealTimePlot:
                  region_mask=None,
                  regions=None,
                  centroid=None):
+        """提交一帧实时显示状态，并更新曲线历史缓存。
+
+        Args:
+            pzt_angle_deg: PZT 压力方向角，单位为度。
+            force_angle_deg: 六维力方向角，单位为度。
+            press_table_arr: 84 个压力值，可 reshape 为 ``(12, 7)``。
+            total_press_val: 当前帧压力总和。
+            cop_curr_x, cop_curr_y: 当前 CoP 的阵列坐标。
+            cop_base_x, cop_base_y: 接触基准 CoP；``None`` 时使用当前 CoP。
+            cop_delta_x, cop_delta_y: 当前 CoP 相对基准的位移。
+            force_fx_val, force_fy_val, force_fz_val: 原始六维力分量。
+            cal_fx_val, cal_fy_val, cal_fz_val: 可选标定力分量。
+            cop_state: CoP 状态编号，通常 0/1/2 分别表示未接触、粗略和精细。
+            gradient: 可选 ``(12, 7, 2)`` 梯度数组。
+            contact_init: 是否已经锁定初始接触基准。
+            refined: 是否已完成精修；保留该接口参数供上层调用。
+            pzt_table_angle_deg: 压力表坐标专用方向角，可选。
+            region_mask: 可选 ``(12, 7)`` 区域编号掩码。
+            regions: 可选区域字典序列，每项包含 ``id``、``cop`` 和 ``delta``。
+            centroid: 可选整帧形心 ``(x, y)``。
+
+        Returns:
+            ``None``。
+
+        Side Effects:
+            在锁内替换下一次绘图所需状态，并向固定长度历史 deque 追加
+            当前帧。方法不直接绘制、不启动串口，也不改变采集时间戳。
+            ``refined`` 当前仅为兼容调用方的语义参数，未参与绘图分支。
+        """
         with self.lock:
             self._pzt_angle_deg = pzt_angle_deg
             self._force_angle_deg = force_angle_deg
@@ -437,6 +658,26 @@ class RealTimePlot:
                           force_angle_deg,
                           force_fz_filt, force_fx_filt, force_fy_filt,
                           cal_angle_deg=None, cal_fx_val=None, cal_fy_val=None, cal_fz_val=None):
+        """追加一帧用于结束后静态分析的完整历史数据。
+
+        Args:
+            rel_time_ms: 相对首帧时间，单位为毫秒。
+            pzt_angle_deg: PZT 方向角（度）。
+            total_press_val: 压力总和。
+            cop_delta_x_filt, cop_delta_y_filt: 滤波后的 CoP 位移。
+            force_angle_deg: 原始六维力方向角（度）。
+            force_fz_filt, force_fx_filt, force_fy_filt: 滤波后的原始力分量。
+            cal_angle_deg: 可选标定方向角（度）。
+            cal_fx_val, cal_fy_val, cal_fz_val: 可选标定力分量；提供时分别
+                追加对应标定历史。
+
+        Returns:
+            ``None``。
+
+        Side Effects:
+            在锁内追加到实例的 ``full_*`` 列表；这些列表供
+            :meth:`plot_full_analysis` 使用，不会写入 CSV。
+        """
         with self.lock:
             self.full_time_list.append(rel_time_ms)
             self.full_adc_angle_list.append(pzt_angle_deg)
@@ -456,6 +697,21 @@ class RealTimePlot:
 
     # ===== 更新 =====
     def update_all(self):
+        """从线程安全状态刷新全部 Qt 图元。
+
+        Returns:
+            ``None``。
+
+        Side Effects:
+            读取并复制锁内状态，更新窗口标题、时序曲线、方向箭头、CoP
+            标记、区域轮廓、梯度箭头和压力文字。该方法通常由 Qt
+            ``QTimer`` 调用，绘图刷新可能触发 pyqtgraph 的场景更新，但不
+            读取串口、不写 CSV，也不改变采样调度。
+
+        Raises:
+            可能传播 Qt/pyqtgraph 图元或输入数组形状相关异常；调用方应
+            在 Qt 主线程中执行。
+        """
         t0 = time.perf_counter()
         with self.lock:
             pzt_angle_deg = self._pzt_angle_deg
@@ -634,14 +890,48 @@ class RealTimePlot:
 
     @staticmethod
     def _html(text, color, size=16):
+        """生成实时图中文字使用的粗体 HTML span。
+
+        Args:
+            text: 要显示的文本。
+            color: CSS/Qt 可识别的颜色字符串。
+            size: 字号，单位为 pt。
+
+        Returns:
+            可传给 ``pyqtgraph.TextItem.setHtml`` 的 HTML 字符串。
+        """
         return f'<span style="color:{color};font-size:{size}pt;font-weight:bold">{text}</span>'
 
     def _font_size(self, base=16):
-        """根据窗口宽度动态计算字号"""
+        """按窗口当前宽度缩放实时文字字号。
+
+        Args:
+            base: 在 1900 像素参考宽度下的字号，单位为 pt。
+
+        Returns:
+            不小于 7 的整数字号；窗口越宽，字号按宽度比例增加。
+        """
         w = self.win.width()
         return max(int(base * w / 1900), 7)
 
     def _u1(self, curve, plot, data, txt, label, color='red', fs=16):
+        """更新一条单序列时序曲线及其末值标签。
+
+        Args:
+            curve: 要写入 ``setData(x, y)`` 的 PlotDataItem。
+            plot: 用于设置 X/Y 范围的 PlotItem。
+            data: 按时间顺序排列的数值序列。
+            txt: 显示末值的 ``TextItem``。
+            label: 标签文本。
+            color: 标签颜色。
+            fs: 标签字号（pt）。
+
+        Returns:
+            ``None``。空数据时保持当前图元状态不变。
+
+        Side Effects:
+            更新曲线数据、坐标范围和文字标签。
+        """
         if data:
             xs = list(range(len(data)))
             curve.setData(xs, data)
@@ -653,6 +943,26 @@ class RealTimePlot:
             txt.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.12)
 
     def _u2(self, c1, c2, plot, d1, d2, txt, label, color='blue', txt_r=None, fs=16):
+        """更新原始/标定双序列曲线及两种末值标签。
+
+        Args:
+            c1: 原始值 PlotDataItem。
+            c2: 标定值 PlotDataItem。
+            plot: 用于设置坐标范围的 PlotItem。
+            d1: 原始值序列。
+            d2: 标定值序列；只有长度与 ``d1`` 相同时才绘制。
+            txt: 原始值 TextItem。
+            label: 曲线标签。
+            color: 原始值标签颜色。
+            txt_r: 可选标定值 TextItem。
+            fs: 标签字号（pt）。
+
+        Returns:
+            ``None``。空原始序列时不改变已有图元。
+
+        Side Effects:
+            更新原始和可能存在的标定曲线、坐标范围及标签文字。
+        """
         if d1:
             xs = list(range(len(d1)))
             c1.setData(xs, d1)
@@ -671,6 +981,24 @@ class RealTimePlot:
 
     # ===== 全程静态图 (matplotlib Agg, 缺则 skip) =====
     def plot_full_analysis(self, save_dir):
+        """将实例累计历史绘制为 PNG 静态分析图。
+
+        Args:
+            save_dir: PNG 输出目录；文件名自动选择为
+                ``full_analysis_cop_<n>.png``，避免覆盖已有文件。
+
+        Returns:
+            成功保存或无数据/缺少 Matplotlib 时返回 ``None``。无数据时打印
+            提示；缺少可选 Matplotlib 时跳过出图但保留内存数据。
+
+        Side Effects:
+            按需导入 Matplotlib，创建并关闭一个 4×2 图形，并在
+            ``save_dir`` 写入 PNG；不会修改采集列表或 CSV。
+
+        Raises:
+            输出目录不可写、数据结构不一致或 Matplotlib 绘图失败时可能
+            传播对应异常。
+        """
         if len(self.full_time_list) == 0: print("⚠️ 无数据"); return
         try:
             import matplotlib
@@ -684,6 +1012,17 @@ class RealTimePlot:
         fig, axes = plt.subplots(4, 2, figsize=(18, 20))
         (aL1, aR1), (aL2, aR2), (aL3, aR3), (aL4, aR4) = axes
         def _p(ax, d, c, lbl):
+            """仅在序列与时间轴等长时绘制一条静态分析曲线。
+
+            Args:
+                ax: Matplotlib ``Axes``。
+                d: 要绘制的数值序列。
+                c: Matplotlib 线型/颜色格式字符串。
+                lbl: 图例标签。
+
+            Returns:
+                ``None``；长度不匹配或序列为空时不绘制。
+            """
             if d and len(d) == len(t): ax.plot(t, d, c, linewidth=1.0, label=lbl)
         _p(aL1, self.full_adc_angle_list, 'b-', 'PZT Angle'); aL1.set_title("PZT Angle"); aL1.grid(True, alpha=0.3)
         _p(aL2, self.full_total_pressure_list, 'b-', 'PZT Fz'); aL2.set_title("PZT Fz"); aL2.grid(True, alpha=0.3)
