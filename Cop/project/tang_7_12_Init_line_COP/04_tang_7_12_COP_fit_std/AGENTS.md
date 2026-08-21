@@ -190,6 +190,12 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
   使用 EMA 运动方向，退出帧为 0，并通过 PRSensorAngle.reanchor_origin 重锁
   全局 origin。region-only 只做整帧聚合 CoP 的全局检测，不做 per-region 滑移；
   多接触时 CoP 可能互相抵消，结果可能低估真实运动。
+- 滑移方向必须保存在 detector 独立的 EMA 向量中，不能直接依赖会变化的静态
+  CoP origin。SLIP 期间内部 anchor 每帧同步跟随当前 CoP；达到退出滞回后，
+  必须在同一压力帧处理调用内同步重锚定 PRSensorAngle、清空方向并输出 0°，
+  禁止改成异步“稍后重置”任务。短于窗口和进入滞回要求的运动可能不会被识别，
+  这是当前算法的抗噪检测下限；如需退出后保留历史方向，应由上层事件记录实现，
+  不得改变 ``is_slipping`` 表示当前状态的语义。
 - 异常、Ctrl+C、窗口关闭和无数据退出必须释放停止事件、线程、进程、串口、CSV 和 Qt 资源。
 
 ## 6. 修改路由
