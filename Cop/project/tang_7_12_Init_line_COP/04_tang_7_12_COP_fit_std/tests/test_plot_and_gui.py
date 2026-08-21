@@ -11,6 +11,7 @@ from pyqtgraph.Qt import QtWidgets
 
 from tangential.tools.plotting import load_csv, resolve_column
 from tangential.gui.realtime import RealTimePlot
+from tangential.config import GuiConfig
 
 
 class StaticPlotTests(unittest.TestCase):
@@ -75,6 +76,16 @@ class RealtimePlotTests(unittest.TestCase):
         plot.update_all()
         cleared = plot._region_arrows[1][0].xData
         self.assertTrue(cleared is None or len(cleared) == 0)
+        plot.win.close()
+
+    def test_sensor_title_is_preserved_when_status_changes(self):
+        """状态刷新应保留 Sensor A/B 标签。"""
+        plot = RealTimePlot(GuiConfig(window_title="Sensor A"))
+        plot.set_status("未接触")
+        self.assertIn("Sensor A", plot.win.windowTitle())
+        self.assertIn("未接触", plot.win.windowTitle())
+        plot.set_status("数据线程异常: serial disconnected")
+        self.assertIn("Sensor A", plot.win.windowTitle())
         plot.win.close()
 
 

@@ -1,139 +1,177 @@
-"""同时采集两个互不共享状态的压力传感器示例。
+"""双路完整实时采集示例。
 
-每个 ``TangentialSensorAPI`` 都拥有独立串口、采集进程、IPC队列、CoP
-状态机和标定处理器。示例使用两个读取线程并行消费两路队列，避免一个设备
-的读取超时阻塞另一个设备。两个配置不得指向同一个物理串口。
+该示例与 ``examples/full.py`` 使用同一套完整会话：每一路都显示压力表、
+梯度、CoP、角度、标定和实时曲线，保存完整 108 列 CSV，并在退出时生成
+结束分析图。两路只共享一个 ``QApplication``，设备、会话、窗口和输出目录
+均保持独立。
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import sys
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, TextIO
+from pathlib import Path
 
-from ..config import PressureConfig
-from ..runtime.sensor import TangentialSensorAPI
+from ..application import run_dual_application
+from ..config import (
+    CalibrationConfig,
+    ForceConfig,
+    FullApplicationConfig,
+    GuiConfig,
+    OutputConfig,
+    PressureConfig,
+    default_save_dir,
+)
 
 
-def _canonical_port(port: str) -> str:
-    """解析串口真实路径，用于识别指向同一设备的不同符号链接。
+def build_config(
+    *,
+    pressure_port: str,
+    force_port: str | None,
+    save_dir: str | os.PathLike[str],
+    model_path: str | None,
+    window_title: str,
+) -> FullApplicationConfig:
+    """创建一路双传感器完整应用配置。
 
     Args:
-        port: 用户传入的串口路径，例如 ``/dev/serial/by-id/...``。
+        pressure_port: 该路压力阵列串口。
+        force_port: 可选六维力串口；为 ``None`` 时显式禁用力通道。
+        save_dir: 该路独立 CSV 和结束分析图目录。
+        model_path: 可选外部模型路径；为 ``None`` 时使用内置模型。
+        window_title: 该路 GUI 窗口标题。
 
     Returns:
-        str: 规范化后的绝对真实路径；路径尚不存在时也返回规范化结果。
+        FullApplicationConfig: 可直接传给 ``run_dual_application`` 的配置。
+
+    Side Effects:
+        只创建并校验配置对象，不打开串口、不创建窗口。
     """
-    return os.path.realpath(os.path.abspath(port))
-
-
-def _format_summary(label: str, port: str, sample: Any) -> str:
-    """把一路压力样本格式化为单行摘要。
-
-    Args:
-        label: 传感器显示名称。
-        port: 该传感器配置的串口路径。
-        sample: ``TangentialSample`` 或具有相同摘要字段的对象；``None``
-            表示本轮读取超时。
-
-    Returns:
-        str: 包含端口、序号、ADC总和、CoP和角度的单行文本。
-    """
-    if sample is None:
-        return f"{label}({port}): timeout"
-    return (
-        f"{label}({port}): seq={sample.request_seq} sum={sample.total:.0f} "
-        f"cop=({sample.cop_x:.3f},{sample.cop_y:.3f}) "
-        f"angle={sample.angle:.2f}°"
+    force = ForceConfig(
+        enabled=force_port is not None,
+        port=force_port or "/dev/ttyUSB1",
+    )
+    return FullApplicationConfig(
+        pressure=PressureConfig(port=pressure_port),
+        force=force,
+        calibration=CalibrationConfig(model_path=model_path),
+        output=OutputConfig(save_dir=str(save_dir)),
+        gui=GuiConfig(window_title=window_title),
     )
 
 
 def run(
-    sensor_a: PressureConfig,
-    sensor_b: PressureConfig,
+    config_a: FullApplicationConfig,
+    config_b: FullApplicationConfig,
     *,
-    model_path: str | None = None,
-    timeout_s: float = 0.1,
-    stream: TextIO | None = None,
-    sensor_factory=TangentialSensorAPI,
-    max_iterations: int | None = None,
+    runner=run_dual_application,
 ) -> int:
-    """并行采集两个压力传感器，直到中断或达到测试迭代数。
+    """运行两路完整 GUI 采集，并在异常时联动关闭两路。
 
     Args:
-        sensor_a: 第一只压力传感器的完整设备和轮询配置。
-        sensor_b: 第二只压力传感器的完整设备和轮询配置。
-        model_path: 两路处理器使用的外部模型；``None`` 使用内置模型。
-        timeout_s: 每一路单次 ``read`` 的最长等待时间，单位为秒。
-        stream: 摘要输出流；``None`` 使用标准输出。
-        sensor_factory: 传感器API工厂，生产环境使用默认值，测试可注入。
-        max_iterations: 最大读取轮数；``None`` 表示持续运行。
+        config_a: Sensor A 的完整配置。
+        config_b: Sensor B 的完整配置。
+        runner: 双路应用入口；生产环境使用 ``run_dual_application``，测试
+            可注入记录调用的替代函数。
 
     Returns:
-        int: 正常完成时返回 ``0``。
+        int: 双路 Qt 应用正常退出时返回 ``0``。
 
     Raises:
-        ValueError: 两个配置指向同一物理串口、超时不为正数，或迭代数非法。
-        Exception: 任一传感器连接、采集、解码或处理失败时向调用方传播；
-            退出上下文时两路资源都会关闭。
+        ValueError: 两路压力串口、启用的力串口或输出目录冲突。
+        Exception: 设备、Qt、采集、CSV 或分析图错误向上传播。
 
     Side Effects:
-        启动两个独立压力采集进程和两个消费线程，并向输出流写摘要。
+        创建一个 Qt 应用和两个完整会话；每路会创建独立采集资源、完整
+        CSV 以及退出后的分析 PNG。
     """
-    sensor_a.validate()
-    sensor_b.validate()
-    if _canonical_port(sensor_a.port) == _canonical_port(sensor_b.port):
-        raise ValueError("两个压力传感器不能使用同一个物理串口")
-    if timeout_s <= 0:
-        raise ValueError("timeout_s 必须大于 0")
-    if max_iterations is not None and max_iterations < 0:
-        raise ValueError("max_iterations 不能为负数")
+    return runner(config_a, config_b)
 
-    output = stream or sys.stdout
-    completed = 0
-    with (
-        sensor_factory(config=sensor_a, model_path=model_path) as api_a,
-        sensor_factory(config=sensor_b, model_path=model_path) as api_b,
-        ThreadPoolExecutor(max_workers=2, thread_name_prefix="dual-pressure") as pool,
-    ):
-        while max_iterations is None or completed < max_iterations:
-            future_a = pool.submit(api_a.read, timeout_s=timeout_s)
-            future_b = pool.submit(api_b.read, timeout_s=timeout_s)
-            sample_a = future_a.result()
-            sample_b = future_b.result()
-            output.write(
-                _format_summary("A", sensor_a.port, sample_a)
-                + " | "
-                + _format_summary("B", sensor_b.port, sample_b)
-                + "\n"
-            )
-            output.flush()
-            completed += 1
-    return 0
+
+def build_configs_from_args(args: argparse.Namespace) -> tuple[
+    FullApplicationConfig, FullApplicationConfig
+]:
+    """把双路命令行参数转换成两份完整配置。
+
+    Args:
+        args: ``_build_parser`` 或统一 CLI 生成的参数对象。
+
+    Returns:
+        tuple: ``(config_a, config_b)``，两路输出目录默认分别为
+            ``<base>/sensor_a`` 和 ``<base>/sensor_b``。
+
+    Raises:
+        ValueError: 两个显式力端口相同，或参数导致配置非法。
+    """
+    base = Path(args.save_dir or default_save_dir())
+    save_a = Path(args.save_dir_a or base / "sensor_a")
+    save_b = Path(args.save_dir_b or base / "sensor_b")
+    model_a = args.model_a or args.model
+    model_b = args.model_b or args.model
+    return (
+        build_config(
+            pressure_port=args.port_a,
+            force_port=args.force_port_a,
+            save_dir=save_a,
+            model_path=model_a,
+            window_title="Sensor A",
+        ),
+        build_config(
+            pressure_port=args.port_b,
+            force_port=args.force_port_b,
+            save_dir=save_b,
+            model_path=model_b,
+            window_title="Sensor B",
+        ),
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """创建双压力示例的命令行解析器。"""
-    parser = argparse.ArgumentParser(description="同时采集两个独立压力传感器")
-    parser.add_argument("--port-a", required=True, help="第一只压力传感器串口")
-    parser.add_argument("--port-b", required=True, help="第二只压力传感器串口")
-    parser.add_argument("--model", help="可选外部 fit_coefs.bin")
-    parser.add_argument("--timeout", type=float, default=0.1)
+    """创建双路完整 GUI 示例的命令行解析器。"""
+    parser = argparse.ArgumentParser(
+        description="同时运行两个独立的完整压力采集 GUI（CSV 为 108 列）"
+    )
+    parser.add_argument("--port-a", required=True, help="Sensor A 压力串口")
+    parser.add_argument("--port-b", required=True, help="Sensor B 压力串口")
+    parser.add_argument("--force-port-a", help="可选 Sensor A 六维力串口")
+    parser.add_argument("--force-port-b", help="可选 Sensor B 六维力串口")
+    parser.add_argument("--save-dir", help="两路输出目录的父目录")
+    parser.add_argument("--save-dir-a", help="Sensor A CSV/分析图目录")
+    parser.add_argument("--save-dir-b", help="Sensor B CSV/分析图目录")
+    parser.add_argument("--model", help="两路共用的外部 fit_coefs.bin")
+    parser.add_argument("--model-a", help="Sensor A 外部模型，覆盖 --model")
+    parser.add_argument("--model-b", help="Sensor B 外部模型，覆盖 --model")
     return parser
 
 
+def run_from_namespace(args: argparse.Namespace) -> int:
+    """执行统一 CLI 已解析的双路完整 GUI 参数。
+
+    Args:
+        args: 包含本模块命令行参数的 ``argparse.Namespace``。
+
+    Returns:
+        int: 正常退出码 ``0``。
+
+    Side Effects:
+        打开两个完整采集窗口并写入两路独立输出目录。
+    """
+    config_a, config_b = build_configs_from_args(args)
+    return run(config_a, config_b)
+
+
 def main(argv: list[str] | None = None) -> int:
-    """解析两个端口并运行示例；Ctrl+C视为正常停止。"""
+    """解析双路完整 GUI 参数并运行；Ctrl+C 视为正常停止。
+
+    Args:
+        argv: 命令行参数；为 ``None`` 时读取 ``sys.argv``。
+
+    Returns:
+        int: 正常退出码 ``0``。
+    """
     args = _build_parser().parse_args(argv)
     try:
-        return run(
-            PressureConfig(port=args.port_a),
-            PressureConfig(port=args.port_b),
-            model_path=args.model,
-            timeout_s=args.timeout,
-        )
+        return run_from_namespace(args)
     except KeyboardInterrupt:
         return 0
 

@@ -17,7 +17,7 @@ from .api import (
     compute_vector_angle,
     format_terminal_sample,
 )
-from .application import run_application
+from .application import run_application, run_dual_application
 from .config import (
     CalibrationConfig,
     CopConfig,
@@ -69,6 +69,7 @@ __all__ = [
     "plot_csv",                    # 绘图入口：按真实 CSV 表头绘制指定列和区间。
     "plot_full_analysis",          # 绘图入口：生成完整 108 列采集数据分析图。
     "run_application",             # 完整应用入口：按配置启动采集和 GUI。
+    "run_dual_application",        # 双完整应用入口：共用一个 Qt 应用、独立两路会话。
 ]
 
 # SDK 发行版本号，供运行时检查兼容性和 CLI --version 使用。

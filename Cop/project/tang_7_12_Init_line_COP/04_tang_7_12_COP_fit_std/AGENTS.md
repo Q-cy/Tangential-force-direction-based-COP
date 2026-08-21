@@ -28,7 +28,8 @@
 │   ├── __init__.py                   # 稳定顶层公共 API 和版本
 │   ├── api.py                        # 可读公开 API 门面
 │   ├── application.py                # run_application 公共完整应用入口
-│   ├── cli.py                        # example/app/plot/fit 命令分发
+│   ├── application.pyi               # 完整应用入口的静态类型签名
+│   ├── cli.py                        # example/app/dual/plot/fit 命令分发
 │   ├── config.py                     # 分类配置、默认值、环境变量和校验
 │   ├── py.typed                      # 类型提示标记
 │   ├── runtime/
@@ -71,11 +72,13 @@ runtime、acquisition、sensors、processing、storage 是运行时核心实现�
 - FitCalibrationModel、PRSensorAngle、PressureSensor。
 - PressureConfig、ForceConfig、CopConfig、ProcessingConfig、CalibrationConfig、SyncConfig、OutputConfig、GuiConfig、TrainingConfig、PlotConfig、FullApplicationConfig。
 - train_model、TrainingResult、plot_csv、plot_full_analysis、PlotResult、run_application。
+- run_dual_application：在一个 QApplication 中启动两路完整、相互隔离的 GUI 会话。
 
 examples/minimal.py 是唯一最小循环；CLI example 必须调用它，不得在 cli.py 复制 while 循环。examples/full.py 只调用公开 run_application；CLI app 必须复用该入口。plot 和 fit 必须惰性导入 tools，基础 import tangential 不得加载 Qt、PyQtGraph 或 Matplotlib。
 
-examples/dual_sensor.py 展示多压力设备用法：每个 ``TangentialSensorAPI``
-必须拥有独立 ``PressureConfig``、串口、采集进程、IPC队列、读取线程和处理器；
+examples/dual_sensor.py 展示两路完整应用用法：每个 ``FullApplicationConfig``
+必须拥有独立 ``PressureConfig``、串口、采集进程、IPC队列、读取线程、处理器、
+``FullAcquisitionSession``、停止事件、GUI和输出目录；
 启动前必须拒绝指向同一物理串口的配置。不要为多设备引入共享传感器实例、
 共享CoP状态机或单一阻塞读取循环。
 
@@ -92,9 +95,8 @@ examples/dual_sensor.py 展示多压力设备用法：每个 ``TangentialSensorA
    ``groups`` 检查当前用户是否有串口权限，用 ``fuser "$PORT_A" "$PORT_B"``
    检查端口是否被旧进程占用。两个变量必须对应两个不同的物理设备。
 4. 按下面的源码模式或 wheel 模式命令启动示例，并确认终端持续打印A/B两路
-   的 ``seq``、ADC总和、CoP和角度。某一路打印 ``timeout`` 表示该路本次
-   ``read`` 在等待时间内没有收到合法压力帧；偶发一次可继续观察，持续出现
-   时应重新核对端口、权限、占用和设备连接。
+   的压力数据和完整 GUI。某一路持续没有数据时应重新核对端口、权限、占用
+   和设备连接；任一路采集线程异常都会报告 Sensor A/B 并联动停止两路。
 5. 按 ``Ctrl+C`` 停止。必须确认两路读取线程、采集进程、IPC队列和串口都已
    关闭；异常退出排查时也要检查没有遗留进程继续占用端口。
 
@@ -120,8 +122,26 @@ python -m tangential.examples.dual_sensor \
 的shell占位符；Bash会把 ``<``/``>`` 解释为输入输出重定向。若系统没有
 ``/dev/serial/by-id/``，可在确认设备映射后使用不同的 ``/dev/ttyUSB*``。
 
-该示例只做两路压力采集、CoP/角度/标定和终端摘要，不启动六维力、GUI或
-108列CSV。修改示例时必须保留并发读取、端口唯一性校验和两路资源的异常清理。
+该示例启动一个 ``QApplication``、两个 ``RealTimePlot`` 和两个
+``acquisition_loop``，两路都完整执行压力采集、CoP、角度、梯度、标定、实时
+曲线/压力表、108列 CSV 和退出后的分析图；它不再是终端摘要示例。默认只启用
+压力传感器，只有显式提供 ``--force-port-a``/``--force-port-b`` 才启用对应
+六维力通道，避免两路同时打开默认 ``/dev/ttyUSB1``。修改示例时必须复用
+``run_dual_application``、``FullAcquisitionSession`` 和 ``acquisition_loop``，
+保留并发读取、端口唯一性校验和两路资源的异常清理。
+
+统一 CLI 也提供同一入口：
+
+~~~bash
+PYTHONPATH=src python -m tangential.cli dual \
+  --port-a "$PORT_A" --port-b "$PORT_B" \
+  --save-dir ./data/dual
+~~~
+
+提供 ``--force-port-a``/``--force-port-b`` 后才会分别启用力通道；两路力端口
+必须不同。默认输出为 ``<base>/sensor_a`` 和 ``<base>/sensor_b``，也可用
+``--save-dir-a``、``--save-dir-b`` 分别覆盖。窗口标题固定保留 ``Sensor A``
+和 ``Sensor B`` 标签，状态文本不能覆盖标签。
 
 公开 API 的签名、输入、输出、异常和资源生命周期必须有文档字符串。新增用户可调用符号时同步更新 api.py、__init__.py 和测试。
 
@@ -130,13 +150,13 @@ python -m tangential.examples.dual_sensor \
 所有用户可调参数集中在 config.py，按功能使用 dataclass：
 
 - PressureConfig：压力端口、波特率、目标频率、响应超时、队列和启动超时。
-- ForceConfig：六维力端口、波特率、目标频率、响应超时、队列、启动超时和校零参数。
+- ForceConfig：六维力 enabled 开关、端口、波特率、目标频率、响应超时、队列、启动超时和校零参数。
 - CopConfig：阈值、背景学习、稳定帧、区域和二次精修。
 - ProcessingConfig：标定维度、区域模式、中值窗口和精修归零策略。
 - CalibrationConfig：外部模型路径。
 - SyncConfig：主循环频率、GUI 频率、匹配窗口、统计周期和缓存。
 - OutputConfig：CSV 目录。
-- GuiConfig：Qt刷新周期、历史长度、热力图色阶、窗口尺寸、区域箭头和配色。
+- GuiConfig：Qt刷新周期、窗口标题、历史长度、热力图色阶、窗口尺寸、区域箭头和配色。
 - TrainingConfig、PlotConfig：离线训练和绘图。
 - FullApplicationConfig：以上配置的组合。
 

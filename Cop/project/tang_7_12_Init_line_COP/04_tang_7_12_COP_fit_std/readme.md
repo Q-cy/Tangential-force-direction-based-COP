@@ -58,9 +58,11 @@ minimal 需要压力传感器；full 需要完整 GUI 依赖和实际硬件。�
 
 ## 同时连接两个压力传感器
 
-双传感器示例模块为 ``tangential.examples.dual_sensor``。它只采集两路压力
-传感器，分别计算CoP、角度、梯度和标定结果，并在终端打印两路摘要；不会
-启动六维力、GUI或108列CSV保存。
+双传感器示例模块为 ``tangential.examples.dual_sensor``。它启动一个 Qt 应用
+和两个完整窗口；A/B 各自执行压力采集、CoP、角度、梯度、标定、实时曲线、
+压力表、完整 108 列 CSV，并在退出时生成各自的分析图。不再是终端摘要循环。
+默认只连接压力传感器；只有显式提供对应 ``--force-port-a`` 或
+``--force-port-b`` 才启用六维力通道，避免两路同时打开默认 ``/dev/ttyUSB1``。
 
 ### 第1步：插入设备并识别两个端口
 
@@ -138,6 +140,26 @@ python -m tangential.examples.dual_sensor \
   --port-b "$PORT_B"
 ~~~
 
+默认输出目录为 ``./data/sensor_a`` 和 ``./data/sensor_b``。指定父目录时：
+
+~~~bash
+PYTHONPATH=src python -m tangential.examples.dual_sensor \
+  --port-a "$PORT_A" --port-b "$PORT_B" \
+  --save-dir ./data/dual
+~~~
+
+如果两路都要连接六维力传感器，必须显式提供两个不同的力端口：
+
+~~~bash
+PYTHONPATH=src python -m tangential.examples.dual_sensor \
+  --port-a "$PORT_A" --port-b "$PORT_B" \
+  --force-port-a /dev/serial/by-id/FORCE_A \
+  --force-port-b /dev/serial/by-id/FORCE_B
+~~~
+
+也可以分别覆盖输出目录：``--save-dir-a`` 和 ``--save-dir-b``；模型使用
+``--model MODEL_PATH``，或分别使用 ``--model-a``、``--model-b``。
+
 查看全部参数：
 
 ~~~bash
@@ -146,45 +168,42 @@ PYTHONPATH=src python -m tangential.examples.dual_sensor --help
 
 ### 第5步：确认输出并停止
 
-正常运行时每行同时显示A、B两路的端口、序号、ADC总和、CoP和角度，例如：
+运行后会出现两个窗口，标题分别包含 ``Sensor A`` 和 ``Sensor B``。每个窗口
+都包含压力/六维力实时曲线、方向和幅值、12×7 压力表、CoP 标记、梯度箭头
+以及状态显示；状态变化不会覆盖 A/B 标签。每路目录会保存一个完整 108 列
+CSV，退出后还会保存 ``full_analysis_cop_<n>.png``。
 
-~~~text
-A(...): seq=10 sum=12345 cop=(3.100,5.200) angle=42.00° | B(...): seq=9 sum=12001 cop=(2.900,5.000) angle=39.50°
-~~~
-
-正常输出应持续出现A、B两路的 ``seq``、ADC总和、CoP和角度，并且两路的
-``seq`` 会随着有效压力帧逐步增加。某一路显示 ``timeout`` 表示该路本次
-``read`` 在配置的等待时间内没有收到合法压力帧；它不表示 Bash 命令错误，
-可能原因包括端口选错、设备无响应、串口被占用、供电或USB带宽问题。偶发
-一次可以继续观察；持续出现时应回到第1步重新确认端口，并单独验证该设备。
-
-按 ``Ctrl+C`` 正常停止。示例会退出读取循环，并通过上下文管理器关闭A/B
-两路的读取线程、采集进程、IPC队列和串口；不要直接拔线代替正常退出。
+按 ``Ctrl+C`` 或关闭 Qt 应用时，两路会同时停止；任一路采集线程异常都会
+报告具体的 A/B，并联动安全关闭另一路。不要直接拔线代替正常退出。
 
 Python调用：
 
 ~~~python
-from tangential import PressureConfig
+from tangential import FullApplicationConfig
+from tangential.config import ForceConfig, GuiConfig, OutputConfig, PressureConfig
 from tangential.examples.dual_sensor import run
 
 run(
-    PressureConfig(
-        port="/dev/serial/by-id/DEVICE_A_ID",
-        target_hz=200,
-        frame_queue_size=256,
+    FullApplicationConfig(
+        pressure=PressureConfig(port="/dev/serial/by-id/DEVICE_A_ID"),
+        force=ForceConfig(enabled=False),
+        output=OutputConfig(save_dir="./data/sensor_a"),
+        gui=GuiConfig(window_title="Sensor A"),
     ),
-    PressureConfig(
-        port="/dev/serial/by-id/DEVICE_B_ID",
-        target_hz=200,
-        frame_queue_size=256,
+    FullApplicationConfig(
+        pressure=PressureConfig(port="/dev/serial/by-id/DEVICE_B_ID"),
+        force=ForceConfig(enabled=False),
+        output=OutputConfig(save_dir="./data/sensor_b"),
+        gui=GuiConfig(window_title="Sensor B"),
     ),
 )
 ~~~
 
-每一路都有独立串口、采集进程、IPC队列、读取线程、CoP状态机和标定处理器，
-一个设备的读取超时不会占用另一个设备的串口消费者。软件状态互相隔离，但
-USB控制器带宽、CPU调度和供电仍是共享硬件资源，实际帧率应分别验收。按
-``Ctrl+C`` 退出时，两路进程、线程和串口都会通过上下文管理器关闭。
+更直接的公共入口是 ``run_dual_application(config_a, config_b)``。每一路都有
+独立串口、采集进程、IPC队列、读取线程、缓存、CoP状态机、标定处理器、停止
+事件、GUI和输出目录；一个设备的读取超时不会占用另一个设备的串口消费者。
+软件状态互相隔离，但 USB 控制器带宽、CPU 调度和供电仍是共享硬件资源，实际
+帧率应分别验收。
 
 ### 常见错误
 
@@ -194,7 +213,7 @@ USB控制器带宽、CPU调度和供电仍是共享硬件资源，实际帧率�
 | ``No such file or directory`` | 设备未连接或端口名已变化 | 重新运行 ``serial.tools.list_ports -v`` |
 | ``Permission denied`` | 当前用户没有串口权限 | 加入 ``dialout`` 后重新登录 |
 | 提示两个传感器使用同一物理串口 | 两个路径相同，或两个符号链接指向同一设备 | 为A、B选择两个不同设备路径 |
-| 某一路持续 ``timeout`` | 端口选错、设备无响应、供电或USB带宽异常 | 单独运行最小示例验证该端口，再检查USB连接 |
+| 某一路窗口持续无数据 | 端口选错、设备无响应、供电或USB带宽异常 | 单独运行最小示例验证该端口，再检查USB连接 |
 
 ## 命令行
 
@@ -229,6 +248,20 @@ tangential app \
 ~~~
 
 压力传感器是必需设备；连接失败时程序退出且不创建空 CSV。六维力传感器是可选设备；连接或普通数据帧校零失败时降级为压力模式，力相关列写入 NaN。两路设备由独立采集进程读取，父进程按真实接收时间完成匹配和 CSV 保存。
+
+### 双路完整采集
+
+~~~bash
+tangential dual \
+  --port-a /dev/serial/by-id/PRESSURE_A \
+  --port-b /dev/serial/by-id/PRESSURE_B \
+  --save-dir ./data/dual
+~~~
+
+该命令显示两个完整 GUI 窗口，默认把 CSV 和退出分析图分别保存到
+``./data/dual/sensor_a``、``./data/dual/sensor_b``。只有显式增加
+``--force-port-a``、``--force-port-b`` 才启用对应六维力通道；两个力端口也
+必须是不同物理设备。
 
 ### 离线绘图
 
@@ -307,13 +340,13 @@ config = FullApplicationConfig(
 所有用户可调参数集中在 src/tangential/config.py：
 
 - PressureConfig：压力端口、波特率、目标频率、响应超时、队列和启动超时。
-- ForceConfig：六维力端口、波特率、目标频率、响应超时、队列、启动超时和校零参数。
+- ForceConfig：六维力 enabled 开关、端口、波特率、目标频率、响应超时、队列、启动超时和校零参数。
 - CopConfig：动态阈值、背景学习、CoP 稳定、区域和二次精修参数。
 - ProcessingConfig：标定维度、区域模式、中值窗口和精修归零策略。
 - CalibrationConfig：外部模型路径。
 - SyncConfig：主循环频率、GUI 频率、15 ms 匹配窗口、统计周期和缓存容量。
 - OutputConfig：CSV 保存目录。
-- GuiConfig：GUI 历史数据和区域箭头显示参数。
+- GuiConfig：GUI 窗口标题、历史数据和区域箭头显示参数。
 - TrainingConfig、PlotConfig：训练和离线绘图参数。
 - FullApplicationConfig：组合完整应用配置。
 

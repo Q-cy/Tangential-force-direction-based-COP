@@ -316,40 +316,43 @@ class FullAcquisitionSession:
         self.buf_press = TimestampedBuffer(self.config.buffer_size)
         print("✅ 压力传感器就绪")
 
-        try:
-            if self.force_factory is SixAxisForceSensor:
-                self.sensor_force = self.force_factory(
-                    port=self.config.force.port,
-                    period_s=self.config.force.period_s,
-                    response_timeout_s=self.config.force.response_timeout_s,
-                    queue_size=self.config.force.frame_queue_size,
-                    baudrate=self.config.force.baudrate,
-                    _startup_timeout_s=self.config.force.startup_timeout_s,
-                )
-            else:
-                self.sensor_force = _construct_sensor(
-                    self.force_factory, self.config.force_port
-                )
-            if not self.sensor_force.calibrate_zero(
-                sample_count=self.config.zero_sample_count,
-                timeout_s=self.config.zero_timeout_s,
-            ):
-                raise RuntimeError(
-                    f"{self.config.zero_timeout_s:.1f}s 内未收到 "
-                    f"{self.config.zero_sample_count} 个有效校零帧"
-                )
-            self.buf_force = TimestampedBuffer(self.config.buffer_size)
-            self.has_force = True
-            print("✅ 六维力传感器就绪，启动零点校准完成")
-        except Exception as exc:
-            print(f"⚠️ 六维力传感器不可用，降级为压力模式: {exc}")
-            if self.sensor_force is not None:
-                try:
-                    self.sensor_force.close()
-                except Exception:
-                    pass
-            self.sensor_force = None
-            self.has_force = False
+        if not self.config.force.enabled:
+            print("ℹ️ 六维力通道已禁用，使用压力模式")
+        else:
+            try:
+                if self.force_factory is SixAxisForceSensor:
+                    self.sensor_force = self.force_factory(
+                        port=self.config.force.port,
+                        period_s=self.config.force.period_s,
+                        response_timeout_s=self.config.force.response_timeout_s,
+                        queue_size=self.config.force.frame_queue_size,
+                        baudrate=self.config.force.baudrate,
+                        _startup_timeout_s=self.config.force.startup_timeout_s,
+                    )
+                else:
+                    self.sensor_force = _construct_sensor(
+                        self.force_factory, self.config.force_port
+                    )
+                if not self.sensor_force.calibrate_zero(
+                    sample_count=self.config.zero_sample_count,
+                    timeout_s=self.config.zero_timeout_s,
+                ):
+                    raise RuntimeError(
+                        f"{self.config.zero_timeout_s:.1f}s 内未收到 "
+                        f"{self.config.zero_sample_count} 个有效校零帧"
+                    )
+                self.buf_force = TimestampedBuffer(self.config.buffer_size)
+                self.has_force = True
+                print("✅ 六维力传感器就绪，启动零点校准完成")
+            except Exception as exc:
+                print(f"⚠️ 六维力传感器不可用，降级为压力模式: {exc}")
+                if self.sensor_force is not None:
+                    try:
+                        self.sensor_force.close()
+                    except Exception:
+                        pass
+                self.sensor_force = None
+                self.has_force = False
 
         self.csv_path = auto_get_csv_path(self.config.save_dir)
         self.csv_writer, self.csv_file_obj = init_csv_file(self.csv_path)
@@ -990,7 +993,10 @@ class FullApplicationRunner:
             except queue.Empty:
                 return
             print(f"❌ 数据线程异常: {exc}")
-            plot.win.setWindowTitle(f"RealTime — 数据线程异常: {exc}")
+            if hasattr(plot, "set_status"):
+                plot.set_status(f"数据线程异常: {exc}")
+            else:
+                plot.win.setWindowTitle(f"{self.config.gui.window_title} — 数据线程异常: {exc}")
             g_main_stop_flag.set()
             app.quit()
 
@@ -1005,6 +1011,173 @@ class FullApplicationRunner:
             g_main_stop_flag.set()
             data_thread.join(timeout=5)
             plot.plot_full_analysis(self.config.save_dir)
+
+
+class DualApplicationRunner:
+    """在同一个 Qt 应用中运行两个相互隔离的完整采集会话。
+
+    两路分别使用独立的 ``FullApplicationConfig``、停止事件、绘图窗口和
+    ``acquisition_loop`` 后台线程；任一路出现异常都会请求两路一起退出。
+    该类只编排生命周期，不复制压力/六维力采集、CoP、标定或 CSV 算法。
+    """
+
+    def __init__(
+        self,
+        config_a: FullApplicationConfig,
+        config_b: FullApplicationConfig,
+        worker_target=None,
+        plot_factory=RealTimePlot,
+    ) -> None:
+        """创建双路完整应用运行器。
+
+        Args:
+            config_a: Sensor A 的完整分层配置。
+            config_b: Sensor B 的完整分层配置。
+            worker_target: 完整采集循环，默认使用 ``acquisition_loop``；
+                测试可注入替代实现。
+            plot_factory: 实时窗口工厂，默认创建 ``RealTimePlot``。
+
+        Raises:
+            ValueError: 两路压力或两路启用的六维力指向同一物理串口，或
+                输出目录相同。
+        """
+        self.config_a = config_a
+        self.config_b = config_b
+        if "Sensor A" not in self.config_a.gui.window_title:
+            self.config_a.gui.window_title = f"Sensor A — {self.config_a.gui.window_title}"
+        if "Sensor B" not in self.config_b.gui.window_title:
+            self.config_b.gui.window_title = f"Sensor B — {self.config_b.gui.window_title}"
+        self.worker_target = acquisition_loop if worker_target is None else worker_target
+        self.plot_factory = plot_factory
+        _validate_dual_configs(config_a, config_b)
+
+    def run(self) -> None:
+        """启动两个窗口和后台采集循环，直到 Qt 退出或任一路异常。
+
+        Returns:
+            None: 两路会话关闭、CSV 刷新并分别生成结束分析图后返回。
+
+        Side Effects:
+            创建一个 ``QApplication``、两个 ``RealTimePlot``、两个后台
+            采集线程和两个独立 CSV；任一路异常会在 Qt 主线程报告并联动
+            设置两路停止事件。
+        """
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication(sys.argv)
+        stop_events = [threading.Event(), threading.Event()]
+        configs = [self.config_a, self.config_b]
+        labels = ["Sensor A", "Sensor B"]
+        plots = []
+        for config in configs:
+            if self.plot_factory is RealTimePlot:
+                plots.append(self.plot_factory(config=config.gui))
+            else:
+                plots.append(self.plot_factory(config=config.gui))
+
+        errors = queue.Queue()
+        worker_errors = []
+        worker_errors_lock = threading.Lock()
+
+        def worker(index: int) -> None:
+            """运行一路完整循环，并把异常传给 Qt 主线程。"""
+            try:
+                self.worker_target(
+                    plots[index],
+                    stop_event=stop_events[index],
+                    config=configs[index],
+                )
+            except Exception as exc:
+                with worker_errors_lock:
+                    worker_errors.append((index, exc))
+                errors.put((index, exc))
+                stop_events[0].set()
+                stop_events[1].set()
+
+        threads = [
+            threading.Thread(
+                target=worker,
+                args=(index,),
+                daemon=True,
+                name=f"{label.lower().replace(' ', '-')}-acquisition",
+            )
+            for index, label in enumerate(labels)
+        ]
+        for thread in threads:
+            thread.start()
+
+        error_timer = QtCore.QTimer()
+
+        def poll_errors() -> None:
+            """在 Qt 主线程报告 A/B 错误并退出应用。"""
+            try:
+                index, exc = errors.get_nowait()
+            except queue.Empty:
+                return
+            message = f"{labels[index]} 数据线程异常: {exc}"
+            print(f"❌ {message}")
+            for plot in plots:
+                if hasattr(plot, "set_status"):
+                    plot.set_status(message)
+            stop_events[0].set()
+            stop_events[1].set()
+            app.quit()
+
+        error_timer.timeout.connect(poll_errors)
+        error_timer.start(100)
+        try:
+            app.exec()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            error_timer.stop()
+            for event in stop_events:
+                event.set()
+            for thread in threads:
+                thread.join(timeout=5)
+            for plot, config in zip(plots, configs):
+                plot.plot_full_analysis(config.save_dir)
+        if worker_errors:
+            index, exc = worker_errors[0]
+            raise RuntimeError(f"{labels[index]} 数据线程异常: {exc}") from exc
+
+
+def _validate_dual_configs(
+    config_a: FullApplicationConfig,
+    config_b: FullApplicationConfig,
+) -> None:
+    """校验双路完整应用的物理端口和输出目录隔离。
+
+    Args:
+        config_a: Sensor A 配置。
+        config_b: Sensor B 配置。
+
+    Returns:
+        None: 配置合法时正常返回。
+
+    Raises:
+        ValueError: 压力端口、启用的力端口或 CSV 输出目录发生冲突。
+    """
+    pressure_a = os.path.realpath(os.path.abspath(config_a.pressure.port))
+    pressure_b = os.path.realpath(os.path.abspath(config_b.pressure.port))
+    if pressure_a == pressure_b:
+        raise ValueError("Sensor A 和 Sensor B 不能使用同一个物理压力串口")
+    if config_a.force.enabled and config_b.force.enabled:
+        force_a = os.path.realpath(os.path.abspath(config_a.force.port))
+        force_b = os.path.realpath(os.path.abspath(config_b.force.port))
+        if force_a == force_b:
+            raise ValueError("Sensor A 和 Sensor B 不能使用同一个物理力串口")
+    active_ports = [pressure_a, pressure_b]
+    if config_a.force.enabled:
+        active_ports.append(os.path.realpath(os.path.abspath(config_a.force.port)))
+    if config_b.force.enabled:
+        active_ports.append(os.path.realpath(os.path.abspath(config_b.force.port)))
+    if len(active_ports) != len(set(active_ports)):
+        raise ValueError("压力串口和启用的六维力串口不能指向同一物理设备")
+    save_a = os.path.realpath(os.path.abspath(config_a.save_dir))
+    save_b = os.path.realpath(os.path.abspath(config_b.save_dir))
+    if save_a == save_b:
+        raise ValueError("Sensor A 和 Sensor B 必须使用不同的 CSV 输出目录")
 
 
 def acquisition_loop(

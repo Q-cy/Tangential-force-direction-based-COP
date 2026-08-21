@@ -89,6 +89,7 @@ class PressureConfig:
 class ForceConfig:
     """六维力设备、轮询和软件校零参数。"""
 
+    enabled: bool = field(default_factory=lambda: _env_bool("TANGENTIAL_FORCE_ENABLED", True))
     port: str = field(default_factory=lambda: _env("TANGENTIAL_FORCE_PORT", "/dev/ttyUSB1"))
     baudrate: int = field(default_factory=lambda: _env_int("TANGENTIAL_FORCE_BAUDRATE", 460800))
     target_hz: float = field(default_factory=lambda: _env_float("TANGENTIAL_FORCE_HZ", 200.0))
@@ -106,7 +107,7 @@ class ForceConfig:
 
     def validate(self) -> "ForceConfig":
         """校验六维力配置并返回自身。"""
-        if not self.port:
+        if self.enabled and not self.port:
             raise ValueError("ForceConfig.port 不能为空")
         if self.baudrate <= 0 or self.target_hz <= 0 or self.response_timeout_s <= 0:
             raise ValueError("力传感器波特率、频率和响应超时必须大于 0")
@@ -224,6 +225,7 @@ class OutputConfig:
 class GuiConfig:
     """实时 GUI 显示参数。"""
 
+    window_title: str = field(default_factory=lambda: _env("TANGENTIAL_GUI_WINDOW_TITLE", "RealTime"))
     timer_interval_ms: int = field(default_factory=lambda: _env_int("TANGENTIAL_GUI_TIMER_MS", 10))
     history_size: int = field(default_factory=lambda: _env_int("TANGENTIAL_GUI_HISTORY_SIZE", 100))
     error_history_size: int = field(default_factory=lambda: _env_int("TANGENTIAL_GUI_ERROR_HISTORY_SIZE", 100))
@@ -238,6 +240,8 @@ class GuiConfig:
 
     def validate(self) -> "GuiConfig":
         """校验 GUI 刷新、历史长度、窗口和区域配色。"""
+        if not self.window_title.strip():
+            raise ValueError("GuiConfig.window_title 不能为空")
         positive = (
             self.timer_interval_ms, self.history_size, self.error_history_size,
             self.max_region_arrows, self.heat_vmax, self.window_width,
@@ -291,6 +295,7 @@ class FullApplicationConfig:
         mapping = {
             "pressure_port": (self.pressure, "port"),
             "force_port": (self.force, "port"),
+            "force_enabled": (self.force, "enabled"),
             "model_path": (self.calibration, "model_path"),
             "save_dir": (self.output, "save_dir"),
             "cal_dim": (self.processing, "cal_dim"),
@@ -331,6 +336,11 @@ class FullApplicationConfig:
     def force_port(self) -> str:
         """返回六维力串口路径。"""
         return self.force.port
+
+    @property
+    def force_enabled(self) -> bool:
+        """返回是否启用六维力通道。"""
+        return self.force.enabled
 
     @property
     def model_path(self) -> str | None:

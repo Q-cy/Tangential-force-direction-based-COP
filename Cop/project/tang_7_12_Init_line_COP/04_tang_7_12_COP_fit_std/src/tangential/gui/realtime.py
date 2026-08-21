@@ -272,6 +272,7 @@ class RealTimePlot:
             可能抛出 Qt/PyQtGraph 相关异常。
         """
         self.config = (config or GuiConfig()).validate()
+        self._base_window_title = self.config.window_title
         self.rows, self.cols = 12, 7
         self.lock = threading.Lock()
         self._heat_vmax = self.config.heat_vmax
@@ -293,6 +294,24 @@ class RealTimePlot:
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_all)
         self.timer.start(self.config.timer_interval_ms)
+
+    def set_status(self, status: str | None = None) -> None:
+        """更新窗口状态，同时保留配置中的传感器标签。
+
+        Args:
+            status: 可选状态文本，例如 ``未接触`` 或 ``数据线程异常``；
+                ``None`` 表示恢复为基础窗口标题。
+
+        Returns:
+            None: 只更新当前 Qt 窗口标题。
+
+        Side Effects:
+            调用 Qt ``setWindowTitle``；不会修改采集数据、曲线或传感器状态。
+        """
+        title = self._base_window_title
+        if status:
+            title = f"{title} — {status}"
+        self.win.setWindowTitle(title)
 
     def init_defaults(self):
         """初始化最新一帧的方向、压力、CoP、力和区域显示状态。
@@ -416,7 +435,7 @@ class RealTimePlot:
             保存它们的句柄到实例属性，并建立阵列坐标范围。该方法不读取
             传感器数据；调用失败通常表示 Qt 应用或 GUI 依赖未就绪。
         """
-        self.win = pg.GraphicsLayoutWidget(title="RealTime")
+        self.win = pg.GraphicsLayoutWidget(title=self._base_window_title)
         self.win.resize(self.config.window_width, self.config.window_height)
         def _style_plot(p, title):
             """统一设置单个 PlotItem 的标题样式。
@@ -736,7 +755,7 @@ class RealTimePlot:
 
         # 状态显示
         _state_names = {0: "未接触", 1: "粗略测量", 2: "精细测量"}
-        self.win.setWindowTitle(f"RealTime — {_state_names.get(cop_state, '?')}")
+        self.set_status(_state_names.get(cop_state, '?'))
 
         # 初始 CoP 未确定时冻结蓝色箭头（与红色一致）
         _fa = force_angle_deg if contact_init else 0.0

@@ -68,6 +68,33 @@ class CliTests(unittest.TestCase):
         self.assertEqual(observed["save_dir"], "out")
         self.assertEqual(observed["max_time_diff_ms"], 12.5)
 
+    def test_dual_arguments_are_exposed_and_forwarded_to_example(self):
+        """统一 dual 子命令复用双路示例入口，不复制配置/采集逻辑。"""
+        observed = {}
+
+        def fake_dual(args):
+            observed.update(vars(args))
+            return 0
+
+        with mock.patch(
+            "tangential.examples.dual_sensor.run_from_namespace",
+            side_effect=fake_dual,
+        ):
+            self.assertEqual(
+                cli.main([
+                    "dual", "--port-a", "pa", "--port-b", "pb",
+                    "--force-port-a", "fa", "--save-dir-a", "out-a",
+                    "--save-dir-b", "out-b", "--model", "model.bin",
+                ]),
+                0,
+            )
+        self.assertEqual(observed["port_a"], "pa")
+        self.assertEqual(observed["port_b"], "pb")
+        self.assertEqual(observed["force_port_a"], "fa")
+        self.assertIsNone(observed["force_port_b"])
+        self.assertEqual(observed["save_dir_a"], "out-a")
+        self.assertEqual(observed["save_dir_b"], "out-b")
+
     def test_app_uses_acquisition_loop_runner(self):
         with mock.patch("tangential.runtime.session.FullApplicationRunner") as runner:
             self.assertEqual(

@@ -89,7 +89,7 @@ class StructureAndConfigTests(unittest.TestCase):
             "train_model", "PlotConfig", "PlotResult", "plot_csv",
             "plot_full_analysis", "PressureConfig", "ForceConfig", "CopConfig",
             "ProcessingConfig", "CalibrationConfig", "SyncConfig", "OutputConfig",
-            "GuiConfig", "run_application",
+            "GuiConfig", "run_application", "run_dual_application",
         }
         self.assertTrue(expected <= set(tangential.__all__))
         self.assertIs(tangential.TangentialSample, tangential.api.TangentialSample)
@@ -112,6 +112,7 @@ class StructureAndConfigTests(unittest.TestCase):
         self.assertTrue(callable(full.main))
         self.assertTrue(callable(dual_sensor.run))
         self.assertTrue(callable(tangential.run_application))
+        self.assertTrue(callable(tangential.run_dual_application))
 
     def test_low_level_defaults_come_from_grouped_configs(self):
         from tangential.gui.realtime import RealTimePlot

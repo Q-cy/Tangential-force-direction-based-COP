@@ -19,8 +19,8 @@ def _build_parser() -> argparse.ArgumentParser:
     """创建完整的 ``tangential`` 命令行参数解析器。
 
     Returns:
-        argparse.ArgumentParser: 包含 ``example``、``app``、``plot`` 和
-        ``fit`` 四个必选子命令的解析器。
+        argparse.ArgumentParser: 包含 ``example``、``app``、``dual``、
+            ``plot`` 和 ``fit`` 五个必选子命令的解析器。
 
     Side Effects:
         仅在内存中构造解析器和参数定义，不读取硬件或文件。
@@ -45,6 +45,21 @@ def _build_parser() -> argparse.ArgumentParser:
     app.add_argument("--model")
     app.add_argument("--max-time-diff-ms", type=float)
     app.set_defaults(handler=_handle_app)
+
+    dual = commands.add_parser(
+        "dual", help="运行两个独立的完整压力采集 GUI（各自保存 CSV 和分析图）"
+    )
+    dual.add_argument("--port-a", required=True)
+    dual.add_argument("--port-b", required=True)
+    dual.add_argument("--force-port-a")
+    dual.add_argument("--force-port-b")
+    dual.add_argument("--save-dir")
+    dual.add_argument("--save-dir-a")
+    dual.add_argument("--save-dir-b")
+    dual.add_argument("--model")
+    dual.add_argument("--model-a")
+    dual.add_argument("--model-b")
+    dual.set_defaults(handler=_handle_dual)
 
     plot = commands.add_parser("plot", help="离线绘制 CSV")
     plot.add_argument("--dir")
@@ -167,6 +182,24 @@ def _handle_app(args: argparse.Namespace) -> int:
         calibration=calibration,
         sync=sync,
     ))
+
+
+def _handle_dual(args: argparse.Namespace) -> int:
+    """启动两个独立的完整 GUI 会话。
+
+    Args:
+        args: ``dual`` 子命令解析结果，端口、模型和输出目录参数由双路
+            示例统一转换为两份 ``FullApplicationConfig``。
+
+    Returns:
+        int: 双路应用正常退出时返回 ``0``。
+
+    Raises:
+        Exception: 参数、设备、Qt 或采集错误向 ``main`` 传播并转换为错误码。
+    """
+    from .examples.dual_sensor import run_from_namespace
+
+    return run_from_namespace(args)
 
 
 def _parse_columns(value: str | None):

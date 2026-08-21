@@ -288,7 +288,7 @@ class WheelDistributionTests(unittest.TestCase):
             self.assertEqual(version.returncode, 0, msg=version.stderr)
             self.assertEqual(version.stdout.strip(), "0.3.0")
 
-            for command in ("example", "app", "plot", "fit"):
+            for command in ("example", "app", "dual", "plot", "fit"):
                 help_result = subprocess.run(
                     [sys.executable, "-m", "tangential.cli", command, "--help"],
                     cwd=root,

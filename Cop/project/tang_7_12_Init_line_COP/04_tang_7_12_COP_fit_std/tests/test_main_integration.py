@@ -8,7 +8,7 @@ import unittest
 import numpy as np
 
 from tangential.acquisition.buffer import TimestampedBuffer
-from tangential.config import FullApplicationConfig
+from tangential.config import ForceConfig, FullApplicationConfig
 from tangential.runtime.session import (
     PressureThread,
     acquisition_loop,
@@ -231,6 +231,24 @@ class MainLoopIntegrationTests(unittest.TestCase):
             self.assertAlmostEqual(float(current["delta_ms"]), expected_delta, places=6)
         self.assertTrue(FakePressure.instances[-1].closed)
         self.assertTrue(FailedForce.instances[-1].closed)
+
+    def test_disabled_force_does_not_construct_or_open_force_sensor(self):
+        """ForceConfig.enabled=False 时完整会话不触碰默认力串口。"""
+        with tempfile.TemporaryDirectory() as directory:
+            config = FullApplicationConfig(
+                save_dir=directory,
+                model_path=os.path.join(directory, "missing.bin"),
+                force=ForceConfig(enabled=False),
+                target_fps=1000,
+            )
+            acquisition_loop(
+                PlotStub(),
+                config=config,
+                pressure_factory=FakePressure,
+                force_factory=FakeForce,
+            )
+        self.assertEqual(FakeForce.instances, [])
+        self.assertTrue(FakePressure.instances[-1].closed)
 
     def test_force_first_and_one_to_one_matching(self):
         FakePressure.initial_delay = 0.02
