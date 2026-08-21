@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 import subprocess
 import sys
 import unittest
@@ -109,6 +110,31 @@ class StructureAndConfigTests(unittest.TestCase):
         self.assertTrue(callable(minimal.run))
         self.assertTrue(callable(full.main))
         self.assertTrue(callable(tangential.run_application))
+
+    def test_low_level_defaults_come_from_grouped_configs(self):
+        from tangential.gui.realtime import RealTimePlot
+        from tangential.processing.cop import PRSensorAngle
+        from tangential.sensors.force import SixAxisForceSensor
+        from tangential.sensors.pressure import PressureSensor
+
+        pressure = inspect.signature(PressureSensor).parameters
+        force = inspect.signature(SixAxisForceSensor).parameters
+        cop = inspect.signature(PRSensorAngle).parameters
+        self.assertIsNone(pressure["period_s"].default)
+        self.assertIsNone(pressure["baudrate"].default)
+        self.assertIsNone(force["period_s"].default)
+        self.assertIsNone(force["baudrate"].default)
+        self.assertIsNone(cop["total_threshold_factor"].default)
+        self.assertIn("config", inspect.signature(RealTimePlot).parameters)
+
+    def test_invalid_environment_configuration_is_not_silently_ignored(self):
+        with mock.patch.dict(
+            os.environ,
+            {"TANGENTIAL_PRESSURE_HZ": "not-a-number"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "TANGENTIAL_PRESSURE_HZ"):
+                PressureConfig()
 
 
 if __name__ == "__main__":

@@ -20,27 +20,32 @@ def _env(name: str, default: str) -> str:
 
 
 def _env_int(name: str, default: int) -> int:
-    """读取整数环境变量，格式错误时保留默认值。"""
+    """读取整数环境变量，格式错误时抛出明确配置异常。"""
     try:
         return int(_env(name, str(default)))
-    except ValueError:
-        return default
+    except ValueError as exc:
+        raise ValueError(f"环境变量 {name} 必须是整数") from exc
 
 
 def _env_float(name: str, default: float) -> float:
-    """读取浮点环境变量，格式错误时保留默认值。"""
+    """读取浮点环境变量，格式错误时抛出明确配置异常。"""
     try:
         return float(_env(name, str(default)))
-    except ValueError:
-        return default
+    except ValueError as exc:
+        raise ValueError(f"环境变量 {name} 必须是数字") from exc
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    """读取常见布尔环境变量，未知值时保留默认值。"""
+    """读取常见布尔环境变量，未知值时抛出明确配置异常。"""
     value = os.environ.get(name)
     if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"环境变量 {name} 必须是 true/false、yes/no、on/off 或 1/0")
 
 
 def default_model_path() -> str | None:

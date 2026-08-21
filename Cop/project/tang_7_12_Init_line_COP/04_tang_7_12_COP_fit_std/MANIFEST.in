@@ -1,3 +1,5 @@
 include readme.md
 recursive-include src/tangential *.py
+recursive-include src/tangential *.pyi
+include src/tangential/py.typed
 recursive-include src/tangential/resources *.bin

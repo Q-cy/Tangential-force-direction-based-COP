@@ -7,6 +7,8 @@ from collections import deque
 import numpy as np
 from scipy.ndimage import generate_binary_structure, label
 
+from ..config import CopConfig
+
 
 class PRSensorAngle:
     """12×7（可配置尺寸）PZT 阵列的 CoP、角度、梯度和区域状态处理器。
@@ -17,17 +19,20 @@ class PRSensorAngle:
     处理方法会改变实例状态。
     """
 
-    def __init__(self, rows: int = 12, cols: int = 7,
-                 total_threshold_factor: float = 3, pixel_threshold_factor: float = 5,
-                 collect_frames: int = 10,
-                 stability_frames: int = 5,
-                 reset_at_frame: int = 0,
-                 refine_cnt: int = 10,
-                 refine_distance: float = 0.1,
-                 merge_ratio: float = 0.6,
-                 region_match_dist: float = 5.0,
-                 region_min_area: int = 4,
-                 region_peak_ratio: float = 1, region_peak_dist: int = 3):
+    def __init__(self, rows: int | None = None, cols: int | None = None,
+                 total_threshold_factor: float | None = None,
+                 pixel_threshold_factor: float | None = None,
+                 collect_frames: int | None = None,
+                 stability_frames: int | None = None,
+                 reset_at_frame: int | None = None,
+                 refine_cnt: int | None = None,
+                 refine_distance: float | None = None,
+                 merge_ratio: float | None = None,
+                 region_match_dist: float | None = None,
+                 region_min_area: int | None = None,
+                 region_peak_ratio: float | None = None,
+                 region_peak_dist: int | None = None,
+                 config: CopConfig | None = None):
         """构造一个带动态阈值和接触状态的阵列处理器。
 
         Args:
@@ -55,6 +60,28 @@ class PRSensorAngle:
             初始化阈值学习窗口、全局接触状态、精修状态和区域 tracker；后续
             帧处理会继续修改这些状态。
         """
+        defaults = (config or CopConfig()).validate()
+        rows = defaults.rows if rows is None else rows
+        cols = defaults.cols if cols is None else cols
+        total_threshold_factor = (
+            defaults.total_threshold_factor
+            if total_threshold_factor is None else total_threshold_factor
+        )
+        pixel_threshold_factor = (
+            defaults.pixel_threshold_factor
+            if pixel_threshold_factor is None else pixel_threshold_factor
+        )
+        collect_frames = defaults.collect_frames if collect_frames is None else collect_frames
+        stability_frames = defaults.stability_frames if stability_frames is None else stability_frames
+        reset_at_frame = defaults.reset_at_frame if reset_at_frame is None else reset_at_frame
+        refine_cnt = defaults.refine_cnt if refine_cnt is None else refine_cnt
+        refine_distance = defaults.refine_distance if refine_distance is None else refine_distance
+        merge_ratio = defaults.merge_ratio if merge_ratio is None else merge_ratio
+        region_match_dist = defaults.region_match_dist if region_match_dist is None else region_match_dist
+        region_min_area = defaults.region_min_area if region_min_area is None else region_min_area
+        region_peak_ratio = defaults.region_peak_ratio if region_peak_ratio is None else region_peak_ratio
+        region_peak_dist = defaults.region_peak_dist if region_peak_dist is None else region_peak_dist
+
         self.rows = rows
         self.cols = cols
         self.total_threshold_factor = total_threshold_factor

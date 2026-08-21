@@ -183,8 +183,9 @@ class TangentialFrameProcessor:
         region_mode (str): ``full``、``region`` 或 ``both``。
     """
 
-    def __init__(self, cop_sensor=None, calibration=None, cal_dim="3D",
-                 region_mode="full", median_window=5):
+    def __init__(self, cop_sensor=None, calibration=None, cal_dim=None,
+                 region_mode=None, median_window=None,
+                 processing_config: ProcessingConfig | None = None):
         """初始化单帧处理器和偏移量中值滤波状态。
 
         Args:
@@ -204,11 +205,15 @@ class TangentialFrameProcessor:
         Raises:
             ValueError: ``region_mode`` 不支持或 ``median_window <= 0``。
         """
+        defaults = (processing_config or ProcessingConfig()).validate()
+        cal_dim = defaults.cal_dim if cal_dim is None else cal_dim
+        region_mode = defaults.region_mode if region_mode is None else region_mode
+        median_window = defaults.median_window if median_window is None else median_window
         if region_mode not in ("full", "region", "both"):
             raise ValueError("region_mode 必须是 full、region 或 both")
         if median_window <= 0:
             raise ValueError("median_window 必须大于0")
-        self.cop_sensor = cop_sensor or PRSensorAngle()
+        self.cop_sensor = cop_sensor or PRSensorAngle(config=defaults.cop)
         self.calibration = calibration
         self.cal_dim = cal_dim
         self.region_mode = region_mode

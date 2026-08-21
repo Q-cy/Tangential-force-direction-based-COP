@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "wheel", "Cython>=3.1,<4"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -32,4 +32,5 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
+"tangential" = ["py.typed", "**/*.pyi"]
 "tangential.resources" = ["fit_coefs.bin"]

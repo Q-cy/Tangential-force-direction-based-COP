@@ -18,6 +18,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 SOURCE_ROOT = PROJECT_ROOT / "src"
 PACKAGE_ROOT = SOURCE_ROOT / "tangential"
+COMPILED_MODULES = {
+    "tangential/acquisition/buffer",
+    "tangential/processing/calibration",
+    "tangential/processing/cop",
+    "tangential/runtime/sensor",
+    "tangential/runtime/session",
+    "tangential/runtime/synchronization",
+    "tangential/sensors/force",
+    "tangential/sensors/pressure",
+    "tangential/storage/csv",
+}
 LEGACY_ROOT_FILES = {
     "data.py",
     "table.py",
@@ -43,6 +54,8 @@ def _expected_package_modules() -> set[str]:
     return {
         "tangential/" + path.relative_to(PACKAGE_ROOT).as_posix()
         for path in PACKAGE_ROOT.rglob("*.py")
+        if ("tangential/" + path.relative_to(PACKAGE_ROOT).with_suffix("").as_posix())
+        not in COMPILED_MODULES
     }
 
 
@@ -124,6 +137,7 @@ class DistributionConfigurationTests(unittest.TestCase):
             },
         )
         self.assertNotIn("data-files", setuptools)
+        self.assertIn("Cython>=3.1,<4", config["build-system"]["requires"])
 
     def test_version_is_consistent_across_package_and_cli(self):
         with PYPROJECT.open("rb") as stream:
@@ -142,6 +156,8 @@ class DistributionConfigurationTests(unittest.TestCase):
             if line.strip() and not line.lstrip().startswith("#")
         }
         self.assertIn("recursive-include src/tangential/resources *.bin", lines)
+        self.assertIn("recursive-include src/tangential *.pyi", lines)
+        self.assertIn("include src/tangential/py.typed", lines)
 
 
 class PublicImportTests(unittest.TestCase):
@@ -164,7 +180,7 @@ class WheelDistributionTests(unittest.TestCase):
             root = Path(directory)
             source_dir = root / "source"
             source_dir.mkdir()
-            for filename in ("pyproject.toml", "MANIFEST.in", "readme.md"):
+            for filename in ("pyproject.toml", "setup.py", "MANIFEST.in", "readme.md"):
                 shutil.copy2(PROJECT_ROOT / filename, source_dir / filename)
             shutil.copytree(SOURCE_ROOT, source_dir / "src")
 
@@ -198,6 +214,16 @@ class WheelDistributionTests(unittest.TestCase):
                 names = set(archive.namelist())
                 expected_modules = _expected_package_modules()
                 self.assertTrue(expected_modules <= names)
+                for module in COMPILED_MODULES:
+                    self.assertFalse(f"{module}.py" in names)
+                    self.assertTrue(
+                        any(name.startswith(module + ".cpython-311-") and name.endswith(".so")
+                            for name in names),
+                        module,
+                    )
+                    self.assertIn(f"{module}.pyi", names)
+                self.assertIn("tangential/py.typed", names)
+                self.assertFalse(any(name.endswith((".pyx", ".c", ".cpp")) for name in names))
                 self.assertIn("tangential/resources/fit_coefs.bin", names)
                 self.assertTrue(
                     any(name.endswith(".dist-info/entry_points.txt") for name in names)
