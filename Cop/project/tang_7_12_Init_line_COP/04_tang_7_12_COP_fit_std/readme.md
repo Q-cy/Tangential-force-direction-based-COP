@@ -18,12 +18,18 @@ tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
 python -m pip install "./dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl[full]"
 ~~~
 
+只使用压力采集、CoP、标定和 CSV 核心能力时，可不安装 GUI extra：
+
+~~~bash
+python -m pip install ./dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
+~~~
+
 wheel 分为两层：
 
 - runtime、acquisition、sensors、processing、storage 的内部实现编译为多个 CPython 3.11 .so。
 - __init__.py、api.py、config.py、application.py、cli.py、examples/、gui/、tools/ 和类型声明保留为可读 Python。
 
-wheel 内部实现的 Python 源文件不随 wheel 发布，但源码仓库完整保留这些 .py 文件。
+wheel 内部实现的 Python 源文件不随 wheel 发布，但源码仓库完整保留这些 .py 文件。当前共编译9个扩展模块：runtime 3个、acquisition 1个、sensors 2个、processing 2个、storage 1个；每个扩展都有同名 .pyi 类型声明。
 
 .so 是 Python 的 CPython 扩展，不是稳定的 C++ 或 Rust ABI，不能直接作为 C++/Rust SDK 链接。需要原生 ABI 时，应另行设计 C ABI 或原生 SDK 层。
 
@@ -194,7 +200,9 @@ CLI 显式参数 > 显式传入的配置对象 > TANGENTIAL_* 环境默认 > con
 - 压力和六维力均以 200 Hz 为请求目标，单请求在途；响应较慢时实际频率自然下降，不插值、不重复请求补发。
 - 合法压力帧解析完成后立即记录真实 rx_t。rel_ms 和 delta_ms 基于真实压力接收时间，不由 GUI 刷新或 CSV 写入节拍生成。
 - 压力帧是主顺序；每个合法压力帧最多处理和保存一次。
-- 六维力帧最多匹配一次，匹配窗口为 abs(force_t - press_t) <= 0.015 秒。匹配失败的压力行仍保存，力字段写 NaN。
+- 六维力帧最多匹配一次，匹配窗口为 abs(force_t - press_t) <= 0.015 秒。
+- 力通道不可用时，压力帧仍逐行保存，力和同步字段写 NaN。
+- 双传感器模式下，压力帧超过15 ms仍未匹配时不写CSV，但仍推进CoP状态机并更新GUI；这是当前数据语义，不能在文档或调用方中误写成NaN行。
 - 压力设备必需，六维力设备可选；启动校零和运行期重新归零使用普通力数据帧，不发送额外置零命令。
 - CSV 由唯一的 TABLE_CSV_HEADER 和 build_csv_row 生成，保持 108 列和既有模型输出。
 
@@ -213,7 +221,15 @@ python -m pip wheel . --no-deps --no-build-isolation -w dist
 dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
 ~~~
 
-构建时会生成多个内部 .so；.so、生成的 C/C++ 文件、build/、dist/ 和 *.egg-info/ 都是构建产物，不是源码。源码仓库仍保留完整 .py，可在没有 .so 的情况下运行。
+构建时会生成多个内部 .so；生成的 C 文件位于 build/。build/、dist/、*.egg-info/ 和 .so 都是构建产物，不提交 Git。源码仓库仍保留完整 .py，可在没有 .so 的情况下运行。
+
+检查 wheel 是否符合交付边界：
+
+~~~bash
+unzip -l dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
+~~~
+
+应看到9个内部 .so、9个同名 .pyi、py.typed 和 resources/fit_coefs.bin；不应看到这些内部模块的 .py、生成的 .c/.cpp 或外部 share/ 模型目录。
 
 ## 二次开发与保密边界
 
@@ -226,6 +242,8 @@ dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
 
 内部采集、同步、协议、算法和 CSV 实现以 .so 形式随 wheel 交付，普通 wheel 用户不直接获得这些 .py 源码；源码仓库则完整保留它们，供内部维护和有权限的开发者二次修改。内部 .so 和 fit_coefs.bin 都可能被逆向或提取，因此这是提高获取门槛和控制交付边界，不是绝对保密。具体使用、逆向和再分发限制还应通过许可证约束。
 
+如果二次开发只组合现有能力，优先使用 tangential 顶层 API 和 config.py；如果需要修改串口协议、CoP、同步或CSV实现，应使用私有源码仓库，不要修改已安装 wheel 内的文件。
+
 ## 测试、回退与工作区检查
 
 完整测试：
@@ -236,6 +254,8 @@ QT_QPA_PLATFORM=offscreen \
 MPLCONFIGDIR=/tmp/pzt-mplconfig \
 python -m unittest discover -s tests -q
 ~~~
+
+分发测试会在临时目录重新构建并隔离安装 wheel，验证内部实现确实从 .so 加载。发布前必须同时通过源码模式和 wheel 安装模式，不能只验证其中一种。
 
 源码语法和差异检查：
 
