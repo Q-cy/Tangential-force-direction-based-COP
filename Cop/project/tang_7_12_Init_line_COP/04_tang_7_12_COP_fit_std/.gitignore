@@ -1,5 +1,14 @@
+# Python 原生
 __pycache__/
 *.py[cod]
 build/
 dist/
 *.egg-info/
+
+# IDE
+.agents/
+.codex/
+agents.md/
+
+# Data
+data/

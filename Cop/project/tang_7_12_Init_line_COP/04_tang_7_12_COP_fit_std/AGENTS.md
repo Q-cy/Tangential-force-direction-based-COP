@@ -31,7 +31,7 @@
 ├── src/
 │   └── tangential/
 │       ├── __init__.py               # 公共 Python API 导出边界和版本；不得隐式加载 Qt/Matplotlib
-│       ├── api.py                    # 最小压力采集 API、Sample、单帧处理和终端渲染
+│       ├── api.py                    # 核心压力采集 API、Sample、单帧处理和终端渲染，最小使用API
 │       ├── cli.py                    # 唯一命令行入口及 example/app/plot/fit 四个子命令
 │       ├── config.py                 # 默认端口、保存目录、模型路径和完整应用配置
 │       ├── full.py                   # 完整采集会话、线程消费、同步、CSV、GUI 调度和资源清理
@@ -187,22 +187,23 @@ PZT 串口 ──> PressureSensor spawn 进程
 
 先定位唯一实现，再修改对应模块：
 
-| 需求 | 首选修改位置 | 必须联动检查 |
-| --- | --- | --- |
-| 压力请求、串口帧、CRC、调度、队列 | `sensors/pressure.py` | `tests/test_data.py`、分发测试、完整会话测试 |
-| 六维力帧、校零、独立进程 | `sensors/force.py` | `tests/test_data.py`、`tests/test_main_integration.py` |
-| seq、缓存、时间匹配 | `acquisition/buffer.py` | `tests/test_data.py`、匹配/CSV 集成测试 |
-| CoP、阈值、状态机、梯度、区域 | `processing/cop.py` | `tests/test_tangential_api.py`、完整 GUI/集成测试 |
-| 模型读取、预测或模型格式 | `processing/calibration.py`、`resources/fit_coefs.bin` | `test_model_and_table.py`、`test_calibration_multidim.py`、资源测试 |
-| 最小 API 单帧结果 | `api.py` | `test_tangential_api.py`，确认不加载 Qt/Matplotlib |
-| 完整采集、同步、CSV 生命周期、GUI 调度 | `full.py` | `test_main_integration.py`、`test_data.py`、离屏 GUI 测试 |
-| 108 列表头或行顺序 | `storage/csv.py` | `test_model_and_table.py`、`test_plotting.py`、完整集成测试 |
-| 实时显示 | `gui/realtime.py` | `test_plot_and_gui.py`，保持 GUI 不参与采集时钟 |
-| 离线绘图和 CSV 解析 | `plotting.py` | `test_plotting.py`、`test_plot_and_gui.py` |
-| 拟合训练和写回保护 | `training.py` | `test_training.py`、`test_cli.py`、模型回归测试 |
-| CLI 参数、退出码、懒加载 | `cli.py` | `test_cli.py`、wheel 隔离安装测试 |
-| 公共导出或版本 | `__init__.py`、`pyproject.toml` | `test_tangential_api.py`、`test_distribution.py` |
-| 默认端口、目录、环境变量 | `config.py`、必要时 `cli.py` | `test_stage1_resources.py`、`test_cli.py` |
+
+| 需求                                   | 首选修改位置                                           | 必须联动检查                                                        |
+| -------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------- |
+| 压力请求、串口帧、CRC、调度、队列      | `sensors/pressure.py`                                  | `tests/test_data.py`、分发测试、完整会话测试                        |
+| 六维力帧、校零、独立进程               | `sensors/force.py`                                     | `tests/test_data.py`、`tests/test_main_integration.py`              |
+| seq、缓存、时间匹配                    | `acquisition/buffer.py`                                | `tests/test_data.py`、匹配/CSV 集成测试                             |
+| CoP、阈值、状态机、梯度、区域          | `processing/cop.py`                                    | `tests/test_tangential_api.py`、完整 GUI/集成测试                   |
+| 模型读取、预测或模型格式               | `processing/calibration.py`、`resources/fit_coefs.bin` | `test_model_and_table.py`、`test_calibration_multidim.py`、资源测试 |
+| 最小 API 单帧结果                      | `api.py`                                               | `test_tangential_api.py`，确认不加载 Qt/Matplotlib                  |
+| 完整采集、同步、CSV 生命周期、GUI 调度 | `full.py`                                              | `test_main_integration.py`、`test_data.py`、离屏 GUI 测试           |
+| 108 列表头或行顺序                     | `storage/csv.py`                                       | `test_model_and_table.py`、`test_plotting.py`、完整集成测试         |
+| 实时显示                               | `gui/realtime.py`                                      | `test_plot_and_gui.py`，保持 GUI 不参与采集时钟                     |
+| 离线绘图和 CSV 解析                    | `plotting.py`                                          | `test_plotting.py`、`test_plot_and_gui.py`                          |
+| 拟合训练和写回保护                     | `training.py`                                          | `test_training.py`、`test_cli.py`、模型回归测试                     |
+| CLI 参数、退出码、懒加载               | `cli.py`                                               | `test_cli.py`、wheel 隔离安装测试                                   |
+| 公共导出或版本                         | `__init__.py`、`pyproject.toml`                        | `test_tangential_api.py`、`test_distribution.py`                    |
+| 默认端口、目录、环境变量               | `config.py`、必要时 `cli.py`                           | `test_stage1_resources.py`、`test_cli.py`                           |
 
 修改后不要在调用方重新实现算法；先复用目标模块的公开函数/类，再补薄适配器。涉及协议或时间戳的改动必须同时检查压力/力独立进程、队列、匹配和 CSV 时间列。
 

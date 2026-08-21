@@ -106,11 +106,15 @@ def _handle_example(args: argparse.Namespace) -> int:
         ``with`` 块时关闭传感器。
     """
     from . import FixedTerminalRenderer, TangentialSensor
-
+    """语义：
+        进入with：内部打开串口、初始化传感器、加载标定模型；
+        as sensor：得到实例对象；
+        无论正常退出、异常崩溃、Ctrl+C，离开 with 代码块，自动执行关闭逻辑，关闭串口，释放硬件资源。
+    """
     with TangentialSensor(
         pressure_port=args.pressure_port,
         model_path=args.model,
-    ) as sensor:
+    ) as sensor:                                   # sensor 是 TangentialSensor类的实例
         renderer = FixedTerminalRenderer()
         while True:
             sample = sensor.read(timeout_s=args.timeout)
