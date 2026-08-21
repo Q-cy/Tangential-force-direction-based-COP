@@ -238,6 +238,8 @@ class WheelDistributionTests(unittest.TestCase):
                 self.assertFalse(any(name.startswith("share/") for name in names))
                 self.assertFalse(any("/share/" in name for name in names))
                 self.assertFalse(any(name in LEGACY_ROOT_FILES for name in names))
+                self.assertNotIn("tangential/examples/dual_pressure.py", names)
+                self.assertIn("tangential/examples/dual_sensor.py", names)
                 self.assertNotIn(
                     "tangential_sensor-0.3.0.data/data/share/tangential/fit_coefs.bin",
                     names,

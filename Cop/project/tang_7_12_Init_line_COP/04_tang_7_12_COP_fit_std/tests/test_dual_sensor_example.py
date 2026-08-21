@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 
 from tangential.config import PressureConfig
-from tangential.examples.dual_pressure import run
+from tangential.examples.dual_sensor import run
 
 
 class FakeSensorAPI:

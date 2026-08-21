@@ -56,6 +56,63 @@ PYTHONPATH=src python -m tangential.cli app --help
 
 minimal 需要压力传感器；full 需要完整 GUI 依赖和实际硬件。源码运行不依赖预编译 .so，wheel 用户不需要 PYTHONPATH。
 
+## 同时连接两个压力传感器
+
+双传感器示例模块为 ``tangential.examples.dual_sensor``。它只采集两路压力
+传感器，分别计算CoP、角度、梯度和标定结果，并在终端打印两路摘要；不会
+启动六维力、GUI或108列CSV保存。
+
+建议先查看帮助：
+
+~~~bash
+PYTHONPATH=src python -m tangential.examples.dual_sensor --help
+~~~
+
+从源码运行：
+
+~~~bash
+PYTHONPATH=src python -m tangential.examples.dual_sensor \
+  --port-a /dev/serial/by-id/<sensor-a> \
+  --port-b /dev/serial/by-id/<sensor-b>
+~~~
+
+安装wheel后运行，不需要 ``PYTHONPATH``：
+
+~~~bash
+python -m tangential.examples.dual_sensor \
+  --port-a /dev/serial/by-id/<sensor-a> \
+  --port-b /dev/serial/by-id/<sensor-b>
+~~~
+
+两个端口必须对应不同物理设备。程序会解析符号链接并在打开串口前拒绝相同
+物理端口。推荐使用 ``/dev/serial/by-id/...``，避免设备重插或重启后
+``/dev/ttyUSB*`` 编号互换。
+
+Python调用：
+
+~~~python
+from tangential import PressureConfig
+from tangential.examples.dual_sensor import run
+
+run(
+    PressureConfig(
+        port="/dev/serial/by-id/<sensor-a>",
+        target_hz=200,
+        frame_queue_size=256,
+    ),
+    PressureConfig(
+        port="/dev/serial/by-id/<sensor-b>",
+        target_hz=200,
+        frame_queue_size=256,
+    ),
+)
+~~~
+
+每一路都有独立串口、采集进程、IPC队列、读取线程、CoP状态机和标定处理器，
+一个设备的读取超时不会占用另一个设备的串口消费者。软件状态互相隔离，但
+USB控制器带宽、CPU调度和供电仍是共享硬件资源，实际帧率应分别验收。按
+``Ctrl+C`` 退出时，两路进程、线程和串口都会通过上下文管理器关闭。
+
 ## 命令行
 
 安装 wheel 后使用统一命令：
@@ -195,6 +252,17 @@ CLI 显式参数 > 显式传入的配置对象 > TANGENTIAL_* 环境默认 > con
 
 协议帧头、CRC、固定 12×7/84 通道布局、固定 108 列 CSV 和设备帧长度属于协议不变量，不通过配置修改。
 
+### 修改config.py是否会直接生效
+
+- 使用源码运行时，直接修改 ``src/tangential/config.py`` 中的默认值，会
+  影响修改后新建且没有显式覆盖对应字段的配置对象。
+- 已经创建的配置对象不会因为文件随后被修改而自动变化，需要重新启动程序。
+- 已安装wheel的用户修改源码仓库不会影响已安装包；应传入配置对象、设置
+  ``TANGENTIAL_*`` 环境变量，或者修改源码后重新构建并安装wheel。
+- 显式传入的 ``PressureConfig`` 等分类配置优先于环境变量和源码默认值。
+- 多传感器场景必须为每个传感器分别创建配置对象，不要修改并复用同一个
+  可变配置实例。
+
 ## 数据和时序不变量
 
 - 压力和六维力均以 200 Hz 为请求目标，单请求在途；响应较慢时实际频率自然下降，不插值、不重复请求补发。
@@ -222,6 +290,23 @@ dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
 ~~~
 
 构建时会生成多个内部 .so；生成的 C 文件位于 build/。build/、dist/、*.egg-info/ 和 .so 都是构建产物，不提交 Git。源码仓库仍保留完整 .py，可在没有 .so 的情况下运行。
+
+`.so` 的位置随使用阶段不同：
+
+- 本地构建缓存：``build/lib.linux-x86_64-cpython-311/tangential/...``。
+- 最终wheel内部：``tangential/runtime/``、``acquisition/``、``sensors/``、
+  ``processing/`` 和 ``storage/`` 下的同名扩展。
+- 安装后：当前Python环境的 ``site-packages/tangential/...``。
+
+安装后可以查询实际加载路径：
+
+~~~bash
+python -c "import tangential.sensors.pressure as m; print(m.__file__)"
+~~~
+
+输出应以 ``pressure.cpython-311-x86_64-linux-gnu.so`` 结尾。不要手工复制
+``build/`` 中的单个扩展；应安装完整wheel，以保证公开Python层、类型声明和
+``fit_coefs.bin`` 版本一致。
 
 检查 wheel 是否符合交付边界：
 

@@ -7,6 +7,9 @@ from wheels because the compiled extensions provide the same import names.
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 from Cython.Build import cythonize
 from setuptools import Extension, setup
 from setuptools.command.build_py import build_py as _build_py
@@ -30,6 +33,19 @@ COMPILED_MODULES = {
 
 class BinaryWheelBuildPy(_build_py):
     """Copy public Python sources but omit compiled implementation modules."""
+
+    def run(self):
+        """清理旧package输出后复制当前公开Python文件。
+
+        删除或重命名模块后，setuptools默认会保留 ``build/lib*`` 中的旧文件，
+        并可能把它们再次装入wheel。标准wheel构建中 ``build_py`` 先于
+        ``build_ext``，因此这里只删除当前package输出，再由后续步骤写入
+        最新Python文件、资源和扩展模块。
+        """
+        package_output = Path(self.build_lib) / "tangential"
+        if package_output.exists():
+            shutil.rmtree(package_output)
+        super().run()
 
     def find_package_modules(self, package: str, package_dir: str):
         """Return package modules excluding names supplied by extensions."""

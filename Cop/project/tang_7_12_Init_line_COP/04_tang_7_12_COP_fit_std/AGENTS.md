@@ -53,7 +53,7 @@
 │   │   └── plotting.py               # CSV 解析、绘图和完整分析
 │   ├── examples/
 │   │   ├── minimal.py                # 唯一最小压力采集循环
-│   │   ├── dual_pressure.py          # 两只压力传感器的隔离并发采集示例
+│   │   ├── dual_sensor.py            # 两只压力传感器的隔离并发采集示例
 │   │   └── full.py                   # 调用 run_application 的完整示例
 │   └── resources/
 │       └── fit_coefs.bin              # package resource 静态模型
@@ -74,10 +74,29 @@ runtime、acquisition、sensors、processing、storage 是运行时核心实现�
 
 examples/minimal.py 是唯一最小循环；CLI example 必须调用它，不得在 cli.py 复制 while 循环。examples/full.py 只调用公开 run_application；CLI app 必须复用该入口。plot 和 fit 必须惰性导入 tools，基础 import tangential 不得加载 Qt、PyQtGraph 或 Matplotlib。
 
-examples/dual_pressure.py 展示多压力设备用法：每个 ``TangentialSensorAPI``
+examples/dual_sensor.py 展示多压力设备用法：每个 ``TangentialSensorAPI``
 必须拥有独立 ``PressureConfig``、串口、采集进程、IPC队列、读取线程和处理器；
 启动前必须拒绝指向同一物理串口的配置。不要为多设备引入共享传感器实例、
 共享CoP状态机或单一阻塞读取循环。
+
+源码运行命令：
+
+~~~bash
+PYTHONPATH=src python -m tangential.examples.dual_sensor \
+  --port-a /dev/serial/by-id/<sensor-a> \
+  --port-b /dev/serial/by-id/<sensor-b>
+~~~
+
+安装wheel后运行命令：
+
+~~~bash
+python -m tangential.examples.dual_sensor \
+  --port-a /dev/serial/by-id/<sensor-a> \
+  --port-b /dev/serial/by-id/<sensor-b>
+~~~
+
+该示例只做两路压力采集、CoP/角度/标定和终端摘要，不启动六维力、GUI或
+108列CSV。修改示例时必须保留并发读取、端口唯一性校验和两路资源的异常清理。
 
 公开 API 的签名、输入、输出、异常和资源生命周期必须有文档字符串。新增用户可调用符号时同步更新 api.py、__init__.py 和测试。
 
@@ -153,6 +172,10 @@ PYTHONPATH=src python -m tangential.examples.full
 Cython>=3.1,<4 是构建依赖，已在 pyproject.toml 声明；requirements.txt 供 no-build-isolation 开发构建使用。
 
 setup.py 当前把以下9个内部模块分别编译为同名扩展：runtime/sensor、runtime/session、runtime/synchronization、acquisition/buffer、sensors/pressure、sensors/force、processing/cop、processing/calibration、storage/csv。新增或移动编译模块时必须同步更新 setup.py、同名 .pyi、package-data 和分发测试。
+
+``BinaryWheelBuildPy.run`` 必须在复制package前清理旧 ``build/lib*/tangential``
+输出，防止已删除或重命名的模块残留进wheel。分发测试必须明确检查旧模块名
+不存在，不能只检查新模块存在。
 
 Cython必须保持 language_level=3、annotation_typing=False、binding=True、embedsignature=True 和 always_allow_keywords=True。尤其不能删除 annotation_typing=False，否则类型注解会被当作运行时强类型，破坏原Python代码对 bytearray、NumPy数组等兼容输入的接受行为。
 
