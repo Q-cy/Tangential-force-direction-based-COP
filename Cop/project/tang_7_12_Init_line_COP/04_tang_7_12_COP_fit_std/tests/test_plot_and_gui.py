@@ -9,7 +9,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/pzt-test-mplconfig")
 import numpy as np
 from pyqtgraph.Qt import QtWidgets
 
-from tangential.plotting import load_csv, resolve_column
+from tangential.tools.plotting import load_csv, resolve_column
 from tangential.gui.realtime import RealTimePlot
 
 

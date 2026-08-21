@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from tangential import cli
-from tangential.training import TrainingResult
+from tangential.tools.training import TrainingResult
 
 
 class CliTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class CliTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(version_result.returncode, 0)
-        self.assertEqual(version_result.stdout.strip(), "0.2.0")
+        self.assertEqual(version_result.stdout.strip(), "0.3.0")
 
     def test_cli_module_import_isolated_from_optional_libraries(self):
         result = subprocess.run(
@@ -69,7 +69,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(observed["max_time_diff_ms"], 12.5)
 
     def test_app_uses_acquisition_loop_runner(self):
-        with mock.patch("tangential.full.FullApplicationRunner") as runner:
+        with mock.patch("tangential.runtime.session.FullApplicationRunner") as runner:
             self.assertEqual(
                 cli.main([
                     "app", "--pressure-port", "p", "--force-port", "f",
@@ -78,7 +78,8 @@ class CliTests(unittest.TestCase):
                 0,
             )
         runner.assert_called_once()
-        target, config = runner.call_args.args
+        target = runner.call_args.args[0]
+        config = runner.call_args.kwargs["config"]
         self.assertEqual(target.__name__, "acquisition_loop")
         self.assertEqual(config.pressure_port, "p")
         self.assertEqual(config.force_port, "f")
@@ -115,7 +116,7 @@ class CliTests(unittest.TestCase):
             observed.update(vars(config))
             return fake_result
 
-        with mock.patch("tangential.training.train_model", side_effect=fake_train):
+        with mock.patch("tangential.tools.training.train_model", side_effect=fake_train):
             self.assertEqual(
                 cli.main([
                     "fit", "--xy-csv", "xy.csv", "--z-csv", "z.csv",
@@ -139,7 +140,7 @@ class CliTests(unittest.TestCase):
 
     def test_runtime_exception_returns_one_and_writes_stderr(self):
         stderr = io.StringIO()
-        with mock.patch("tangential.training.train_model", side_effect=RuntimeError("bad data")):
+        with mock.patch("tangential.tools.training.train_model", side_effect=RuntimeError("bad data")):
             with mock.patch("sys.stderr", stderr):
                 result = cli.main([
                     "fit", "--xy-csv", "xy.csv", "--z-csv", "z.csv",

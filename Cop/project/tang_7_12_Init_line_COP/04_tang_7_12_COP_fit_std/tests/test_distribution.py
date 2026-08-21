@@ -104,7 +104,7 @@ class DistributionConfigurationTests(unittest.TestCase):
 
         project = config["project"]
         self.assertEqual(project["name"], "tangential-sensor")
-        self.assertEqual(project["version"], "0.2.0")
+        self.assertEqual(project["version"], "0.3.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["scripts"], {"tangential": "tangential.cli:main"})
         self.assertEqual(set(project["dependencies"]), {"numpy", "scipy", "pyserial"})
@@ -118,7 +118,10 @@ class DistributionConfigurationTests(unittest.TestCase):
         self.assertEqual(setuptools["packages"]["find"]["where"], ["src"])
         self.assertEqual(
             setuptools["package-data"],
-            {"tangential.resources": ["fit_coefs.bin"]},
+            {
+                "tangential": ["py.typed", "**/*.pyi"],
+                "tangential.resources": ["fit_coefs.bin"],
+            },
         )
         self.assertNotIn("data-files", setuptools)
 
@@ -128,7 +131,7 @@ class DistributionConfigurationTests(unittest.TestCase):
         from tangential import __version__
         from tangential.cli import VERSION
 
-        self.assertEqual(project_version, "0.2.0")
+        self.assertEqual(project_version, "0.3.0")
         self.assertEqual(__version__, project_version)
         self.assertEqual(VERSION, project_version)
 
@@ -188,7 +191,7 @@ class WheelDistributionTests(unittest.TestCase):
             )
             self.assertEqual(build.returncode, 0, msg=build.stderr or build.stdout)
 
-            wheels = sorted(wheel_dir.glob("tangential_sensor-0.2.0-*.whl"))
+            wheels = sorted(wheel_dir.glob("tangential_sensor-0.3.0-*.whl"))
             self.assertEqual(len(wheels), 1, msg=build.stdout)
             wheel_path = wheels[0]
             with zipfile.ZipFile(wheel_path) as archive:
@@ -210,7 +213,7 @@ class WheelDistributionTests(unittest.TestCase):
                 self.assertFalse(any("/share/" in name for name in names))
                 self.assertFalse(any(name in LEGACY_ROOT_FILES for name in names))
                 self.assertNotIn(
-                    "tangential_sensor-0.2.0.data/data/share/tangential/fit_coefs.bin",
+                    "tangential_sensor-0.3.0.data/data/share/tangential/fit_coefs.bin",
                     names,
                 )
 
@@ -255,7 +258,7 @@ class WheelDistributionTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(version.returncode, 0, msg=version.stderr)
-            self.assertEqual(version.stdout.strip(), "0.2.0")
+            self.assertEqual(version.stdout.strip(), "0.3.0")
 
             for command in ("example", "app", "plot", "fit"):
                 help_result = subprocess.run(

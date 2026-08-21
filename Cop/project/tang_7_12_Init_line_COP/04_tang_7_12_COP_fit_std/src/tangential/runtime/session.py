@@ -15,14 +15,16 @@ from collections import deque
 import numpy as np
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from .acquisition.buffer import TimestampedBuffer, match_closest
-from .api import TangentialFrameProcessor, compute_vector_angle
-from .config import FullApplicationConfig
-from .gui.realtime import RealTimePlot
-from .processing.calibration import FitCalibrationModel
-from .sensors.force import SixAxisForceSensor
-from .sensors.pressure import PressureSensor
-from .storage.csv import auto_get_csv_path, build_csv_row, init_csv_file
+from ..acquisition.buffer import TimestampedBuffer
+from .sensor import TangentialFrameProcessor, compute_vector_angle
+from ..config import FullApplicationConfig
+from ..gui.realtime import RealTimePlot
+from ..processing.calibration import FitCalibrationModel
+from ..processing.cop import PRSensorAngle
+from ..sensors.force import SixAxisForceSensor
+from ..sensors.pressure import PressureSensor
+from ..storage.csv import auto_get_csv_path, build_csv_row, init_csv_file
+from .synchronization import match_force_frame
 
 
 g_main_stop_flag = threading.Event()
@@ -296,18 +298,38 @@ class FullAcquisitionSession:
             return self
         self.stop_event.clear()
         try:
-            self.sensor_press = _construct_sensor(
-                self.pressure_factory, self.config.pressure_port
-            )
+            if self.pressure_factory is PressureSensor:
+                self.sensor_press = self.pressure_factory(
+                    port=self.config.pressure.port,
+                    period_s=self.config.pressure.period_s,
+                    response_timeout_s=self.config.pressure.response_timeout_s,
+                    queue_size=self.config.pressure.frame_queue_size,
+                    baudrate=self.config.pressure.baudrate,
+                    _startup_timeout_s=self.config.pressure.startup_timeout_s,
+                )
+            else:
+                self.sensor_press = _construct_sensor(
+                    self.pressure_factory, self.config.pressure_port
+                )
         except Exception as exc:
             raise RuntimeError(f"压力传感器未连接: {exc}") from exc
         self.buf_press = TimestampedBuffer(self.config.buffer_size)
         print("✅ 压力传感器就绪")
 
         try:
-            self.sensor_force = _construct_sensor(
-                self.force_factory, self.config.force_port
-            )
+            if self.force_factory is SixAxisForceSensor:
+                self.sensor_force = self.force_factory(
+                    port=self.config.force.port,
+                    period_s=self.config.force.period_s,
+                    response_timeout_s=self.config.force.response_timeout_s,
+                    queue_size=self.config.force.frame_queue_size,
+                    baudrate=self.config.force.baudrate,
+                    _startup_timeout_s=self.config.force.startup_timeout_s,
+                )
+            else:
+                self.sensor_force = _construct_sensor(
+                    self.force_factory, self.config.force_port
+                )
             if not self.sensor_force.calibrate_zero(
                 sample_count=self.config.zero_sample_count,
                 timeout_s=self.config.zero_timeout_s,
@@ -352,10 +374,11 @@ class FullAcquisitionSession:
         else:
             print("💡 未找到 fit 模型文件")
         self.processor = TangentialFrameProcessor(
+            cop_sensor=PRSensorAngle(**self.config.processing.cop.as_kwargs()),
             calibration=calibration,
-            cal_dim=self.config.cal_dim,
-            region_mode=self.config.region_mode,
-            median_window=5,
+            cal_dim=self.config.processing.cal_dim,
+            region_mode=self.config.processing.region_mode,
+            median_window=self.config.processing.median_window,
         )
 
         self.thread_press = PressureThread(
@@ -642,7 +665,7 @@ class FullAcquisitionSession:
         now = time.perf_counter() if now is None else now
         while self.pending_press:
             sample = self.pending_press[0]
-            force_item = match_closest(
+            force_item = match_force_frame(
                 self.buf_force,
                 sample.rx_t,
                 self.config.max_time_diff_s,
@@ -935,7 +958,11 @@ class FullApplicationRunner:
         app = QtWidgets.QApplication.instance()
         if app is None:
             app = QtWidgets.QApplication(sys.argv)
-        plot = self.plot_factory()
+        plot = (
+            self.plot_factory(config=self.config.gui)
+            if self.plot_factory is RealTimePlot
+            else self.plot_factory()
+        )
         errors = queue.Queue()
 
         def worker():

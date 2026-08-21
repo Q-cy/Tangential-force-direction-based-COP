@@ -15,51 +15,11 @@ from typing import Any, Iterable, Sequence, TypeAlias
 
 import numpy as np
 
-from .api import angle_difference
+from ..config import PlotConfig
+from ..runtime.sensor import angle_difference
 
 _ANGLE_COLUMNS = {"ADC_angle", "Force_angle", "Force_cal_angle"}
 RowsSpec: TypeAlias = tuple[int | None, int | None] | slice | str | None
-
-
-@dataclass
-class PlotConfig:
-    """离线绘图配置。
-
-    ``files`` 可以是路径、路径列表、逗号分隔的路径，或 ``all``、
-    ``latest:N``、文件索引/索引范围。``rows`` 可以是 ``(start, stop)``、
-    ``slice`` 或 ``"start:stop"``。
-
-    Attributes:
-        files: CSV path selector; ``None`` scans the default directory.
-        directory: Base directory for relative paths and selectors.
-        columns: Header names or zero-based indices to draw in ``plot`` mode.
-        rows: Half-open data-row range, or ``None`` for all rows.
-        x_column: Header name/index for the x-axis; ``None`` uses column 0.
-        title: Optional figure title.
-        save_path: Optional output PNG path; otherwise derived from the first
-            input CSV.
-        error_ref: Optional reference header/index used for error metrics.
-        mode: ``"plot"`` for custom plots or ``"full_analysis"`` for 4×2.
-        highlight_valid: Segment by ``valid`` or fallback ``CoP_state``.
-        show_annotations: Annotate active-segment starts and error extrema.
-        force_min: Minimum absolute force for force-filtered comparisons.
-
-    Side Effects:
-        Construction performs no file I/O and imports no plotting backend.
-    """
-
-    files: str | Path | Sequence[str | Path] | None = None
-    directory: str | Path = field(default_factory=lambda: Path.cwd() / "data")
-    columns: Sequence[str | int] = ("Fy_cal", "delta_Force_Y")
-    rows: RowsSpec = None
-    x_column: str | int | None = "rel_ms"
-    title: str | None = None
-    save_path: str | Path | None = None
-    error_ref: str | int | None = None
-    mode: str = "plot"
-    highlight_valid: bool = True
-    show_annotations: bool = True
-    force_min: float = 0.2
 
 
 @dataclass(frozen=True)

@@ -14,16 +14,9 @@ import os
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui
 
+from ..config import GuiConfig
+
 pg.setConfigOptions(antialias=True, background='w', foreground='k')
-
-PLOT_TIMER_INTERVAL_MS = 10    # 绘图定时器刷新间隔(毫秒)
-PLOT_ERR_HISTORY_LEN = 100     # 角度误差历史缓冲区长度
-PLOT_HISTORY_LEN = 100         # 时序曲线历史缓冲区长度
-
-MAX_REGION_ARROWS = 8          # per-region 角度箭头最大套数（与 REGION_PALETTE 等长）
-
-REGION_PALETTE = [(0, 102, 255), (0, 204, 51), (255, 128, 0), (153, 0, 255),
-                  (0, 204, 204), (255, 204, 0), (255, 0, 153), (255, 61, 61)]
 
 def _yrange(data, pad=0.1):
     """根据有限数据计算带边距的纵轴范围。
@@ -268,7 +261,7 @@ class RealTimePlot:
     所有 Qt 图元、窗口和历史列表都由实例拥有，调用 :meth:`plot_full_analysis`
     时才按需导入 Matplotlib。
     """
-    def __init__(self):
+    def __init__(self, config: GuiConfig | None = None):
         """创建实时窗口、绘图图元、定时器和历史缓存。
 
         Returns:
@@ -278,9 +271,10 @@ class RealTimePlot:
             分配大量 PyQtGraph 图元；若 Qt 应用未初始化或 GUI 依赖缺失，
             可能抛出 Qt/PyQtGraph 相关异常。
         """
+        self.config = (config or GuiConfig()).validate()
         self.rows, self.cols = 12, 7
         self.lock = threading.Lock()
-        self._heat_vmax = 500.0   # 热力图色阶下限
+        self._heat_vmax = self.config.heat_vmax
 
         # === 全程存储 ===
         self.full_time_list = []
@@ -298,7 +292,7 @@ class RealTimePlot:
         self.build_layout()
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_all)
-        self.timer.start(PLOT_TIMER_INTERVAL_MS)
+        self.timer.start(self.config.timer_interval_ms)
 
     def init_defaults(self):
         """初始化最新一帧的方向、压力、CoP、力和区域显示状态。
@@ -341,8 +335,8 @@ class RealTimePlot:
             清空并替换所有实时历史缓存；长度分别由
             ``PLOT_HISTORY_LEN`` 与 ``PLOT_ERR_HISTORY_LEN`` 控制。
         """
-        hist_len = PLOT_HISTORY_LEN
-        err_len = PLOT_ERR_HISTORY_LEN
+        hist_len = self.config.history_size
+        err_len = self.config.error_history_size
         self.angle_error_history = deque(maxlen=err_len)
         self.pzt_fz_history = deque(maxlen=hist_len)
         self.adc_dx_history = deque(maxlen=hist_len)
@@ -423,7 +417,7 @@ class RealTimePlot:
             传感器数据；调用失败通常表示 Qt 应用或 GUI 依赖未就绪。
         """
         self.win = pg.GraphicsLayoutWidget(title="RealTime")
-        self.win.resize(1900, 1050)
+        self.win.resize(self.config.window_width, self.config.window_height)
         def _style_plot(p, title):
             """统一设置单个 PlotItem 的标题样式。
 
@@ -534,7 +528,10 @@ class RealTimePlot:
         self.p_table.addItem(self._region_cop_dots)
         self._region_base_dots = pg.ScatterPlotItem()
         self.p_table.addItem(self._region_base_dots)
-        self._region_arrows = [self._make_arrow_parts(self.p_table) for _ in range(MAX_REGION_ARROWS)]
+        self._region_arrows = [
+            self._make_arrow_parts(self.p_table)
+            for _ in range(self.config.max_region_arrows)
+        ]
 
         self.p_grad = self.win.addPlot(row=1, col=3, rowspan=3, title="Gradient Arrows")
         self.p_grad.hideAxis('left'); self.p_grad.hideAxis('bottom')
@@ -787,7 +784,7 @@ class RealTimePlot:
         if contact_init:
             cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
             self._cell_grid.set_data(press_table_arr, cell_vmax)
-            self._cell_grid.set_regions(region_mask, REGION_PALETTE)
+            self._cell_grid.set_regions(region_mask, self.config.region_palette)
             for row_idx in range(12):
                 for col_idx in range(7):
                     cell_val = press_table_arr[row_idx, col_idx]
@@ -823,10 +820,11 @@ class RealTimePlot:
                 bx, by = cx - dx, cy - dy
                 cop_spots.append({'pos': (cx, cy), 'brush': 'g', 'size': 12})
                 base_spots.append({'pos': (bx, by), 'brush': 'b', 'symbol': 'x', 'size': 15})
-                if i < MAX_REGION_ARROWS:
+                if i < self.config.max_region_arrows:
                     if np.hypot(dx, dy) > 0.05:
                         angle = np.degrees(np.arctan2(dy, dx)) % 360.0
-                        pr, pgc, pb = REGION_PALETTE[(reg['id'] - 1) % len(REGION_PALETTE)]
+                        palette = self.config.region_palette
+                        pr, pgc, pb = palette[(reg['id'] - 1) % len(palette)]
                         self._update_arrow(self._region_arrows[i], angle, np.hypot(dx, dy),
                                            (pr, pgc, pb), (bx, by))
                     else:
@@ -835,7 +833,10 @@ class RealTimePlot:
             self._region_cop_dots.setData(spots=cop_spots)
             self._region_base_dots.setData(spots=base_spots)
             # region 数量减少时清理上一帧多余箭头，避免残影。
-            for i in range(min(len(regions), MAX_REGION_ARROWS), MAX_REGION_ARROWS):
+            for i in range(
+                min(len(regions), self.config.max_region_arrows),
+                self.config.max_region_arrows,
+            ):
                 for part in self._region_arrows[i]:
                     part.setData([], [])
 

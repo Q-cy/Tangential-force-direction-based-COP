@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from tangential.plotting import (
-    PlotConfig,
+from tangential.config import PlotConfig
+from tangential.tools.plotting import (
     compute_errors,
     list_files,
     load_csv,
@@ -31,7 +31,7 @@ class PlottingApiTests(unittest.TestCase):
         env = os.environ.copy()
         project_root = Path(__file__).resolve().parents[1]
         env["PYTHONPATH"] = str(project_root / "src")
-        code = "import sys; import tangential.plotting; assert 'matplotlib' not in sys.modules"
+        code = "import sys; import tangential.tools.plotting; assert 'matplotlib' not in sys.modules"
         subprocess.run([sys.executable, "-c", code], check=True, env=env)
 
     def test_actual_header_resolution_and_directory_selection(self):

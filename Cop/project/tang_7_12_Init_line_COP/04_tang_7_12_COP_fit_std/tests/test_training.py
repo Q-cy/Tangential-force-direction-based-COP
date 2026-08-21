@@ -13,8 +13,9 @@ import numpy as np
 from scipy.optimize import OptimizeWarning
 
 from tangential.processing.calibration import FitCalibrationModel
-from tangential import training as training_module
-from tangential.training import TrainingConfig, train_model
+from tangential.tools import training as training_module
+from tangential.config import TrainingConfig
+from tangential.tools.training import train_model
 
 
 class TrainingModuleTests(unittest.TestCase):
@@ -28,7 +29,7 @@ class TrainingModuleTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
         result = subprocess.run(
-            [sys.executable, "-c", "import sys; import tangential.training; assert 'matplotlib' not in sys.modules"],
+            [sys.executable, "-c", "import sys; import tangential.tools.training; assert 'matplotlib' not in sys.modules"],
             env=environment,
             capture_output=True,
             text=True,

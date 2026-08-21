@@ -8,7 +8,7 @@ from tangential.config import (
     default_model_path,
     default_save_dir,
 )
-from tangential.full import FullAcquisitionSession
+from tangential.runtime.session import FullAcquisitionSession
 from tangential.processing.calibration import FitCalibrationModel
 
 

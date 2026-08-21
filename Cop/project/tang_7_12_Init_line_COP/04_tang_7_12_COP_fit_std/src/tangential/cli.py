@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -33,17 +33,17 @@ def _build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     example = commands.add_parser("example", help="运行最小压力采集示例")
-    example.add_argument("--pressure-port", default="/dev/ttyUSB0")
+    example.add_argument("--pressure-port")
     example.add_argument("--model")
     example.add_argument("--timeout", type=float, default=0.1)
     example.set_defaults(handler=_handle_example)
 
     app = commands.add_parser("app", help="运行完整采集和实时 GUI")
-    app.add_argument("--pressure-port", default="/dev/ttyUSB0")
-    app.add_argument("--force-port", default="/dev/ttyUSB1")
-    app.add_argument("--save-dir", default="./data")
+    app.add_argument("--pressure-port")
+    app.add_argument("--force-port")
+    app.add_argument("--save-dir")
     app.add_argument("--model")
-    app.add_argument("--max-time-diff-ms", type=float, default=15.0)
+    app.add_argument("--max-time-diff-ms", type=float)
     app.set_defaults(handler=_handle_app)
 
     plot = commands.add_parser("plot", help="离线绘制 CSV")
@@ -105,21 +105,13 @@ def _handle_example(args: argparse.Namespace) -> int:
         打开压力传感器并持续向标准输出写入 12×7 ADC 和计算结果；离开
         ``with`` 块时关闭传感器。
     """
-    from . import FixedTerminalRenderer, TangentialSensor
-    """语义：
-        进入with：内部打开串口、初始化传感器、加载标定模型；
-        as sensor：得到实例对象；
-        无论正常退出、异常崩溃、Ctrl+C，离开 with 代码块，自动执行关闭逻辑，关闭串口，释放硬件资源。
-    """
-    with TangentialSensor(
-        pressure_port=args.pressure_port,
-        model_path=args.model,
-    ) as sensor:                                   # sensor 是 TangentialSensor类的实例
-        renderer = FixedTerminalRenderer()
-        while True:
-            sample = sensor.read(timeout_s=args.timeout)
-            if sample is not None:
-                renderer.render(sample)
+    from .config import PressureConfig
+    from .examples.minimal import run
+
+    config = PressureConfig()
+    if args.pressure_port is not None:
+        config.port = args.pressure_port
+    return run(config, model_path=args.model, timeout_s=args.timeout)
 
 
 def _handle_app(args: argparse.Namespace) -> int:
@@ -139,18 +131,38 @@ def _handle_app(args: argparse.Namespace) -> int:
     Side Effects:
         创建 Qt 应用、打开传感器、运行采集会话并写入 CSV/实时图像。
     """
-    from .config import FullApplicationConfig
-    from .full import FullApplicationRunner, acquisition_loop
-
-    config = FullApplicationConfig(
-        save_dir=args.save_dir,
-        model_path=args.model,
-        pressure_port=args.pressure_port,
-        force_port=args.force_port,
-        max_time_diff_s=args.max_time_diff_ms / 1000.0,
+    from .config import (
+        CalibrationConfig,
+        FullApplicationConfig,
+        ForceConfig,
+        OutputConfig,
+        PressureConfig,
+        SyncConfig,
     )
-    FullApplicationRunner(acquisition_loop, config).run()
-    return 0
+    from .examples.full import main
+
+    pressure = PressureConfig()
+    force = ForceConfig()
+    output = OutputConfig()
+    calibration = CalibrationConfig()
+    sync = SyncConfig()
+    if args.pressure_port is not None:
+        pressure.port = args.pressure_port
+    if args.force_port is not None:
+        force.port = args.force_port
+    if args.save_dir is not None:
+        output.save_dir = args.save_dir
+    if args.model is not None:
+        calibration.model_path = args.model
+    if args.max_time_diff_ms is not None:
+        sync.max_time_diff_s = args.max_time_diff_ms / 1000.0
+    return main(FullApplicationConfig(
+        pressure=pressure,
+        force=force,
+        output=output,
+        calibration=calibration,
+        sync=sync,
+    ))
 
 
 def _parse_columns(value: str | None):
@@ -186,7 +198,7 @@ def _handle_plot(args: argparse.Namespace) -> int:
     Side Effects:
         ``--list`` 时向标准输出打印 JSON；绘图模式可能写入 PNG 和误差 CSV。
     """
-    from . import plotting
+    from .tools import plotting
 
     if args.list:
         result = [
@@ -242,7 +254,8 @@ def _handle_fit(args: argparse.Namespace) -> int:
         读取训练 CSV，写入模型和评估图；只有指定 ``--write-back`` 且满足
         ``--force`` 保护条件时才修改 CSV。
     """
-    from .training import TrainingConfig, train_model
+    from .config import TrainingConfig
+    from .tools.training import train_model
 
     result = train_model(TrainingConfig(
         xy_csv=args.xy_csv,

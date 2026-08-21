@@ -10,14 +10,15 @@ import threading
 import time
 from collections import deque
 
-from .pressure import PRESSURE_PERIOD_S, PRESSURE_TARGET_HZ
+from ..config import ForceConfig
 
-DATA_BAUDRATE_FORCE = 460800
-FORCE_SENSOR_PORT = "/dev/ttyUSB1"
-FORCE_TARGET_HZ = PRESSURE_TARGET_HZ
-FORCE_PERIOD_S = PRESSURE_PERIOD_S
-FORCE_RESPONSE_TIMEOUT_S = 0.050
-FORCE_FRAME_QUEUE_SIZE = 256
+_DEFAULT_CONFIG = ForceConfig()
+DATA_BAUDRATE_FORCE = _DEFAULT_CONFIG.baudrate
+FORCE_SENSOR_PORT = _DEFAULT_CONFIG.port
+FORCE_TARGET_HZ = _DEFAULT_CONFIG.target_hz
+FORCE_PERIOD_S = _DEFAULT_CONFIG.period_s
+FORCE_RESPONSE_TIMEOUT_S = _DEFAULT_CONFIG.response_timeout_s
+FORCE_FRAME_QUEUE_SIZE = _DEFAULT_CONFIG.frame_queue_size
 
 
 class SixAxisForceSensor:
@@ -33,12 +34,12 @@ class SixAxisForceSensor:
     MAX_RX_BUF = 4096
     READ_CHUNK_SIZE = 1024
 
-    def __init__(self, serial_instance=None, period_s=FORCE_PERIOD_S,
-                 response_timeout_s=FORCE_RESPONSE_TIMEOUT_S,
-                 queue_size=FORCE_FRAME_QUEUE_SIZE, readiness_waiter=None,
-                 port=None, _use_process=None, _mp_context=None,
-                 _process_factory=None, _startup_timeout_s=2.0,
-                 _status_sink=None):
+    def __init__(self, serial_instance=None, period_s=None,
+                 response_timeout_s=None, queue_size=None, readiness_waiter=None,
+                 port=None, baudrate=None, _use_process=None,
+                 _mp_context=None,
+                 _process_factory=None, _startup_timeout_s=None,
+                 _status_sink=None, config: ForceConfig | None = None):
         """创建六维力采集器，并启动线程或独立进程。
 
         Args:
@@ -51,6 +52,7 @@ class SixAxisForceSensor:
             queue_size: 本地或进程间帧队列容量，单位为帧数，必须大于 0。
             readiness_waiter: 测试 fake 的可读等待回调；生产路径使用 select。
             port: 六维力串口路径；``None`` 使用 ``/dev/ttyUSB1``。
+            baudrate: 串口波特率，默认 460800；协议默认值由配置集中管理。
             _use_process: 是否使用独立进程；``None`` 时按是否注入串口自动选择。
             _mp_context: 可注入的 multiprocessing 上下文。
             _process_factory: 可注入的进程工厂。
@@ -65,11 +67,23 @@ class SixAxisForceSensor:
             初始化六轴零点为 6 个 0.0，可能打开串口并启动后台线程或 spawn
             子进程。子进程只传递未扣零点的物理量。
         """
+        defaults = (config or ForceConfig()).validate()
+        period_s = defaults.period_s if period_s is None else period_s
+        response_timeout_s = (
+            defaults.response_timeout_s
+            if response_timeout_s is None else response_timeout_s
+        )
+        queue_size = defaults.frame_queue_size if queue_size is None else queue_size
+        port = defaults.port if port is None else port
+        baudrate = defaults.baudrate if baudrate is None else baudrate
+        if _startup_timeout_s is None:
+            _startup_timeout_s = defaults.startup_timeout_s
         if period_s <= 0 or response_timeout_s <= 0 or queue_size <= 0:
             raise ValueError("六维力采集周期、响应超时和队列长度必须大于 0")
 
         self.ser = None
-        self.port = port or FORCE_SENSOR_PORT
+        self.port = port
+        self._baudrate = int(baudrate)
         self.zero_data = [0.0] * 6
         self._zero_lock = threading.Lock()
         self._rx_buf = bytearray()
@@ -154,12 +168,14 @@ class SixAxisForceSensor:
         self._ipc_startup_queue = context.Queue(maxsize=1)
         self._mp_stop_event = context.Event()
         process_factory = self._process_factory or context.Process
-        self._process = process_factory(
-            target=_force_process_main,
-            args=(self.port, self._period_s, self._response_timeout_s,
-                  queue_size, self._ipc_frame_queue, self._ipc_status_queue,
-                  self._ipc_startup_queue, self._mp_stop_event),
+        process_args = (
+            self.port, self._period_s, self._response_timeout_s, queue_size,
+            self._ipc_frame_queue, self._ipc_status_queue,
+            self._ipc_startup_queue, self._mp_stop_event,
         )
+        if self._baudrate != DATA_BAUDRATE_FORCE:
+            process_args += (self._baudrate,)
+        self._process = process_factory(target=_force_process_main, args=process_args)
         try:
             self._process.daemon = True
         except (AttributeError, AssertionError):
@@ -333,7 +349,8 @@ class SixAxisForceSensor:
             清空输入缓冲；清空失败只增加 ``serial_flush_errors``。
         """
         self.ser = serial.Serial(
-            self.port, DATA_BAUDRATE_FORCE, timeout=0, write_timeout=0
+            self.port, getattr(self, "_baudrate", DATA_BAUDRATE_FORCE),
+            timeout=0, write_timeout=0
         )
         time.sleep(0.1)
         try:
@@ -819,7 +836,8 @@ class SixAxisForceSensor:
 
 
 def _force_process_main(port, period_s, response_timeout_s, queue_size,
-                        frame_queue, status_queue, startup_queue, stop_event):
+                        frame_queue, status_queue, startup_queue, stop_event,
+                        baudrate=DATA_BAUDRATE_FORCE):
     """运行六维力 spawn 子进程并转发原始力帧、统计和错误。
 
     Args:
@@ -849,6 +867,7 @@ def _force_process_main(port, period_s, response_timeout_s, queue_size,
             port=port,
             _use_process=False,
             _status_sink=status_queue,
+            baudrate=baudrate,
         )
         startup_queue.put(("ready", None))
         while not stop_event.is_set():

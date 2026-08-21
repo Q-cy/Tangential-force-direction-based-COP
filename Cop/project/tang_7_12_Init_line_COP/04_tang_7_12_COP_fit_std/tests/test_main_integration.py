@@ -8,8 +8,8 @@ import unittest
 import numpy as np
 
 from tangential.acquisition.buffer import TimestampedBuffer
-from tangential.full import (
-    FullApplicationConfig,
+from tangential.config import FullApplicationConfig
+from tangential.runtime.session import (
     PressureThread,
     acquisition_loop,
     g_main_stop_flag,

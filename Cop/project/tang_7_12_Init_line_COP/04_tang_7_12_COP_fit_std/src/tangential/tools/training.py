@@ -18,58 +18,12 @@ import numpy as np
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import curve_fit
 
-from .processing.calibration import apply_fit_predict_multi
+from ..config import TrainingConfig
+from ..processing.calibration import apply_fit_predict_multi
 
 
 INPUT_COLS = ("delta_CoP_X", "delta_CoP_Y", "adc_sum")
 OUTPUT_COLS = ("delta_Force_X", "delta_Force_Y", "delta_Force_Z")
-
-
-@dataclass
-class TrainingConfig:
-    """Configuration for offline model fitting.
-
-    Attributes:
-        xy_csv: CSV containing the ``delta_CoP_X``, ``delta_CoP_Y`` and
-            ``delta_Force_X/Y`` columns, normally used for Fx/Fy.
-        z_csv: CSV containing the ``adc_sum`` and ``delta_Force_Z`` columns,
-            normally used for Fz.
-        output_model: Destination path for the binary ``fit_coefs.bin``
-            compatible with :class:`FitCalibrationModel`.
-        output_plot: Optional PNG diagnostic report path; ``None`` disables it.
-        dim: Number of jointly fitted input/output dimensions, 1, 2 or 3.
-        poly_order: Total-degree polynomial order, 1, 2 or 3.
-        fx: Fit type for ``delta_Force_X``.
-        fy: Fit type for ``delta_Force_Y``.
-        fz: Fit type for ``delta_Force_Z``.
-        valid_only: If true, retain rows whose ``valid`` value is nonzero,
-            falling back to nonzero ``CoP_state`` when ``valid`` is absent.
-        split_sign: Whether supported scalar fits use separate positive and
-            negative branches.
-        one_on_one: Whether symmetric-log median grouping uses half-unit force
-            bins; false uses the legacy 0.2-unit grouping.
-        write_back: Optional target CSV to which calibration columns are added.
-        force: Allow an existing write-back target or source/target collision.
-
-    Side Effects:
-        No file is written when this dataclass is constructed. Input CSVs are
-        never modified unless :func:`train_model` receives ``write_back``.
-    """
-
-    xy_csv: str | os.PathLike[str]
-    z_csv: str | os.PathLike[str]
-    output_model: str | os.PathLike[str] = "fit_coefs.bin"
-    output_plot: str | os.PathLike[str] | None = "fit_report.png"
-    dim: int = 1
-    poly_order: int = 3
-    fx: str = "sym_log"
-    fy: str = "sym_log"
-    fz: str = "exp"
-    valid_only: bool = True
-    split_sign: bool = True
-    one_on_one: bool = True
-    write_back: str | os.PathLike[str] | None = None
-    force: bool = False
 
 
 @dataclass

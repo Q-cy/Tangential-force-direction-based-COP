@@ -1,0 +1,115 @@
+"""结构、配置和公开 API 阶段的回归测试。"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import tangential
+from tangential import (
+    CalibrationConfig,
+    CopConfig,
+    ForceConfig,
+    FullApplicationConfig,
+    GuiConfig,
+    OutputConfig,
+    PlotConfig,
+    PressureConfig,
+    ProcessingConfig,
+    SyncConfig,
+    TrainingConfig,
+)
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_ROOT = PROJECT_ROOT / "src" / "tangential"
+
+
+class StructureAndConfigTests(unittest.TestCase):
+    def test_required_structure_exists_and_old_implementations_are_moved(self):
+        for relative in (
+            "runtime/sensor.py",
+            "runtime/session.py",
+            "runtime/synchronization.py",
+            "examples/minimal.py",
+            "examples/full.py",
+            "tools/training.py",
+            "tools/plotting.py",
+            "application.py",
+        ):
+            self.assertTrue((PACKAGE_ROOT / relative).is_file(), relative)
+        for relative in ("full.py", "training.py", "plotting.py"):
+            self.assertFalse((PACKAGE_ROOT / relative).exists(), relative)
+
+    def test_environment_defaults_and_explicit_nested_config_override(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "TANGENTIAL_PRESSURE_PORT": "/dev/env-pressure",
+                "TANGENTIAL_FORCE_PORT": "/dev/env-force",
+                "TANGENTIAL_MAX_TIME_DIFF_S": "0.021",
+                "TANGENTIAL_DATA_DIR": "/tmp/env-data",
+            },
+            clear=False,
+        ):
+            config = FullApplicationConfig()
+        self.assertEqual(config.pressure.port, "/dev/env-pressure")
+        self.assertEqual(config.force.port, "/dev/env-force")
+        self.assertEqual(config.sync.max_time_diff_s, 0.021)
+        self.assertEqual(config.output.save_dir, "/tmp/env-data")
+
+        explicit = FullApplicationConfig(
+            pressure=PressureConfig(port="explicit-pressure"),
+            force=ForceConfig(port="explicit-force"),
+            processing=ProcessingConfig(cop=CopConfig(refine_cnt=0)),
+            calibration=CalibrationConfig(model_path=None),
+            sync=SyncConfig(max_time_diff_s=0.012),
+            output=OutputConfig(save_dir="explicit-data"),
+            gui=GuiConfig(history_size=12),
+        )
+        self.assertEqual(explicit.pressure_port, "explicit-pressure")
+        self.assertEqual(explicit.force_port, "explicit-force")
+        self.assertEqual(explicit.max_time_diff_s, 0.012)
+        self.assertEqual(explicit.save_dir, "explicit-data")
+        self.assertEqual(explicit.gui.history_size, 12)
+
+    def test_public_api_exports_config_groups_and_application(self):
+        expected = {
+            "TangentialSensor", "TangentialSensorAPI", "TangentialSample",
+            "TangentialFrameProcessor", "FixedTerminalRenderer",
+            "FitCalibrationModel", "FullApplicationConfig", "PRSensorAngle",
+            "PressureSensor", "compute_vector_angle", "angle_difference",
+            "format_terminal_sample", "TrainingConfig", "TrainingResult",
+            "train_model", "PlotConfig", "PlotResult", "plot_csv",
+            "plot_full_analysis", "PressureConfig", "ForceConfig", "CopConfig",
+            "ProcessingConfig", "CalibrationConfig", "SyncConfig", "OutputConfig",
+            "GuiConfig", "run_application",
+        }
+        self.assertTrue(expected <= set(tangential.__all__))
+        self.assertIs(tangential.TangentialSample, tangential.api.TangentialSample)
+
+    def test_base_import_does_not_load_optional_gui_or_plotting(self):
+        source = "import sys; import tangential; assert 'pyqtgraph' not in sys.modules; assert 'matplotlib' not in sys.modules"
+        result = subprocess.run(
+            [sys.executable, "-c", source],
+            env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_example_modules_are_importable_without_running_hardware(self):
+        from tangential.examples import full, minimal
+
+        self.assertTrue(callable(minimal.run))
+        self.assertTrue(callable(full.main))
+        self.assertTrue(callable(tangential.run_application))
+
+
+if __name__ == "__main__":
+    unittest.main()
