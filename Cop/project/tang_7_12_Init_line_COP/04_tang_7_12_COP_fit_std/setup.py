@@ -27,6 +27,7 @@ COMPILED_MODULES = {
     "tangential.sensors.force": "src/tangential/sensors/force.py",
     "tangential.processing.cop": "src/tangential/processing/cop.py",
     "tangential.processing.calibration": "src/tangential/processing/calibration.py",
+    "tangential.processing.slip": "src/tangential/processing/slip.py",
     "tangential.storage.csv": "src/tangential/storage/csv.py",
 }
 

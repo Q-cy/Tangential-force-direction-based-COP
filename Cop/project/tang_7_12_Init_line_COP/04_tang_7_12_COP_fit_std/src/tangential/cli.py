@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 
 def _build_parser() -> argparse.ArgumentParser:

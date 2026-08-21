@@ -1,6 +1,6 @@
 # 04_tang_7_12_COP_fit_std：Agent 工作手册
 
-本文对应 Tangential SDK 0.3.0 的实际架构。修改前必须读取并核对源码；不得恢复旧入口，不得复制协议、CoP、标定或 108 列 CSV 实现。
+本文对应 Tangential SDK 0.4.0 的实际架构。修改前必须读取并核对源码；不得恢复旧入口，不得复制协议、CoP、标定或 108 列 CSV 实现。
 
 ## 1. 项目定位和交付边界
 
@@ -8,7 +8,7 @@
 
 - 正式源码目录是 src/tangential/。
 - 源码仓库完整保留所有 Python .py；源码模式可通过 PYTHONPATH=src 直接运行，不要求预编译 .so。
-- 发布 wheel 目标是 Linux x86_64、CPython 3.11，名称为 tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl。
+- 发布 wheel 目标是 Linux x86_64、CPython 3.11，名称为 tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl。
 - wheel 内部 runtime、acquisition、sensors、processing、storage 是多个 CPython 扩展 .so；公开 API、config、CLI、examples、gui、tools 和类型声明保留可读 Python。
 - .so 只是 Python 扩展，不提供稳定 C++/Rust ABI；不得把它描述为原生跨语言 SDK。
 - 保密用户不要发布 sdist，因为 sdist 包含 Python 源码。源码仓库是内部维护源。
@@ -44,6 +44,7 @@
 │   │   └── force.py                  # 六维力协议、轮询、校零和独立进程
 │   ├── processing/
 │   │   ├── cop.py                    # PRSensorAngle、CoP、状态机、梯度和区域
+│   │   ├── slip.py                   # 归一化斑块平移、CoP短窗和STICK/SLIP状态
 │   │   └── calibration.py            # fit_coefs.bin 读取和模型预测
 │   ├── storage/
 │   │   └── csv.py                    # 唯一 108 列表头和行构造
@@ -68,6 +69,7 @@ runtime、acquisition、sensors、processing、storage 是运行时核心实现�
 稳定 API 从 tangential 顶层导入，包括：
 
 - TangentialSensor、TangentialSensorAPI、TangentialSample、TangentialFrameProcessor。
+- TangentialMotionState、SlipResult、SlipDetector、SlipConfig。
 - FixedTerminalRenderer、format_terminal_sample、compute_vector_angle、angle_difference。
 - FitCalibrationModel、PRSensorAngle、PressureSensor。
 - PressureConfig、ForceConfig、CopConfig、ProcessingConfig、CalibrationConfig、SyncConfig、OutputConfig、GuiConfig、TrainingConfig、PlotConfig、FullApplicationConfig。
@@ -183,6 +185,11 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
 - 启动校零和运行期重新归零只使用普通力数据帧，不发送额外置零命令；串口只能有一个消费者。
 - CSV 只能由 storage/csv.py 的 TABLE_CSV_HEADER 和 build_csv_row 生成。
 - fit_coefs.bin 通过 package resource 加载，模型格式和预测输出不得改变。
+- 滑移检测是运行时状态，不增加或删除 CSV 列；算法使用短窗 CoP、零填充斑块
+  平移相关性、相对 anchor 大位移兜底和连续帧滞回。SLIP 期间 sample.angle
+  使用 EMA 运动方向，退出帧为 0，并通过 PRSensorAngle.reanchor_origin 重锁
+  全局 origin。region-only 只做整帧聚合 CoP 的全局检测，不做 per-region 滑移；
+  多接触时 CoP 可能互相抵消，结果可能低估真实运动。
 - 异常、Ctrl+C、窗口关闭和无数据退出必须释放停止事件、线程、进程、串口、CSV 和 Qt 资源。
 
 ## 6. 修改路由
@@ -216,7 +223,7 @@ PYTHONPATH=src python -m tangential.examples.full
 
 Cython>=3.1,<4 是构建依赖，已在 pyproject.toml 声明；requirements.txt 供 no-build-isolation 开发构建使用。
 
-setup.py 当前把以下9个内部模块分别编译为同名扩展：runtime/sensor、runtime/session、runtime/synchronization、acquisition/buffer、sensors/pressure、sensors/force、processing/cop、processing/calibration、storage/csv。新增或移动编译模块时必须同步更新 setup.py、同名 .pyi、package-data 和分发测试。
+setup.py 当前把以下10个内部模块分别编译为同名扩展：runtime/sensor、runtime/session、runtime/synchronization、acquisition/buffer、sensors/pressure、sensors/force、processing/cop、processing/calibration、processing/slip、storage/csv。新增或移动编译模块时必须同步更新 setup.py、同名 .pyi、package-data 和分发测试。
 
 ``BinaryWheelBuildPy.run`` 必须在复制package前清理旧 ``build/lib*/tangential``
 输出，防止已删除或重命名的模块残留进wheel。分发测试必须明确检查旧模块名
@@ -233,7 +240,7 @@ python -m pip wheel . --no-deps --no-build-isolation -w dist
 构建结果应为：
 
 ~~~text
-dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
+dist/tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl
 ~~~
 
 完整测试：
@@ -252,7 +259,7 @@ PYTHONPATH=src python -m compileall -q src/tangential tests
 git diff --check
 ~~~
 
-分发验收应检查 wheel 中存在9个内部 .so、9个同名 .pyi、py.typed、资源文件和CLI入口，同时不存在对应内部 .py、生成的 C/C++ 文件或 share/ 模型目录。确认模型可在脱离源码目录加载，函数签名和文档可查看；源码模式和隔离安装模式都要运行完整测试。不要生成或向保密用户发布 sdist。
+分发验收应检查 wheel 中存在10个内部 .so、10个同名 .pyi、py.typed、资源文件和CLI入口，同时不存在对应内部 .py、生成的 C/C++ 文件或 share/ 模型目录。确认模型可在脱离源码目录加载，函数签名和文档可查看；源码模式和隔离安装模式都要运行完整测试。不要生成或向保密用户发布 sdist。
 
 dist/中的wheel和build/中的中间产物被Git忽略，不属于提交内容。最终交付时必须在报告中给出wheel绝对路径、平台标签和测试结果。
 

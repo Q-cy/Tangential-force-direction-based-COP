@@ -21,6 +21,7 @@ from tangential import (
     PlotConfig,
     PressureConfig,
     ProcessingConfig,
+    SlipConfig,
     SyncConfig,
     TrainingConfig,
 )
@@ -89,7 +90,8 @@ class StructureAndConfigTests(unittest.TestCase):
             "train_model", "PlotConfig", "PlotResult", "plot_csv",
             "plot_full_analysis", "PressureConfig", "ForceConfig", "CopConfig",
             "ProcessingConfig", "CalibrationConfig", "SyncConfig", "OutputConfig",
-            "GuiConfig", "run_application", "run_dual_application",
+            "GuiConfig", "SlipConfig", "TangentialMotionState", "SlipResult",
+            "SlipDetector", "run_application", "run_dual_application",
         }
         self.assertTrue(expected <= set(tangential.__all__))
         self.assertIs(tangential.TangentialSample, tangential.api.TangentialSample)

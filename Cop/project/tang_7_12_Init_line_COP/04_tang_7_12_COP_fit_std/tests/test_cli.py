@@ -30,7 +30,7 @@ class CliTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(version_result.returncode, 0)
-        self.assertEqual(version_result.stdout.strip(), "0.3.0")
+        self.assertEqual(version_result.stdout.strip(), "0.4.0")
 
     def test_cli_module_import_isolated_from_optional_libraries(self):
         result = subprocess.run(

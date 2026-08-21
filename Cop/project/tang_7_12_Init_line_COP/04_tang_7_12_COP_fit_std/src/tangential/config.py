@@ -167,6 +167,65 @@ class CopConfig:
 
 
 @dataclass
+class SlipConfig:
+    """全局滑移检测参数。
+
+    参数单位中的 distance/search radius 均为压力阵列 cell。环境变量使用
+    ``TANGENTIAL_SLIP_*`` 前缀，例如 ``TANGENTIAL_SLIP_ENTER_DISTANCE``。
+
+    Attributes:
+        enabled: 是否启用滑移判定；关闭后接触帧保持 ``STICK``。
+        window_frames: CoP 和压力斑块运动比较使用的短窗帧数。
+        enter_distance: 进入滑移所需的最小短窗 CoP 位移，单位为 cell。
+        exit_distance: 判定运动稳定所需的最大短窗 CoP 位移，单位为 cell。
+        reanchor_distance: 当斑块相关性不足时，相对静摩擦锚点触发滑移的
+            兜底距离，单位为 cell。
+        enter_frames: 连续满足滑移证据后进入 ``SLIP`` 的窗口数。
+        exit_frames: 连续满足稳定条件后退出 ``SLIP`` 的窗口数。
+        direction_smoothing: 滑移方向指数移动平均系数，范围为 ``(0, 1]``。
+        patch_search_radius: 压力斑块平移搜索半径，单位为 cell。
+        patch_min_correlation: 确认斑块平移所需的最小余弦相关值。
+        patch_min_improvement: 最优非零平移相对零平移的最小相关提升。
+        angle_deadband: 小于该向量模长时把输出方向角置零，单位为 cell。
+    """
+
+    enabled: bool = field(default_factory=lambda: _env_bool("TANGENTIAL_SLIP_ENABLED", True))
+    window_frames: int = field(default_factory=lambda: _env_int("TANGENTIAL_SLIP_WINDOW_FRAMES", 5))
+    enter_distance: float = field(default_factory=lambda: _env_float("TANGENTIAL_SLIP_ENTER_DISTANCE", 0.20))
+    exit_distance: float = field(default_factory=lambda: _env_float("TANGENTIAL_SLIP_EXIT_DISTANCE", 0.05))
+    reanchor_distance: float = field(default_factory=lambda: _env_float("TANGENTIAL_SLIP_REANCHOR_DISTANCE", 1.0))
+    enter_frames: int = field(default_factory=lambda: _env_int("TANGENTIAL_SLIP_ENTER_FRAMES", 3))
+    exit_frames: int = field(default_factory=lambda: _env_int("TANGENTIAL_SLIP_EXIT_FRAMES", 8))
+    direction_smoothing: float = field(default_factory=lambda: _env_float("TANGENTIAL_SLIP_DIRECTION_SMOOTHING", 0.35))
+    patch_search_radius: int = field(default_factory=lambda: _env_int("TANGENTIAL_SLIP_PATCH_SEARCH_RADIUS", 2))
+    patch_min_correlation: float = field(default_factory=lambda: _env_float("TANGENTIAL_SLIP_PATCH_MIN_CORRELATION", 0.75))
+    patch_min_improvement: float = field(default_factory=lambda: _env_float("TANGENTIAL_SLIP_PATCH_MIN_IMPROVEMENT", 0.03))
+    angle_deadband: float = field(default_factory=lambda: _env_float("TANGENTIAL_SLIP_ANGLE_DEADBAND", 0.1))
+
+    def validate(self) -> "SlipConfig":
+        """严格校验滑移窗口、阈值、相关性和角度死区参数。"""
+        if self.window_frames < 2:
+            raise ValueError("SlipConfig.window_frames 必须至少为 2")
+        if self.enter_frames <= 0 or self.exit_frames <= 0:
+            raise ValueError("SlipConfig.enter_frames/exit_frames 必须大于 0")
+        if self.enter_distance < 0 or self.exit_distance < 0:
+            raise ValueError("SlipConfig.enter_distance/exit_distance 不能为负数")
+        if self.reanchor_distance < self.enter_distance:
+            raise ValueError("SlipConfig.reanchor_distance 不能小于 enter_distance")
+        if not 0.0 < self.direction_smoothing <= 1.0:
+            raise ValueError("SlipConfig.direction_smoothing 必须在 (0, 1] 内")
+        if self.patch_search_radius < 0:
+            raise ValueError("SlipConfig.patch_search_radius 不能为负数")
+        if not 0.0 <= self.patch_min_correlation <= 1.0:
+            raise ValueError("SlipConfig.patch_min_correlation 必须在 [0, 1] 内")
+        if self.patch_min_improvement < 0:
+            raise ValueError("SlipConfig.patch_min_improvement 不能为负数")
+        if self.angle_deadband < 0:
+            raise ValueError("SlipConfig.angle_deadband 不能为负数")
+        return self
+
+
+@dataclass
 class ProcessingConfig:
     """单帧处理和标定调用参数。"""
 
@@ -175,6 +234,7 @@ class ProcessingConfig:
     median_window: int = 5
     refine_rezero_force: bool = True
     cop: CopConfig = field(default_factory=CopConfig)
+    slip: SlipConfig = field(default_factory=SlipConfig)
 
     def validate(self) -> "ProcessingConfig":
         """校验处理模式并递归校验 CoP 配置。"""
@@ -185,6 +245,7 @@ class ProcessingConfig:
         if self.median_window <= 0:
             raise ValueError("ProcessingConfig.median_window 必须大于 0")
         self.cop.validate()
+        self.slip.validate()
         return self
 
 
@@ -447,7 +508,7 @@ class PlotConfig:
 
 
 __all__ = [
-    "PressureConfig", "ForceConfig", "CopConfig", "ProcessingConfig",
+    "PressureConfig", "ForceConfig", "CopConfig", "SlipConfig", "ProcessingConfig",
     "CalibrationConfig", "SyncConfig", "OutputConfig", "GuiConfig",
     "TrainingConfig", "PlotConfig", "FullApplicationConfig",
     "default_model_path", "default_save_dir",

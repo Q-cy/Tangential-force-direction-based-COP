@@ -13,6 +13,7 @@ from .runtime.sensor import (
     compute_vector_angle,
     format_terminal_sample,
 )
+from .processing.slip import SlipDetector, SlipResult, TangentialMotionState
 
 # 面向用户的推荐名称；实现类仍保留 TangentialSensorAPI 这个完整名称。
 TangentialSensor = TangentialSensorAPI
@@ -26,4 +27,7 @@ __all__ = [
     "angle_difference",
     "compute_vector_angle",
     "format_terminal_sample",
+    "TangentialMotionState",
+    "SlipResult",
+    "SlipDetector",
 ]

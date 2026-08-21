@@ -13,6 +13,7 @@ import numpy as np
 from ..config import PressureConfig, ProcessingConfig
 from ..processing.calibration import FitCalibrationModel
 from ..processing.cop import PRSensorAngle
+from ..processing.slip import SlipDetector, TangentialMotionState
 from ..sensors.pressure import PressureSensor
 
 
@@ -73,6 +74,13 @@ class TangentialSample:
         regions (list[dict]): 区域信息列表。
         centroid (tuple[float, float] | None): 压力质心坐标。
         rel_ms (int): 相对首帧时间，单位为毫秒；默认值为 0。
+        motion_state (TangentialMotionState): 当前全局运动状态，包括无接触、
+            静摩擦和滑移。
+        is_slipping (bool): 当前是否已经进入滑移状态。
+        slip_motion_distance (float): CoP 短窗首尾位移，单位为阵列 cell。
+        slip_confidence (float): 压力斑块平移确认后的余弦相关置信度；未确认
+            时为 0。
+        angle_vector_magnitude (float): 当前方向向量模长，单位为阵列 cell。
     """
 
     raw: np.ndarray
@@ -105,6 +113,11 @@ class TangentialSample:
     regions: list[dict] = field(default_factory=list)
     centroid: tuple[float, float] | None = None
     rel_ms: int = 0
+    motion_state: TangentialMotionState = TangentialMotionState.NO_CONTACT
+    is_slipping: bool = False
+    slip_motion_distance: float = 0.0
+    slip_confidence: float = 0.0
+    angle_vector_magnitude: float = 0.0
 
     @property
     def raw_2d(self) -> np.ndarray:
@@ -185,7 +198,8 @@ class TangentialFrameProcessor:
 
     def __init__(self, cop_sensor=None, calibration=None, cal_dim=None,
                  region_mode=None, median_window=None,
-                 processing_config: ProcessingConfig | None = None):
+                 processing_config: ProcessingConfig | None = None,
+                 slip_detector: SlipDetector | None = None):
         """初始化单帧处理器和偏移量中值滤波状态。
 
         Args:
@@ -198,6 +212,11 @@ class TangentialFrameProcessor:
             region_mode (str): 区域计算模式，必须是 ``"full"``、``"region"``
                 或 ``"both"``，默认 ``"full"``。
             median_window (int): dx/dy 中值滤波窗口长度，默认 5，必须为正数。
+            processing_config (ProcessingConfig | None): CoP、区域、滤波和滑移
+                参数的集中配置；显式 ``cal_dim``、``region_mode`` 和
+                ``median_window`` 参数优先于其中的对应字段。
+            slip_detector (SlipDetector | None): 可选的独立滑移检测器；传入后
+                由调用方负责保证其阵列尺寸匹配，否则按配置为本处理器创建独立实例。
 
         Returns:
             None: 初始化处理器状态。
@@ -214,6 +233,12 @@ class TangentialFrameProcessor:
         if median_window <= 0:
             raise ValueError("median_window 必须大于0")
         self.cop_sensor = cop_sensor or PRSensorAngle(config=defaults.cop)
+        self.slip_config = defaults.slip
+        self.slip_detector = slip_detector or SlipDetector(
+            config=defaults.slip,
+            rows=self.cop_sensor.rows,
+            cols=self.cop_sensor.cols,
+        )
         self.calibration = calibration
         self.cal_dim = cal_dim
         self.region_mode = region_mode
@@ -294,6 +319,15 @@ class TangentialFrameProcessor:
             )
             centroid = None
 
+        # region-only 仍可用整帧聚合 CoP 做全局滑移检测；不为每个 region
+        # 创建或共享滑移状态。get_cop 是无状态查询，不推进全局 origin。
+        if use_full:
+            global_cop_x, global_cop_y = cop_x, cop_y
+        elif hasattr(self.cop_sensor, "get_cop"):
+            global_cop_x, global_cop_y = self.cop_sensor.get_cop(values)
+        else:
+            global_cop_x = global_cop_y = float("nan")
+
         if use_region:
             regions = self.cop_sensor._compute_region_delta_cop(matrix)
             region_mask = np.zeros(matrix.shape, dtype=np.int32)
@@ -303,6 +337,45 @@ class TangentialFrameProcessor:
         else:
             regions = []
             region_mask = np.zeros(matrix.shape, dtype=np.int32)
+
+        detector_contact = bool(state > 0) if use_full else any(
+            region.get("contact_init", False) for region in regions
+        )
+        motion_ready = (
+            self.cop_sensor.is_motion_ready()
+            if use_full and hasattr(self.cop_sensor, "is_motion_ready")
+            else True
+        )
+        slip_result = self.slip_detector.update(
+            matrix,
+            global_cop_x,
+            global_cop_y,
+            contact=detector_contact,
+            ready=motion_ready and np.isfinite(global_cop_x) and np.isfinite(global_cop_y),
+        )
+        if slip_result.reanchored and use_full:
+            # 仅在滑移退出时重锁既有全局 CoP origin；滑移期间 detector
+            # 自己维护 anchor，避免滑移运动污染静态 dx/dy。
+            self.cop_sensor.reanchor_origin(global_cop_x, global_cop_y)
+            origin_x, origin_y = global_cop_x, global_cop_y
+
+        if slip_result.reanchored:
+            angle = 0.0
+            angle_vector_magnitude = 0.0
+        elif slip_result.is_slipping:
+            angle_vector_magnitude = slip_result.angle_vector_magnitude
+            angle = (
+                PRSensorAngle._compute_cop_angle(
+                    slip_result.direction_x, slip_result.direction_y
+                )
+                if angle_vector_magnitude >= self.slip_config.angle_deadband else 0.0
+            )
+        else:
+            angle_vector_magnitude = float(np.hypot(dx, dy)) if use_full else 0.0
+            if angle_vector_magnitude < self.slip_config.angle_deadband:
+                angle = 0.0
+        if float(angle) == 0.0:
+            angle = 0.0
 
         self._dx_values.append(dx)
         self._dy_values.append(dy)
@@ -353,6 +426,11 @@ class TangentialFrameProcessor:
             region_mask=region_mask,
             regions=regions,
             centroid=centroid,
+            motion_state=slip_result.motion_state,
+            is_slipping=slip_result.is_slipping,
+            slip_motion_distance=slip_result.motion_distance,
+            slip_confidence=slip_result.confidence,
+            angle_vector_magnitude=angle_vector_magnitude,
         )
         return sample
 
@@ -429,9 +507,7 @@ class TangentialSensorAPI:
             processor = TangentialFrameProcessor(
                 cop_sensor=PRSensorAngle(**processing_config.cop.as_kwargs()),
                 calibration=calibration,
-                cal_dim=processing_config.cal_dim,
-                region_mode=processing_config.region_mode,
-                median_window=processing_config.median_window,
+                processing_config=processing_config,
             )
         self.sensor = sensor
         self.processor = processor
@@ -528,6 +604,9 @@ def format_terminal_sample(sample: TangentialSample) -> str:
         f"sum={sample.total:14.3f} mean={sample.mean:12.3f}",
         f"copX={sample.cop_x:11.4f} copY={sample.cop_y:11.4f} "
         f"angle={sample.angle:10.3f}",
+        f"motion={sample.motion_state.name:<10} slipping={str(sample.is_slipping):<5} "
+        f"slip_distance={sample.slip_motion_distance:9.4f} "
+        f"confidence={sample.slip_confidence:7.4f}",
         f"Fx_cal={sample.calibrated_fx:10.4f} "
         f"Fy_cal={sample.calibrated_fy:10.4f} "
         f"Fz_cal={sample.calibrated_fz:10.4f}",

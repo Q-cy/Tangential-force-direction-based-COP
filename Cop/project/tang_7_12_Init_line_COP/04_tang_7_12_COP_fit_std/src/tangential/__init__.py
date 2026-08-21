@@ -28,11 +28,13 @@ from .config import (
     PlotConfig,
     PressureConfig,
     ProcessingConfig,
+    SlipConfig,
     SyncConfig,
     TrainingConfig,
 )
 from .processing.calibration import FitCalibrationModel
 from .processing.cop import PRSensorAngle
+from .processing.slip import SlipDetector, SlipResult, TangentialMotionState
 from .sensors.pressure import PressureSensor
 from .tools.training import TrainingResult, train_model
 from .tools.plotting import PlotResult, plot_csv, plot_full_analysis
@@ -52,12 +54,16 @@ __all__ = [
     "ForceConfig",                 # 六维力设备和校零配置。
     "CopConfig",                   # CoP、阈值、区域和精修配置。
     "ProcessingConfig",           # 单帧处理和标定维度配置。
+    "SlipConfig",                 # 滑移检测窗口、相关性和滞回配置。
     "CalibrationConfig",          # 外部/内置模型路径配置。
     "SyncConfig",                  # 匹配窗口、主循环和缓存配置。
     "OutputConfig",                # CSV 输出目录配置。
     "GuiConfig",                   # GUI 显示配置。
     "PRSensorAngle",              # CoP 处理器：阈值、接触状态、区域、梯度和角度计算。
     "PressureSensor",              # 底层压力驱动：负责 PZT 串口协议、帧解析和时序统计。
+    "TangentialMotionState",       # 全局运动状态：NO_CONTACT、STICK 或 SLIP。
+    "SlipResult",                  # 不可变的逐帧滑移距离、置信度和方向结果。
+    "SlipDetector",                # 独立可复用的压力斑块滑移检测器。
     "compute_vector_angle",        # 角度工具：计算二维向量方向角（单位为度）。
     "angle_difference",            # 角度工具：计算两个方向角的最小环绕差值。
     "format_terminal_sample",      # 终端工具：把样本格式化为固定布局文本。
@@ -73,4 +79,4 @@ __all__ = [
 ]
 
 # SDK 发行版本号，供运行时检查兼容性和 CLI --version 使用。
-__version__ = "0.3.0"
+__version__ = "0.4.0"

@@ -379,9 +379,7 @@ class FullAcquisitionSession:
         self.processor = TangentialFrameProcessor(
             cop_sensor=PRSensorAngle(**self.config.processing.cop.as_kwargs()),
             calibration=calibration,
-            cal_dim=self.config.processing.cal_dim,
-            region_mode=self.config.processing.region_mode,
-            median_window=self.config.processing.median_window,
+            processing_config=self.config.processing,
         )
 
         self.thread_press = PressureThread(
@@ -839,6 +837,10 @@ class FullAcquisitionSession:
             region_mask=sample.region_mask,
             regions=sample.regions,
             centroid=sample.centroid,
+            motion_state=sample.motion_state,
+            is_slipping=sample.is_slipping,
+            slip_motion_distance=sample.slip_motion_distance,
+            slip_confidence=sample.slip_confidence,
         )
         if sample.contact:
             self.plot.append_full_data(

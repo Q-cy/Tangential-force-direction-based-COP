@@ -7,5 +7,9 @@ CoP、接触状态、梯度和区域处理，后者读取内置或外部模型�
 
 from .calibration import FitCalibrationModel
 from .cop import PRSensorAngle
+from .slip import SlipDetector, SlipResult, TangentialMotionState
 
-__all__ = ["FitCalibrationModel", "PRSensorAngle"]
+__all__ = [
+    "FitCalibrationModel", "PRSensorAngle", "TangentialMotionState",
+    "SlipResult", "SlipDetector",
+]

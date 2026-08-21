@@ -337,6 +337,10 @@ class RealTimePlot:
         self._cal_fx_val = None             # 标定力Fx
         self._cal_fy_val = None             # 标定力Fy
         self._cop_state = 0                 # CoP状态(0=未接触,1=粗略,2=精细)
+        self._motion_state = 0              # 滑移状态(0=NO CONTACT,1=STICK,2=SLIP)
+        self._is_slipping = False
+        self._slip_motion_distance = 0.0
+        self._slip_confidence = 0.0
         self._gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)  # 压力梯度(每帧由 main 传入)
         self._contact_init = False
         self._pzt_table_angle_deg = None     # Pressure Table 专用角度（invertY 视图）
@@ -598,7 +602,11 @@ class RealTimePlot:
                  pzt_table_angle_deg=None,
                  region_mask=None,
                  regions=None,
-                 centroid=None):
+                 centroid=None,
+                 motion_state=0,
+                 is_slipping=False,
+                 slip_motion_distance=0.0,
+                 slip_confidence=0.0):
         """提交一帧实时显示状态，并更新曲线历史缓存。
 
         Args:
@@ -619,6 +627,10 @@ class RealTimePlot:
             region_mask: 可选 ``(12, 7)`` 区域编号掩码。
             regions: 可选区域字典序列，每项包含 ``id``、``cop`` 和 ``delta``。
             centroid: 可选整帧形心 ``(x, y)``。
+            motion_state: 滑移状态枚举值或整数，0/1/2 为未接触/静摩擦/滑移。
+            is_slipping: 当前是否处于滑移状态。
+            slip_motion_distance: 短窗 CoP 位移，单位为 cell。
+            slip_confidence: 压力斑块平移确认置信度，范围通常为 0..1。
 
         Returns:
             ``None``。
@@ -652,6 +664,10 @@ class RealTimePlot:
                                  else np.asarray(region_mask, dtype=np.int32))
             self._regions = regions or []
             self._centroid_xy = centroid
+            self._motion_state = int(motion_state)
+            self._is_slipping = bool(is_slipping)
+            self._slip_motion_distance = float(slip_motion_distance)
+            self._slip_confidence = float(slip_confidence)
 
             angle_err = min(abs(pzt_angle_deg - force_angle_deg),
                            360 - abs(pzt_angle_deg - force_angle_deg))
@@ -748,6 +764,10 @@ class RealTimePlot:
             force_fx_val = self._force_fx_val; force_fy_val = self._force_fy_val
             pzt_table_angle_deg = self._pzt_table_angle_deg
             cop_state = self._cop_state
+            motion_state = self._motion_state
+            is_slipping = self._is_slipping
+            slip_motion_distance = self._slip_motion_distance
+            slip_confidence = self._slip_confidence
             contact_init = self._contact_init
             grad_arr = self._gradient_arr.copy()
             regions = list(self._regions)
@@ -755,7 +775,13 @@ class RealTimePlot:
 
         # 状态显示
         _state_names = {0: "未接触", 1: "粗略测量", 2: "精细测量"}
-        self.set_status(_state_names.get(cop_state, '?'))
+        _motion_names = {0: "NO CONTACT", 1: "STICK", 2: "SLIP"}
+        cop_status = _state_names.get(cop_state, '?')
+        motion_status = _motion_names.get(motion_state, '?')
+        self.set_status(
+            f"{cop_status} | {motion_status} | "
+            f"d={slip_motion_distance:.3f} c={slip_confidence:.3f}"
+        )
 
         # 初始 CoP 未确定时冻结蓝色箭头（与红色一致）
         _fa = force_angle_deg if contact_init else 0.0

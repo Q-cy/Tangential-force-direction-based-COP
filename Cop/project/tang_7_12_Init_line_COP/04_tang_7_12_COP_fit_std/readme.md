@@ -1,4 +1,4 @@
-# Tangential Sensor SDK 0.3.0
+# Tangential Sensor SDK 0.4.0
 
 Tangential Sensor SDK 用于采集 12×7 PZT 压力阵列和可选六维力传感器，提供 CoP、角度、梯度、切向力标定、实时 GUI、固定 108 列 CSV 和离线分析。
 
@@ -9,19 +9,19 @@ Tangential Sensor SDK 用于采集 12×7 PZT 压力阵列和可选六维力传�
 当前发布目标为 Linux x86_64、CPython 3.11：
 
 ~~~text
-tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
+tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl
 ~~~
 
 安装完整功能：
 
 ~~~bash
-python -m pip install "./dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl[full]"
+python -m pip install "./dist/tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl[full]"
 ~~~
 
 只使用压力采集、CoP、标定和 CSV 核心能力时，可不安装 GUI extra：
 
 ~~~bash
-python -m pip install ./dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
+python -m pip install ./dist/tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl
 ~~~
 
 wheel 分为两层：
@@ -29,7 +29,7 @@ wheel 分为两层：
 - runtime、acquisition、sensors、processing、storage 的内部实现编译为多个 CPython 3.11 .so。
 - __init__.py、api.py、config.py、application.py、cli.py、examples/、gui/、tools/ 和类型声明保留为可读 Python。
 
-wheel 内部实现的 Python 源文件不随 wheel 发布，但源码仓库完整保留这些 .py 文件。当前共编译9个扩展模块：runtime 3个、acquisition 1个、sensors 2个、processing 2个、storage 1个；每个扩展都有同名 .pyi 类型声明。
+wheel 内部实现的 Python 源文件不随 wheel 发布，但源码仓库完整保留这些 .py 文件。当前共编译10个扩展模块：runtime 3个、acquisition 1个、sensors 2个、processing 3个、storage 1个；每个扩展都有同名 .pyi 类型声明。
 
 .so 是 Python 的 CPython 扩展，不是稳定的 C++ ABI，不能直接作为 C++ 链接。需要原生 ABI 时，应另行设计 C ABI 或原生 SDK 层。
 
@@ -342,7 +342,8 @@ config = FullApplicationConfig(
 - PressureConfig：压力端口、波特率、目标频率、响应超时、队列和启动超时。
 - ForceConfig：六维力 enabled 开关、端口、波特率、目标频率、响应超时、队列、启动超时和校零参数。
 - CopConfig：动态阈值、背景学习、CoP 稳定、区域和二次精修参数。
-- ProcessingConfig：标定维度、区域模式、中值窗口和精修归零策略。
+- ProcessingConfig：标定维度、区域模式、中值窗口、精修归零策略和 SlipConfig。
+- SlipConfig：滑移短窗、CoP 进入/退出滞回、anchor 兜底、斑块相关性、方向 EMA 和角度死区。
 - CalibrationConfig：外部模型路径。
 - SyncConfig：主循环频率、GUI 频率、15 ms 匹配窗口、统计周期和缓存容量。
 - OutputConfig：CSV 保存目录。
@@ -367,6 +368,43 @@ CLI 显式参数 > 显式传入的配置对象 > TANGENTIAL_* 环境默认 > con
 ~~~
 
 协议帧头、CRC、固定 12×7/84 通道布局、固定 108 列 CSV 和设备帧长度属于协议不变量，不通过配置修改。
+
+## 滑移检测
+
+0.4.0 增加了可复用的 ``SlipDetector``。它不改变 108 列 CSV，不修改
+``fit_coefs.bin``，也不改变标定模型输入；结果只出现在 ``TangentialSample``、
+终端输出和实时 GUI 中。每个处理器/传感器实例拥有独立 detector，双传感器
+不会共享滑移历史。
+
+算法按以下顺序工作：
+
+- 对当前压力斑块按总压力归一化，保存 ``window_frames`` 帧的 CoP 和斑块历史。
+- 比较短窗首尾 CoP 位移；在 ``±patch_search_radius`` 范围做零填充平移，使用
+  余弦相关，并要求相对零平移提升 ``patch_min_improvement``。
+- CoP 位移达到 ``enter_distance`` 且斑块确认，或相对 detector anchor 达到
+  ``reanchor_distance`` 的大位移兜底时，连续 ``enter_frames`` 个窗口进入 SLIP。
+- SLIP 期间用 ``direction_smoothing`` 做运动方向 EMA；短窗位移连续低于
+  ``exit_distance`` 达到 ``exit_frames`` 后退出，当前位置重新锁定全局静摩擦
+  origin，退出帧角度为 0。
+- ``angle_deadband`` 以下的方向向量输出 0。无接触或 CoP 不可用时完整 reset，
+  状态为 ``NO_CONTACT``；接触但未滑移为 ``STICK``。
+
+公开调用示例：
+
+~~~python
+from tangential import ProcessingConfig, SlipDetector, TangentialMotionState
+
+config = ProcessingConfig()
+detector = SlipDetector(config.slip, rows=12, cols=7)
+result = detector.update(matrix, cop_x, cop_y, contact=True, ready=True)
+if result.motion_state is TangentialMotionState.SLIP:
+    print(result.motion_distance, result.confidence)
+~~~
+
+``region``/``both`` 处理模式只支持用整帧聚合 CoP 做全局滑移检测，不对每个
+region 单独检测滑移。多接触点的 CoP 可能互相抵消，因此全局检测在多接触、
+接触区域分离或形变明显时可能低估运动；需要 per-region 滑移时应另行设计
+独立跟踪算法，不能把当前全局结果误认为每个 region 的结果。
 
 ### 修改config.py是否会直接生效
 
@@ -402,7 +440,7 @@ python -m pip wheel . --no-deps --no-build-isolation -w dist
 构建结果：
 
 ~~~text
-dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
+dist/tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl
 ~~~
 
 构建时会生成多个内部 .so；生成的 C 文件位于 build/。build/、dist/、*.egg-info/ 和 .so 都是构建产物，不提交 Git。源码仓库仍保留完整 .py，可在没有 .so 的情况下运行。
@@ -427,10 +465,10 @@ python -c "import tangential.sensors.pressure as m; print(m.__file__)"
 检查 wheel 是否符合交付边界：
 
 ~~~bash
-unzip -l dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
+unzip -l dist/tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl
 ~~~
 
-应看到9个内部 .so、9个同名 .pyi、py.typed 和 resources/fit_coefs.bin；不应看到这些内部模块的 .py、生成的 .c/.cpp 或外部 share/ 模型目录。
+应看到10个内部 .so、10个同名 .pyi、py.typed 和 resources/fit_coefs.bin；不应看到这些内部模块的 .py、生成的 .c/.cpp 或外部 share/ 模型目录。
 
 ## 二次开发与保密边界
 

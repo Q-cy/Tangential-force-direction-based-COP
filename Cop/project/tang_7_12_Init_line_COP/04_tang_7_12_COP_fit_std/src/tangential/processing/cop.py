@@ -123,6 +123,7 @@ class PRSensorAngle:
         self._origin_y = None
         self._contact_init = False
         self._low_counter = 0
+        self._motion_ready = False
 
         # per-region 完整状态: {region_id: {...}}；每个 region 独立锁定 origin + 二次精修状态
         self._region_states: dict[int, dict] = {}
@@ -218,6 +219,19 @@ class PRSensorAngle:
             return 1
         return 0
 
+    def is_motion_ready(self) -> bool:
+        """返回当前帧是否允许推进全局滑移运动历史。
+
+        Returns:
+            bool：已确认接触且二次精修被禁用，或精修已完成时为 ``True``。
+            精修刚完成的当前帧仍返回 ``False``，使下一帧才开始推进滑移
+            detector，与参考 C++ 在精修完成分支直接返回的语义一致。
+        """
+        return bool(
+            self._contact_init
+            and (not self._refine_enabled or (self._refined and self._motion_ready))
+        )
+
     def reset_origin(self) -> None:
         """清掉首次接触 origin 与低压计数，同时清掉二次精修状态（候选点、稳定计数、已精修标志）；
         阈值（若已确定）保留。
@@ -240,6 +254,37 @@ class PRSensorAngle:
         self._refine_cand_y = None
         self._refine_curr = 0
         self._refined = False
+        self._motion_ready = False
+
+    def reanchor_origin(self, cop_x: float, cop_y: float) -> None:
+        """把已确认的当前 CoP 设置为新的全局静摩擦 origin。
+
+        这是滑移检测退出时使用的薄适配方法，复用本类已有 origin 状态，
+        不复制接触阈值或精修状态机。它不会改变动态阈值，也不会重置区域
+        tracker；下一帧的 ``get_all`` 会继续沿用这里的 origin 计算 dx/dy。
+
+        Args:
+            cop_x: 当前全局 CoP 的列坐标。
+            cop_y: 当前全局 CoP 的行坐标。
+
+        Raises:
+            ValueError: 坐标不是有限数。
+        """
+        if not np.isfinite(cop_x) or not np.isfinite(cop_y):
+            raise ValueError("reanchor_origin 需要有限的 CoP 坐标")
+        with self._lock:
+            was_refined = self._refined
+            self._origin_x = float(cop_x)
+            self._origin_y = float(cop_y)
+            self._contact_init = True
+            self._low_counter = 0
+            self._refine_cand_x = float(cop_x)
+            self._refine_cand_y = float(cop_y)
+            self._refine_curr = 0 if was_refined else 1
+            # 保留原有精修语义：禁用精修时状态为1，已完成精修时状态为2。
+            # 该薄方法不把尚未完成的精修伪造为完成。
+            self._refined = was_refined
+            self._motion_ready = (not self._refine_enabled) or was_refined
 
     def get_region_state(self, region_id: int) -> dict:
         """获取 region 的状态字典；首次访问时建空状态。
@@ -444,6 +489,10 @@ class PRSensorAngle:
         self._frame_count += 1
         if self._reset_at_frame > 0 and self._frame_count == self._reset_at_frame:
             self.reset_origin()
+        elif self._refined:
+            # 精修完成的那一帧在下面的完成分支直接返回；从下一帧开始
+            # 才允许上层推进滑移 detector。
+            self._motion_ready = True
 
         rows, cols = self.rows, self.cols
         frame_flat = np.asarray(raw_frame, dtype=np.float32).flatten()
@@ -482,6 +531,8 @@ class PRSensorAngle:
                     self._refine_cand_x = cop_x
                     self._refine_cand_y = cop_y
                     self._refine_curr = 1
+                else:
+                    self._motion_ready = True
             return 0.0, 0.0
 
         delta_x = cop_x - self._origin_x
@@ -512,6 +563,7 @@ class PRSensorAngle:
                 self._origin_x = self._refine_cand_x
                 self._origin_y = self._refine_cand_y
                 self._refined = True
+                self._motion_ready = False
 
         return delta_x, delta_y
 
