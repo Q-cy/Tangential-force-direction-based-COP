@@ -1,149 +1,255 @@
-# Tangential Sensor SDK
+# Tangential Sensor SDK 0.3.0
 
-Tangential Sensor SDK 用于采集 12×7 PZT 压力阵列和可选六维力传感器，提供 CoP、角度、梯度、标定、实时显示、CSV 保存以及离线分析能力。
+Tangential Sensor SDK 用于采集 12×7 PZT 压力阵列和可选六维力传感器，提供 CoP、角度、梯度、切向力标定、实时 GUI、固定 108 列 CSV 和离线分析。
 
-用户只需要一个 wheel。源码包的内部模块不是使用接口。
+项目同时支持源码开发和 wheel 交付：仓库完整保留 Python 源码；普通用户通过公开 API、配置、CLI 和示例使用 wheel。
 
-## 安装
+## 安装与交付边界
 
-运行环境为 Python 3.11 或更高版本。构建好的 wheel 位于 `dist/`：
+当前发布目标为 Linux x86_64、CPython 3.11：
 
-```bash
-python -m pip install ./dist/tangential_sensor-0.2.0-py3-none-any.whl
-```
+~~~text
+tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
+~~~
 
-上面的核心安装提供压力采集 API、传感器协议、CoP、标定和 CSV 能力，不安装 GUI 绘图库。需要完整采集应用和离线绘图时安装完整 extra：
+安装完整功能：
 
-```bash
-python -m pip install "./dist/tangential_sensor-0.2.0-py3-none-any.whl[full]"
-```
+~~~bash
+python -m pip install "./dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl[full]"
+~~~
 
-`requirements.txt` 是项目维护者使用的完整开发/GUI 锁定环境；正式安装依赖以 wheel 的 `pyproject.toml` 元数据为准。
+wheel 分为两层：
 
-安装后可用以下命令验证版本：
+- runtime、acquisition、sensors、processing、storage 的内部实现编译为多个 CPython 3.11 .so。
+- __init__.py、api.py、config.py、application.py、cli.py、examples/、gui/、tools/ 和类型声明保留为可读 Python。
 
-```bash
-tangential --version
-```
+wheel 内部实现的 Python 源文件不随 wheel 发布，但源码仓库完整保留这些 .py 文件。
+
+.so 是 Python 的 CPython 扩展，不是稳定的 C++ 或 Rust ABI，不能直接作为 C++/Rust SDK 链接。需要原生 ABI 时，应另行设计 C ABI 或原生 SDK 层。
+
+为保护内部实现，不要向保密用户发布 sdist；sdist 必然包含 Python 源码。源码仓库可以继续作为内部开发和维护源。
+
+## 从源码直接运行
+
+源码仓库不要求预先生成 .so。项目根目录执行：
+
+~~~bash
+python -m pip install -r requirements.txt
+
+PYTHONPATH=src python -m tangential.examples.minimal
+PYTHONPATH=src python -m tangential.examples.full
+~~~
+
+也可以直接运行 CLI：
+
+~~~bash
+PYTHONPATH=src python -m tangential.cli --version
+PYTHONPATH=src python -m tangential.cli example --help
+PYTHONPATH=src python -m tangential.cli app --help
+~~~
+
+minimal 需要压力传感器；full 需要完整 GUI 依赖和实际硬件。源码运行不依赖预编译 .so，wheel 用户不需要 PYTHONPATH。
 
 ## 命令行
 
-安装后统一使用 `tangential` 命令：
+安装 wheel 后使用统一命令：
 
-```bash
+~~~bash
+tangential --version
 tangential example
 tangential app
-tangential plot
-tangential fit
-```
+tangential plot --help
+tangential fit --help
+~~~
 
-查看帮助：
+### 最小压力采集
 
-```bash
-tangential --help
-tangential app --help
-```
+~~~bash
+tangential example \
+  --pressure-port /dev/ttyUSB0 \
+  --timeout 0.1
+~~~
 
-### `example`
+终端每帧显示 12×7 原始 ADC、min、max、sum、mean、CoP X/Y 和角度。此路径不启动六维力、CSV 或 Qt GUI。
 
-采集压力阵列并在终端显示当前帧。默认压力串口为 `/dev/ttyUSB0`，可用参数覆盖：
+### 完整采集
 
-```bash
-tangential example --pressure-port /dev/ttyUSB0 --timeout 0.1
-```
-
-### `app`
-
-启动完整采集、六维力同步、标定、CSV 和实时 GUI。默认设备为：
-
-- 压力传感器：`/dev/ttyUSB0`
-- 六维力传感器：`/dev/ttyUSB1`
-
-默认输出目录为当前工作目录下的 `data/`，可以指定其他目录和匹配窗口：
-
-```bash
+~~~bash
 tangential app \
   --pressure-port /dev/ttyUSB0 \
   --force-port /dev/ttyUSB1 \
   --save-dir ./data \
   --max-time-diff-ms 15
-```
+~~~
 
-压力传感器是必需设备。压力连接失败时程序退出，不生成空 CSV。六维力传感器是可选设备；连接或软件校零失败时降级为压力模式，力相关字段写入 `NaN`。
+压力传感器是必需设备；连接失败时程序退出且不创建空 CSV。六维力传感器是可选设备；连接或普通数据帧校零失败时降级为压力模式，力相关列写入 NaN。两路设备由独立采集进程读取，父进程按真实接收时间完成匹配和 CSV 保存。
 
-### `plot`
+### 离线绘图
 
-从 CSV 表头按列名进行离线绘图：
+绘图按 CSV 实际表头解析列名，不依赖旧版硬编码列索引：
 
-```bash
+~~~bash
 tangential plot \
   --dir ./data \
   --files capture.csv \
   --columns Fy_cal,delta_Force_Y \
   --rows 100:500 \
   --save ./data/capture.png
-```
+~~~
 
-使用 `--list` 查看目录中的 CSV，使用 `--mode full_analysis` 运行完整分析。
+使用 --list 列出 CSV，使用 --mode full_analysis 生成完整分析图。空文件、缺列和空行范围会返回明确错误。
 
-### `fit`
+### 离线训练
 
-根据两个 CSV 训练模型。默认只写模型和评估图，不修改输入 CSV：
-
-```bash
+~~~bash
 tangential fit \
   --xy-csv ./data/fx_fy.csv \
   --z-csv ./data/fz.csv \
   --output-model ./fit_coefs.bin \
   --output-plot ./fit_report.png
-```
+~~~
 
-只有显式提供 `--write-back PATH` 时才会写回标定列；目标文件已存在时还必须提供 `--force`：
-
-```bash
-tangential fit \
-  --xy-csv ./data/fx_fy.csv \
-  --z-csv ./data/fz.csv \
-  --write-back ./data/calibrated.csv \
-  --force
-```
+默认只生成模型和评估图，不修改输入 CSV。只有明确提供 --write-back PATH 才会写回；目标已存在时必须额外提供 --force。
 
 ## Python API
 
-最小压力采集程序：
+最小采集：
 
-```python
-from tangential import TangentialSensor
+~~~python
+from tangential import PressureConfig, TangentialSensor
 
-with TangentialSensor(pressure_port="/dev/ttyUSB0") as sensor:
+pressure = PressureConfig(port="/dev/ttyUSB0")
+with TangentialSensor(config=pressure) as sensor:
     while True:
         sample = sensor.read(timeout_s=0.1)
         if sample is not None:
             print(sample.matrix)
+            print(sample.minimum, sample.maximum, sample.total, sample.mean)
             print(sample.cop_x, sample.cop_y, sample.angle)
-```
+~~~
 
-内置模型是 package resource `tangential/resources/fit_coefs.bin`。如需使用外部模型，可设置环境变量：
+TangentialSensor 返回 TangentialSample。顶层公开 API 还包括 TangentialFrameProcessor、PRSensorAngle、FitCalibrationModel、终端渲染器、训练 API、绘图 API 以及所有配置 dataclass；稳定导出清单位于 src/tangential/__init__.py。
 
-```bash
+完整应用：
+
+~~~python
+from tangential import FullApplicationConfig, run_application
+
+config = FullApplicationConfig()
+run_application(config)
+~~~
+
+按功能分类配置：
+
+~~~python
+from tangential import (
+    FullApplicationConfig, PressureConfig, ForceConfig,
+    ProcessingConfig, SyncConfig, OutputConfig,
+)
+
+config = FullApplicationConfig(
+    pressure=PressureConfig(port="/dev/ttyUSB0", target_hz=200),
+    force=ForceConfig(port="/dev/ttyUSB1", target_hz=200),
+    processing=ProcessingConfig(region_mode="full"),
+    sync=SyncConfig(max_time_diff_s=0.015),
+    output=OutputConfig(save_dir="./data"),
+)
+~~~
+
+## 配置与环境变量
+
+所有用户可调参数集中在 src/tangential/config.py：
+
+- PressureConfig：压力端口、波特率、目标频率、响应超时、队列和启动超时。
+- ForceConfig：六维力端口、波特率、目标频率、响应超时、队列、启动超时和校零参数。
+- CopConfig：动态阈值、背景学习、CoP 稳定、区域和二次精修参数。
+- ProcessingConfig：标定维度、区域模式、中值窗口和精修归零策略。
+- CalibrationConfig：外部模型路径。
+- SyncConfig：主循环频率、GUI 频率、15 ms 匹配窗口、统计周期和缓存容量。
+- OutputConfig：CSV 保存目录。
+- GuiConfig：GUI 历史数据和区域箭头显示参数。
+- TrainingConfig、PlotConfig：训练和离线绘图参数。
+- FullApplicationConfig：组合完整应用配置。
+
+可用环境变量示例：
+
+~~~bash
+export TANGENTIAL_PRESSURE_PORT=/dev/ttyUSB0
+export TANGENTIAL_FORCE_PORT=/dev/ttyUSB1
+export TANGENTIAL_MAX_TIME_DIFF_S=0.015
+export TANGENTIAL_DATA_DIR=./data
 export TANGENTIAL_MODEL_PATH=/path/to/fit_coefs.bin
-tangential example
-```
+~~~
 
-也可以在 Python 中显式传入 `model_path`。未设置覆盖路径时使用 wheel 内置模型。
+配置优先级：
 
-## 数据和时序
+~~~text
+CLI 显式参数 > 显式传入的配置对象 > TANGENTIAL_* 环境默认 > config.py 内置默认值
+~~~
 
-完整应用保存固定 108 列 CSV。`rel_ms` 和 `delta_ms` 使用合法压力帧的真实接收时间计算，不插值、不重采样，也不由 GUI 刷新节拍生成。压力和六维力分别使用独立采集进程；两路以约 200 Hz 为请求目标，单请求在途，实际频率由设备响应时间决定。
+协议帧头、CRC、固定 12×7/84 通道布局、固定 108 列 CSV 和设备帧长度属于协议不变量，不通过配置修改。
 
-六维力可用时，压力帧和力帧在 ±15 ms 内一对一匹配。六维力不可用时，每个合法压力帧仍保存，力相关字段为 `NaN`。压力连接或采集错误会被明确报告；六维力软件校零失败时降级为压力模式，资源在退出或异常时关闭。
+## 数据和时序不变量
 
-## 从源码构建 wheel
+- 压力和六维力均以 200 Hz 为请求目标，单请求在途；响应较慢时实际频率自然下降，不插值、不重复请求补发。
+- 合法压力帧解析完成后立即记录真实 rx_t。rel_ms 和 delta_ms 基于真实压力接收时间，不由 GUI 刷新或 CSV 写入节拍生成。
+- 压力帧是主顺序；每个合法压力帧最多处理和保存一次。
+- 六维力帧最多匹配一次，匹配窗口为 abs(force_t - press_t) <= 0.015 秒。匹配失败的压力行仍保存，力字段写 NaN。
+- 压力设备必需，六维力设备可选；启动校零和运行期重新归零使用普通力数据帧，不发送额外置零命令。
+- CSV 由唯一的 TABLE_CSV_HEADER 和 build_csv_row 生成，保持 108 列和既有模型输出。
 
-维护者可以在项目根目录执行：
+## 构建 wheel
 
-```bash
+构建系统在 pyproject.toml 中声明 Cython>=3.1,<4 为构建依赖：
+
+~~~bash
+python -m pip install -r requirements.txt
 python -m pip wheel . --no-deps --no-build-isolation -w dist
-```
+~~~
 
-wheel 显式包含静态模型 `tangential/resources/fit_coefs.bin`。当前发行版是纯 Python 的 `py3-none-any.whl`；以后若有必要，也可以把局部计算模块编译为平台相关 `.so` 并继续封装进 wheel。
+构建结果：
+
+~~~text
+dist/tangential_sensor-0.3.0-cp311-cp311-linux_x86_64.whl
+~~~
+
+构建时会生成多个内部 .so；.so、生成的 C/C++ 文件、build/、dist/ 和 *.egg-info/ 都是构建产物，不是源码。源码仓库仍保留完整 .py，可在没有 .so 的情况下运行。
+
+## 二次开发与保密边界
+
+用户可以：
+
+- 从 tangential 顶层导入公开 API 和配置对象。
+- 编写自己的采集、分析和 GUI 脚本。
+- 复制 examples/minimal.py 或 examples/full.py 作为应用入口。
+- 使用 tools 中的训练和绘图 Python API。
+
+内部采集、同步、协议、算法和 CSV 实现以 .so 形式随 wheel 交付，普通 wheel 用户不直接获得这些 .py 源码；源码仓库则完整保留它们，供内部维护和有权限的开发者二次修改。内部 .so 和 fit_coefs.bin 都可能被逆向或提取，因此这是提高获取门槛和控制交付边界，不是绝对保密。具体使用、逆向和再分发限制还应通过许可证约束。
+
+## 测试、回退与工作区检查
+
+完整测试：
+
+~~~bash
+PYTHONPATH=src \
+QT_QPA_PLATFORM=offscreen \
+MPLCONFIGDIR=/tmp/pzt-mplconfig \
+python -m unittest discover -s tests -q
+~~~
+
+源码语法和差异检查：
+
+~~~bash
+PYTHONPATH=src python -m compileall -q src/tangential tests
+git diff --check
+~~~
+
+Git 检查和回退：
+
+~~~bash
+git status --short
+git log --oneline -n 10
+git revert <commit-hash>
+~~~
+
+git revert 会创建反向提交并保留历史；不要使用 git reset --hard 覆盖未保存的用户修改。

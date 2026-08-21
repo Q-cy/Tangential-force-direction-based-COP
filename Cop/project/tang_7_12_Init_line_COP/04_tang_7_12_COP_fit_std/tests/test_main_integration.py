@@ -111,6 +111,9 @@ class FakeForce:
         if time.perf_counter() - self.started < self.initial_delay:
             time.sleep(min(timeout_s, 0.001))
             return None
+        # 模拟真实请求—响应等待并主动让出 GIL；若无等待，该 fake 会以数十万
+        # 帧/秒覆盖有界缓存，使测试结果依赖线程调度而非 15 ms 匹配逻辑。
+        time.sleep(min(timeout_s, 0.001))
         self.index += 1
         rx_t = time.perf_counter()
         return {
