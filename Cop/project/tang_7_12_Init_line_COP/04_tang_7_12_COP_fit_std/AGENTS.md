@@ -79,21 +79,46 @@ examples/dual_sensor.py 展示多压力设备用法：每个 ``TangentialSensorA
 启动前必须拒绝指向同一物理串口的配置。不要为多设备引入共享传感器实例、
 共享CoP状态机或单一阻塞读取循环。
 
+双传感器运行和验收必须严格按以下顺序执行：
+
+1. 插入两只压力设备。运行 ``python -m serial.tools.list_ports -v`` 和
+   ``ls -l /dev/serial/by-id/``，取得两个不同物理设备的实际路径；没有列出
+   端口时不得继续启动示例。
+2. 用第1步查到的真实路径分别设置 ``PORT_A``、``PORT_B``。不得原样输入
+   ``<sensor-a>`` 或 ``<sensor-b>``：Bash会把尖括号解释为重定向，导致
+   ``syntax error near unexpected token 'newline'``。设置后用
+   ``printf 'A=%s\nB=%s\n' "$PORT_A" "$PORT_B"`` 复核变量内容。
+3. 用 ``ls -l "$PORT_A" "$PORT_B"`` 检查路径和权限；用
+   ``groups`` 检查当前用户是否有串口权限，用 ``fuser "$PORT_A" "$PORT_B"``
+   检查端口是否被旧进程占用。两个变量必须对应两个不同的物理设备。
+4. 按下面的源码模式或 wheel 模式命令启动示例，并确认终端持续打印A/B两路
+   的 ``seq``、ADC总和、CoP和角度。某一路打印 ``timeout`` 表示该路本次
+   ``read`` 在等待时间内没有收到合法压力帧；偶发一次可继续观察，持续出现
+   时应重新核对端口、权限、占用和设备连接。
+5. 按 ``Ctrl+C`` 停止。必须确认两路读取线程、采集进程、IPC队列和串口都已
+   关闭；异常退出排查时也要检查没有遗留进程继续占用端口。
+
 源码运行命令：
 
 ~~~bash
+PORT_A=/dev/serial/by-id/DEVICE_A_ID
+PORT_B=/dev/serial/by-id/DEVICE_B_ID
 PYTHONPATH=src python -m tangential.examples.dual_sensor \
-  --port-a /dev/serial/by-id/<sensor-a> \
-  --port-b /dev/serial/by-id/<sensor-b>
+  --port-a "$PORT_A" \
+  --port-b "$PORT_B"
 ~~~
 
 安装wheel后运行命令：
 
 ~~~bash
 python -m tangential.examples.dual_sensor \
-  --port-a /dev/serial/by-id/<sensor-a> \
-  --port-b /dev/serial/by-id/<sensor-b>
+  --port-a "$PORT_A" \
+  --port-b "$PORT_B"
 ~~~
+
+文档中的 ``DEVICE_A_ID``/``DEVICE_B_ID`` 是待替换文本，不得使用带尖括号
+的shell占位符；Bash会把 ``<``/``>`` 解释为输入输出重定向。若系统没有
+``/dev/serial/by-id/``，可在确认设备映射后使用不同的 ``/dev/ttyUSB*``。
 
 该示例只做两路压力采集、CoP/角度/标定和终端摘要，不启动六维力、GUI或
 108列CSV。修改示例时必须保留并发读取、端口唯一性校验和两路资源的异常清理。

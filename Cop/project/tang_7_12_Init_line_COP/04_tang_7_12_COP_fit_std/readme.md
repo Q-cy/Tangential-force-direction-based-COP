@@ -62,31 +62,104 @@ minimal 需要压力传感器；full 需要完整 GUI 依赖和实际硬件。�
 传感器，分别计算CoP、角度、梯度和标定结果，并在终端打印两路摘要；不会
 启动六维力、GUI或108列CSV保存。
 
-建议先查看帮助：
+### 第1步：插入设备并识别两个端口
+
+插入两只压力传感器后运行：
 
 ~~~bash
-PYTHONPATH=src python -m tangential.examples.dual_sensor --help
+python -m serial.tools.list_ports -v
+ls -l /dev/serial/by-id/
 ~~~
+
+优先选择 ``/dev/serial/by-id/`` 下两个不同的设备路径，因为它们通常不会随
+重插或重启改变。若该目录不存在，再根据 ``serial.tools.list_ports`` 的
+输出确认两只设备分别对应哪个 ``/dev/ttyUSB*`` 或 ``/dev/ttyACM*``。
+
+本机当前如果没有列出任何端口，说明设备尚未接入、USB未识别或串口驱动尚未
+创建，不能继续启动示例。
+
+### 第2步：设置本次运行使用的端口
+
+把下面两行中的 ``DEVICE_A_ID`` 和 ``DEVICE_B_ID`` 替换为第1步看到的真实文件名，
+再执行后续命令。例如，真实路径可能类似
+``/dev/serial/by-id/usb-FTDI_A1-if00-port0`` 和
+``/dev/serial/by-id/usb-FTDI_B2-if00-port0``；下面的名称只是示意：
+
+~~~bash
+PORT_A=/dev/serial/by-id/DEVICE_A_ID
+PORT_B=/dev/serial/by-id/DEVICE_B_ID
+printf 'A=%s\nB=%s\n' "$PORT_A" "$PORT_B"
+~~~
+
+不要把 ``<sensor-a>`` 或 ``<sensor-b>`` 原样输入命令，也不要把它们写进
+变量赋值。Bash会把尖括号解释成输入/输出重定向符号，从而产生
+``syntax error near unexpected token 'newline'``。只有替换成第1步实际查到的
+路径后，才能继续执行 ``printf`` 和启动命令。
+
+如果没有 ``by-id`` 路径，且已经确认端口映射，可以改成：
+
+~~~bash
+PORT_A=/dev/ttyUSB0
+PORT_B=/dev/ttyUSB1
+~~~
+
+两个变量必须对应不同物理设备。示例会解析符号链接，并在打开串口前拒绝
+两个变量最终指向同一物理串口。
+
+### 第3步：检查权限和端口占用
+
+~~~bash
+ls -l "$PORT_A" "$PORT_B"
+groups
+fuser "$PORT_A" "$PORT_B"
+~~~
+
+- ``ls`` 必须能找到两个路径。
+- 当前用户通常需要属于 ``dialout`` 组；若没有权限，可执行
+  ``sudo usermod -aG dialout "$USER"``，然后注销并重新登录。
+- ``fuser`` 没有输出通常表示端口空闲；若显示进程号，应先关闭正在占用
+  传感器的旧采集程序，不要让两个程序同时读取同一串口。
+
+### 第4步：启动双传感器示例
 
 从源码运行：
 
 ~~~bash
 PYTHONPATH=src python -m tangential.examples.dual_sensor \
-  --port-a /dev/serial/by-id/<sensor-a> \
-  --port-b /dev/serial/by-id/<sensor-b>
+  --port-a "$PORT_A" \
+  --port-b "$PORT_B"
 ~~~
 
 安装wheel后运行，不需要 ``PYTHONPATH``：
 
 ~~~bash
 python -m tangential.examples.dual_sensor \
-  --port-a /dev/serial/by-id/<sensor-a> \
-  --port-b /dev/serial/by-id/<sensor-b>
+  --port-a "$PORT_A" \
+  --port-b "$PORT_B"
 ~~~
 
-两个端口必须对应不同物理设备。程序会解析符号链接并在打开串口前拒绝相同
-物理端口。推荐使用 ``/dev/serial/by-id/...``，避免设备重插或重启后
-``/dev/ttyUSB*`` 编号互换。
+查看全部参数：
+
+~~~bash
+PYTHONPATH=src python -m tangential.examples.dual_sensor --help
+~~~
+
+### 第5步：确认输出并停止
+
+正常运行时每行同时显示A、B两路的端口、序号、ADC总和、CoP和角度，例如：
+
+~~~text
+A(...): seq=10 sum=12345 cop=(3.100,5.200) angle=42.00° | B(...): seq=9 sum=12001 cop=(2.900,5.000) angle=39.50°
+~~~
+
+正常输出应持续出现A、B两路的 ``seq``、ADC总和、CoP和角度，并且两路的
+``seq`` 会随着有效压力帧逐步增加。某一路显示 ``timeout`` 表示该路本次
+``read`` 在配置的等待时间内没有收到合法压力帧；它不表示 Bash 命令错误，
+可能原因包括端口选错、设备无响应、串口被占用、供电或USB带宽问题。偶发
+一次可以继续观察；持续出现时应回到第1步重新确认端口，并单独验证该设备。
+
+按 ``Ctrl+C`` 正常停止。示例会退出读取循环，并通过上下文管理器关闭A/B
+两路的读取线程、采集进程、IPC队列和串口；不要直接拔线代替正常退出。
 
 Python调用：
 
@@ -96,12 +169,12 @@ from tangential.examples.dual_sensor import run
 
 run(
     PressureConfig(
-        port="/dev/serial/by-id/<sensor-a>",
+        port="/dev/serial/by-id/DEVICE_A_ID",
         target_hz=200,
         frame_queue_size=256,
     ),
     PressureConfig(
-        port="/dev/serial/by-id/<sensor-b>",
+        port="/dev/serial/by-id/DEVICE_B_ID",
         target_hz=200,
         frame_queue_size=256,
     ),
@@ -112,6 +185,16 @@ run(
 一个设备的读取超时不会占用另一个设备的串口消费者。软件状态互相隔离，但
 USB控制器带宽、CPU调度和供电仍是共享硬件资源，实际帧率应分别验收。按
 ``Ctrl+C`` 退出时，两路进程、线程和串口都会通过上下文管理器关闭。
+
+### 常见错误
+
+| 现象 | 原因 | 处理方法 |
+| --- | --- | --- |
+| Bash报告 ``unexpected token newline`` | 原样复制了带 ``<...>`` 的占位符 | 按第1、2步设置真实 ``PORT_A``/``PORT_B`` |
+| ``No such file or directory`` | 设备未连接或端口名已变化 | 重新运行 ``serial.tools.list_ports -v`` |
+| ``Permission denied`` | 当前用户没有串口权限 | 加入 ``dialout`` 后重新登录 |
+| 提示两个传感器使用同一物理串口 | 两个路径相同，或两个符号链接指向同一设备 | 为A、B选择两个不同设备路径 |
+| 某一路持续 ``timeout`` | 端口选错、设备无响应、供电或USB带宽异常 | 单独运行最小示例验证该端口，再检查USB连接 |
 
 ## 命令行
 
