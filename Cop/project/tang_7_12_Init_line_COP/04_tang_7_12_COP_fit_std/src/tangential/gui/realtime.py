@@ -341,6 +341,7 @@ class RealTimePlot:
         self._is_slipping = False
         self._slip_motion_distance = 0.0
         self._slip_confidence = 0.0
+        self._angle_vector_magnitude = 0.0  # 当前角度实际使用的向量模长(cell)
         self._gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)  # 压力梯度(每帧由 main 传入)
         self._contact_init = False
         self._pzt_table_angle_deg = None     # Pressure Table 专用角度（invertY 视图）
@@ -606,7 +607,8 @@ class RealTimePlot:
                  motion_state=0,
                  is_slipping=False,
                  slip_motion_distance=0.0,
-                 slip_confidence=0.0):
+                 slip_confidence=0.0,
+                 angle_vector_magnitude=None):
         """提交一帧实时显示状态，并更新曲线历史缓存。
 
         Args:
@@ -631,6 +633,12 @@ class RealTimePlot:
             is_slipping: 当前是否处于滑移状态。
             slip_motion_distance: 短窗 CoP 位移，单位为 cell。
             slip_confidence: 压力斑块平移确认置信度，范围通常为 0..1。
+            angle_vector_magnitude: 当前 ``pzt_angle_deg`` 实际使用的方向向量
+                模长，单位为 cell。STICK 时为静态 CoP delta 模长，SLIP 时为
+                EMA 滑移向量模长；仅控制 Pressure Snapshot 红色箭头长度。
+                ``None`` 仅为直接调用 ``set_data`` 的旧代码提供兼容回退，
+                此时使用 ``hypot(cop_delta_x, cop_delta_y)``；完整采集会话会
+                始终显式传入处理器生成的模长。
 
         Returns:
             ``None``。
@@ -668,6 +676,11 @@ class RealTimePlot:
             self._is_slipping = bool(is_slipping)
             self._slip_motion_distance = float(slip_motion_distance)
             self._slip_confidence = float(slip_confidence)
+            self._angle_vector_magnitude = (
+                float(np.hypot(cop_delta_x, cop_delta_y))
+                if angle_vector_magnitude is None
+                else float(angle_vector_magnitude)
+            )
 
             angle_err = min(abs(pzt_angle_deg - force_angle_deg),
                            360 - abs(pzt_angle_deg - force_angle_deg))
@@ -768,6 +781,7 @@ class RealTimePlot:
             is_slipping = self._is_slipping
             slip_motion_distance = self._slip_motion_distance
             slip_confidence = self._slip_confidence
+            angle_vector_magnitude = self._angle_vector_magnitude
             contact_init = self._contact_init
             grad_arr = self._gradient_arr.copy()
             regions = list(self._regions)
@@ -795,9 +809,9 @@ class RealTimePlot:
         self._dir_txt_frc.setHtml(self._html(f'Force_Angle: {_fa:.1f}°', 'blue', fs))
         self._dir_txt_frc.setPos(0.75, 0.95)
 
-        # Pressure Table + Gradient 占据原 Magnitude 区域
-        # 此处只保留箭头几何，不持久化 magnitude 数据
-        pzt_arrow_len = min(max(np.hypot(cop_delta_x, cop_delta_y) * 0.5, 0.0), 0.65)
+        # Pressure Snapshot：方向沿用 pzt_angle，红箭头长度使用处理器实际
+        # 角度向量模长（STICK=静态CoP delta，SLIP=EMA滑移向量）。
+        pzt_arrow_len = min(max(angle_vector_magnitude * 0.5, 0.0), 0.65)
         self._update_arrow(self._mag_pzt, pzt_angle_deg, pzt_arrow_len, 'r')
         _force_fx = 0.0 if (force_fx_val is None or np.isnan(force_fx_val)) else force_fx_val
         _force_fy = 0.0 if (force_fy_val is None or np.isnan(force_fy_val)) else force_fy_val

@@ -88,6 +88,78 @@ class RealtimePlotTests(unittest.TestCase):
         self.assertIn("Sensor A", plot.win.windowTitle())
         plot.win.close()
 
+    def test_snapshot_pzt_length_uses_angle_vector_magnitude(self):
+        """显式模长优先于cop_delta，Direction仍为固定长度。"""
+        plot = RealTimePlot()
+        plot.set_data(
+            pzt_angle_deg=0.0,
+            force_angle_deg=0.0,
+            press_table_arr=np.ones(84),
+            total_press_val=84.0,
+            cop_curr_x=3.0,
+            cop_curr_y=5.0,
+            cop_base_x=2.0,
+            cop_base_y=4.0,
+            # 若仍误用hypot(cop_delta)，长度会被截断到0.65。
+            cop_delta_x=10.0,
+            cop_delta_y=10.0,
+            force_fx_val=0.0,
+            force_fy_val=0.0,
+            force_fz_val=0.0,
+            contact_init=True,
+            angle_vector_magnitude=0.4,
+        )
+        plot.update_all()
+
+        snapshot_x = np.asarray(plot._mag_pzt[0].xData, dtype=float)
+        snapshot_y = np.asarray(plot._mag_pzt[0].yData, dtype=float)
+        snapshot_length = float(np.hypot(
+            snapshot_x[-1] - snapshot_x[0],
+            snapshot_y[-1] - snapshot_y[0],
+        ))
+        self.assertAlmostEqual(snapshot_length, 0.2, places=7)
+
+        direction_x = np.asarray(plot._dir_pzt[0].xData, dtype=float)
+        direction_y = np.asarray(plot._dir_pzt[0].yData, dtype=float)
+        direction_length = float(np.hypot(
+            direction_x[-1] - direction_x[0],
+            direction_y[-1] - direction_y[0],
+        ))
+        self.assertAlmostEqual(direction_length, 0.45, places=7)
+        plot.win.close()
+
+    def test_snapshot_pzt_length_legacy_none_falls_back_to_cop_delta(self):
+        """旧调用未传模长时，Snapshot红箭头应回退到CoP delta模长。"""
+        plot = RealTimePlot()
+        plot.set_data(
+            pzt_angle_deg=90.0,
+            force_angle_deg=0.0,
+            press_table_arr=np.ones(84),
+            total_press_val=84.0,
+            cop_curr_x=3.0,
+            cop_curr_y=5.0,
+            cop_base_x=2.0,
+            cop_base_y=4.0,
+            cop_delta_x=0.3,
+            cop_delta_y=0.4,
+            force_fx_val=0.0,
+            force_fy_val=0.0,
+            force_fz_val=0.0,
+            contact_init=True,
+            # 模拟旧调用：省略 angle_vector_magnitude，默认值为 None。
+        )
+        plot.update_all()
+
+        snapshot_x = np.asarray(plot._mag_pzt[0].xData, dtype=float)
+        snapshot_y = np.asarray(plot._mag_pzt[0].yData, dtype=float)
+        snapshot_length = float(np.hypot(
+            snapshot_x[-1] - snapshot_x[0],
+            snapshot_y[-1] - snapshot_y[0],
+        ))
+        # hypot(0.3, 0.4) * 0.5 = 0.25。
+        self.assertAlmostEqual(snapshot_length, 0.25, places=7)
+        plot.win.close()
+
 
 if __name__ == "__main__":
     unittest.main()

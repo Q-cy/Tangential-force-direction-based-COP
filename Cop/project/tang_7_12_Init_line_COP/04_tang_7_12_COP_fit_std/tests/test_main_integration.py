@@ -19,9 +19,11 @@ from tangential.runtime.session import (
 class PlotStub:
     def __init__(self):
         self.frames = 0
+        self.last_kwargs = None
 
     def set_data(self, *args, **kwargs):
         self.frames += 1
+        self.last_kwargs = kwargs
 
     def append_full_data(self, *args, **kwargs):
         pass
@@ -249,6 +251,27 @@ class MainLoopIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(FakeForce.instances, [])
         self.assertTrue(FakePressure.instances[-1].closed)
+
+    def test_update_plot_forwards_angle_vector_magnitude(self):
+        """完整会话必须把处理器的方向向量模长交给GUI。"""
+        with tempfile.TemporaryDirectory() as directory:
+            plot = PlotStub()
+            config = FullApplicationConfig(
+                save_dir=directory,
+                model_path=os.path.join(directory, "missing.bin"),
+                force=ForceConfig(enabled=False),
+                target_fps=1000,
+                plot_fps=1000,
+            )
+            acquisition_loop(
+                plot,
+                config=config,
+                pressure_factory=FakePressure,
+                force_factory=FakeForce,
+            )
+        self.assertIsNotNone(plot.last_kwargs)
+        self.assertIn("angle_vector_magnitude", plot.last_kwargs)
+        self.assertIsInstance(plot.last_kwargs["angle_vector_magnitude"], float)
 
     def test_force_first_and_one_to_one_matching(self):
         FakePressure.initial_delay = 0.02

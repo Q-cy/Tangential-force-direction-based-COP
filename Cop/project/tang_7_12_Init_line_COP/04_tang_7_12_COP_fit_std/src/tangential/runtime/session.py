@@ -841,6 +841,7 @@ class FullAcquisitionSession:
             is_slipping=sample.is_slipping,
             slip_motion_distance=sample.slip_motion_distance,
             slip_confidence=sample.slip_confidence,
+            angle_vector_magnitude=sample.angle_vector_magnitude,
         )
         if sample.contact:
             self.plot.append_full_data(

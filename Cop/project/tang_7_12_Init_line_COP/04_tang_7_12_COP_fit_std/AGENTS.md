@@ -196,6 +196,13 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
   禁止改成异步“稍后重置”任务。短于窗口和进入滞回要求的运动可能不会被识别，
   这是当前算法的抗噪检测下限；如需退出后保留历史方向，应由上层事件记录实现，
   不得改变 ``is_slipping`` 表示当前状态的语义。
+- GUI ``Direction`` 面板的 PZT 箭头保持固定长度，只表示 ``sample.angle``；
+  ``Pressure Snapshot`` 红色 PZT 箭头方向也使用 ``sample.angle``，长度必须来自
+  ``sample.angle_vector_magnitude``（STICK=静态 CoP delta 模长，SLIP=EMA滑移
+  向量模长），不得重新用 ``hypot(sample.dx, sample.dy)`` 计算。Snapshot 蓝色
+  力箭头和 Pressure Table 的 origin/current CoP 几何保持原语义。只有旧代码
+  直接调用 ``RealTimePlot.set_data`` 且 ``angle_vector_magnitude=None`` 时允许
+  回退到 ``hypot(cop_delta_x, cop_delta_y)``；正式会话必须显式传 sample 字段。
 - 异常、Ctrl+C、窗口关闭和无数据退出必须释放停止事件、线程、进程、串口、CSV 和 Qt 资源。
 
 ## 6. 修改路由

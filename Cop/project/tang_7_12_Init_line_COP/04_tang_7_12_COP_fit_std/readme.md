@@ -389,6 +389,19 @@ CLI 显式参数 > 显式传入的配置对象 > TANGENTIAL_* 环境默认 > con
 - ``angle_deadband`` 以下的方向向量输出 0。无接触或 CoP 不可用时完整 reset，
   状态为 ``NO_CONTACT``；接触但未滑移为 ``STICK``。
 
+实时 GUI 的两个方向面板语义不同：
+
+- ``Direction`` 的红色 PZT 箭头保持固定显示长度，只表达 ``sample.angle``
+  的方向，不表达位移或力的大小。
+- ``Pressure Snapshot`` 的红色 PZT 箭头同样沿 ``sample.angle``，但长度来自
+  ``sample.angle_vector_magnitude``：STICK 时是静态 CoP delta 模长，SLIP 时
+  是 EMA 滑移向量模长。显示时乘 0.5 并限制到 0.65，避免超出面板。
+  正式完整采集路径始终显式传入该字段；仅当旧代码直接调用
+  ``RealTimePlot.set_data()`` 且未传该参数（``None``）时，才回退到 CoP delta
+  模长，以保持旧调用的显示行为。
+- ``Pressure Snapshot`` 蓝色箭头仍使用六维力 Fx/Fy 的模长；Pressure Table
+  中实际 origin、当前 CoP、delta 和区域几何不受上述显示缩放影响。
+
 ### 滑移方向与 CoP 重锚定时序
 
 这里没有异步、延时执行的“重置 CoP 任务”。滑移状态、方向更新和重锚定都在
