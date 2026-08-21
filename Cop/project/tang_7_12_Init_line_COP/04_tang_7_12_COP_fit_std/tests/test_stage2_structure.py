@@ -38,6 +38,7 @@ class StructureAndConfigTests(unittest.TestCase):
             "runtime/synchronization.py",
             "examples/minimal.py",
             "examples/full.py",
+            "examples/dual_pressure.py",
             "tools/training.py",
             "tools/plotting.py",
             "application.py",
@@ -105,10 +106,11 @@ class StructureAndConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_example_modules_are_importable_without_running_hardware(self):
-        from tangential.examples import full, minimal
+        from tangential.examples import dual_pressure, full, minimal
 
         self.assertTrue(callable(minimal.run))
         self.assertTrue(callable(full.main))
+        self.assertTrue(callable(dual_pressure.run))
         self.assertTrue(callable(tangential.run_application))
 
     def test_low_level_defaults_come_from_grouped_configs(self):

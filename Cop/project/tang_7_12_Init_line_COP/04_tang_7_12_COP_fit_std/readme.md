@@ -56,6 +56,34 @@ PYTHONPATH=src python -m tangential.cli app --help
 
 minimal 需要压力传感器；full 需要完整 GUI 依赖和实际硬件。源码运行不依赖预编译 .so，wheel 用户不需要 PYTHONPATH。
 
+### 同时连接两个压力传感器
+
+两个设备必须使用不同物理串口，推荐使用稳定的 ``/dev/serial/by-id/...``
+路径，避免重启后 ``ttyUSB`` 编号变化：
+
+~~~bash
+PYTHONPATH=src python -m tangential.examples.dual_pressure \
+  --port-a /dev/serial/by-id/<sensor-a> \
+  --port-b /dev/serial/by-id/<sensor-b>
+~~~
+
+wheel安装后去掉 ``PYTHONPATH=src`` 即可。该示例为每个传感器创建独立的
+采集进程、IPC队列、读取线程、CoP状态机和标定处理器；一个设备的读取等待
+不会占用另一个设备的串口消费者。软件可以隔离实例状态，但两只设备共享的
+USB控制器带宽和系统调度仍可能影响实际帧率，应通过各自时序统计验收。
+
+在代码中也可以为两路设备分别创建配置，参数互不共享：
+
+~~~python
+from tangential import PressureConfig
+from tangential.examples.dual_pressure import run
+
+run(
+    PressureConfig(port="/dev/serial/by-id/<sensor-a>", target_hz=200),
+    PressureConfig(port="/dev/serial/by-id/<sensor-b>", target_hz=200),
+)
+~~~
+
 ## 命令行
 
 安装 wheel 后使用统一命令：
@@ -194,6 +222,11 @@ CLI 显式参数 > 显式传入的配置对象 > TANGENTIAL_* 环境默认 > con
 ~~~
 
 协议帧头、CRC、固定 12×7/84 通道布局、固定 108 列 CSV 和设备帧长度属于协议不变量，不通过配置修改。
+
+直接修改源码 ``config.py`` 中的默认值，会影响之后在该源码环境中新建且未
+显式覆盖的配置对象。它不会修改已经安装的wheel；wheel用户应传入配置对象、
+设置环境变量，或在修改源码后重新构建并安装wheel。运行中的已有配置对象也
+不会因文件随后被修改而自动变化。
 
 ## 数据和时序不变量
 

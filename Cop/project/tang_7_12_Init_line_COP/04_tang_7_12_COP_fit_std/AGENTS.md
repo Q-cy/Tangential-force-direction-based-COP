@@ -53,6 +53,7 @@
 │   │   └── plotting.py               # CSV 解析、绘图和完整分析
 │   ├── examples/
 │   │   ├── minimal.py                # 唯一最小压力采集循环
+│   │   ├── dual_pressure.py          # 两只压力传感器的隔离并发采集示例
 │   │   └── full.py                   # 调用 run_application 的完整示例
 │   └── resources/
 │       └── fit_coefs.bin              # package resource 静态模型
@@ -72,6 +73,11 @@ runtime、acquisition、sensors、processing、storage 是运行时核心实现�
 - train_model、TrainingResult、plot_csv、plot_full_analysis、PlotResult、run_application。
 
 examples/minimal.py 是唯一最小循环；CLI example 必须调用它，不得在 cli.py 复制 while 循环。examples/full.py 只调用公开 run_application；CLI app 必须复用该入口。plot 和 fit 必须惰性导入 tools，基础 import tangential 不得加载 Qt、PyQtGraph 或 Matplotlib。
+
+examples/dual_pressure.py 展示多压力设备用法：每个 ``TangentialSensorAPI``
+必须拥有独立 ``PressureConfig``、串口、采集进程、IPC队列、读取线程和处理器；
+启动前必须拒绝指向同一物理串口的配置。不要为多设备引入共享传感器实例、
+共享CoP状态机或单一阻塞读取循环。
 
 公开 API 的签名、输入、输出、异常和资源生命周期必须有文档字符串。新增用户可调用符号时同步更新 api.py、__init__.py 和测试。
 
@@ -97,6 +103,10 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
 ~~~
 
 协议帧头、CRC、固定 12×7/84 通道布局、固定帧长度和 108 列 CSV 属于协议不变量，不复制到 config，也不在调用方重新定义。
+
+修改 ``config.py`` 默认值只影响之后从该源码或重新构建wheel创建的默认配置；
+已经安装的旧wheel和已经构造的对象不会自动更新。用户代码优先显式传入分类
+配置对象，避免依赖全局默认值；多传感器场景必须为每个实例分别构造配置。
 
 ## 5. 数据和时序不变量
 
