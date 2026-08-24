@@ -326,54 +326,6 @@ run_application(config)
 以下表格覆盖当前 ``tangential.__all__`` 的全部33个公共名称。
 
 #### 采集、处理与终端输出
-<table>
-<thead>
-<tr>
-<th style="min-width:180px">API</th>
-<th>作用</th>
-<th>主要输入</th>
-<th>返回值或输出</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td style="white-space:normal"><code>TangentialSensor</code></td>
-<td style="white-space:normal">推荐的单压力传感器高级 API；是<code>TangentialSensorAPI</code> 的别名，支持上下文管理器</td>
-<td style="white-space:normal"><code>PressureConfig</code>、可选 <code>ProcessingConfig</code>、模型路径</td>
-<td style="white-space:normal"><code>read(timeout_s)</code> 返回 <code>TangentialSample</code> 或 <code>None</code></td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>TangentialSensorAPI</code></td>
-<td style="white-space:normal">管理压力设备生命周期并串联解码、CoP、滑移和标定</td>
-<td style="white-space:normal">传感器/工厂注入、压力配置、处理配置</td>
-<td style="white-space:normal">逐帧<code>TangentialSample</code>；<code>close()</code> 释放设备</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>TangentialSample</code></td>
-<td style="white-space:normal">保存一帧压力数据和全部计算结果</td>
-<td style="white-space:normal">通常由处理器创建，不建议用户手工构造</td>
-<td style="white-space:normal">ADC、CoP、角度、标定、时间戳、区域和滑移字段</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>TangentialFrameProcessor</code></td>
-<td style="white-space:normal">对已有84通道 ADC 做单帧计算，不负责串口</td>
-<td style="white-space:normal"><code>raw</code>、<code>ProcessingConfig</code>、可选标定模型</td>
-<td style="white-space:normal"><code>process()</code> 返回 <code>TangentialSample</code></td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>FixedTerminalRenderer</code></td>
-<td style="white-space:normal">在终端固定位置刷新12×7矩阵和指标</td>
-<td style="white-space:normal">输出流、<code>TangentialSample</code></td>
-<td style="white-space:normal"><code>render()</code> 写入并刷新终端，同时返回文本</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>format_terminal_sample</code></td>
-<td style="white-space:normal">将样本格式化为固定布局文本，不直接采集</td>
-<td style="white-space:normal"><code>TangentialSample</code></td>
-<td style="white-space:normal"><code>str</code></td>
-</tr>
-</tbody>
-</table>
 
 <table>
 <thead>
@@ -387,37 +339,37 @@ run_application(config)
 <tbody>
 <tr>
 <td style="white-space:normal"><code>TangentialSensor</code></td>
-<td style="white-space:normal">推荐的单压力传感器高级 API；是<code>TangentialSensorAPI</code> 的别名，支持上下文管理器</td>
+<td style="white-space:normal">串口采集 → 解码 → 单帧处理 → TangentialSample</td>
 <td style="white-space:normal"><code>PressureConfig</code>、可选 <code>ProcessingConfig</code>、模型路径</td>
 <td style="white-space:normal"><code>read(timeout_s)</code> 返回 <code>TangentialSample</code> 或 <code>None</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>TangentialSensorAPI</code></td>
-<td style="white-space:normal">管理压力设备生命周期并串联解码、CoP、滑移和标定</td>
+<td style="white-space:normal">压力设备生命周期 → 调用 TangentialFrameProcessor → TangentialSample</td>
 <td style="white-space:normal">传感器/工厂注入、压力配置、处理配置</td>
 <td style="white-space:normal">逐帧<code>TangentialSample</code>；<code>close()</code> 释放设备</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>TangentialSample</code></td>
-<td style="white-space:normal">保存一帧压力数据和全部计算结果</td>
+<td style="white-space:normal">原始帧与处理结果 → 统一封装 → 单帧数据对象</td>
 <td style="white-space:normal">通常由处理器创建，不建议用户手工构造</td>
 <td style="white-space:normal">ADC、CoP、角度、标定、时间戳、区域和滑移字段</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>TangentialFrameProcessor</code></td>
-<td style="white-space:normal">对已有84通道 ADC 做单帧计算，不负责串口</td>
+<td style="white-space:normal">84通道 ADC → CoP/梯度/滑移/标定 → TangentialSample</td>
 <td style="white-space:normal"><code>raw</code>、<code>ProcessingConfig</code>、可选标定模型</td>
 <td style="white-space:normal"><code>process()</code> 返回 <code>TangentialSample</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>FixedTerminalRenderer</code></td>
-<td style="white-space:normal">在终端固定位置刷新12×7矩阵和指标</td>
+<td style="white-space:normal">TangentialSample → 固定布局文本 → 原位刷新终端</td>
 <td style="white-space:normal">输出流、<code>TangentialSample</code></td>
 <td style="white-space:normal"><code>render()</code> 写入并刷新终端，同时返回文本</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>format_terminal_sample</code></td>
-<td style="white-space:normal">将样本格式化为固定布局文本，不直接采集</td>
+<td style="white-space:normal">TangentialSample → 12×7矩阵与指标 → str</td>
 <td style="white-space:normal"><code>TangentialSample</code></td>
 <td style="white-space:normal"><code>str</code></td>
 </tr>
@@ -438,49 +390,49 @@ run_application(config)
 <tbody>
 <tr>
 <td style="white-space:normal"><code>FitCalibrationModel</code></td>
-<td style="white-space:normal">加载内置或外部<code>fit_coefs.bin</code>，预测 Fx/Fy/Fz</td>
+<td style="white-space:normal">fit_coefs.bin → dx/dy/ADC总和 → Fx/Fy/Fz</td>
 <td style="white-space:normal"><code>from_default()</code> 或 <code>from_path(path)</code>；<code>predict(dx, dy, total, dim)</code></td>
 <td style="white-space:normal">三个标定力分量及模型状态</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>PRSensorAngle</code></td>
-<td style="white-space:normal">动态阈值、接触状态、CoP、origin、角度、梯度和区域计算</td>
+<td style="white-space:normal">84通道 ADC → 阈值/接触/CoP/区域计算 → 角度与梯度</td>
 <td style="white-space:normal">84通道 ADC、<code>CopConfig</code></td>
 <td style="white-space:normal">CoP/角度/梯度/状态；高级用户使用</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>PressureSensor</code></td>
-<td style="white-space:normal">底层 PZT 串口请求、帧解析、CRC和时序统计</td>
+<td style="white-space:normal">发送请求 → 接收/校验/解码压力帧 → 84通道 ADC与时间戳</td>
 <td style="white-space:normal">串口、周期、超时、队列等</td>
 <td style="white-space:normal"><code>read_frame()</code> 帧字典、<code>decode()</code> 84通道数据</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>SlipDetector</code></td>
-<td style="white-space:normal">独立的逐帧全局滑移状态机</td>
+<td style="white-space:normal">压力矩阵与CoP序列 → 位移/相关性/滞回判断 → SlipResult</td>
 <td style="white-space:normal">压力矩阵、CoP、接触/ready状态、<code>SlipConfig</code></td>
 <td style="white-space:normal"><code>SlipResult</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>SlipResult</code></td>
-<td style="white-space:normal">不可变的单帧滑移检测结果</td>
+<td style="white-space:normal">滑移检测结果 → 封装状态/方向/置信度 → 不可变对象</td>
 <td style="white-space:normal">由<code>SlipDetector</code> 生成</td>
 <td style="white-space:normal">状态、位移、置信度、方向、斑块平移和重锚定标志</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>TangentialMotionState</code></td>
-<td style="white-space:normal">滑移状态枚举</td>
+<td style="white-space:normal">接触与滑移判断 → NO_CONTACT/STICK/SLIP</td>
 <td style="white-space:normal">无</td>
 <td style="white-space:normal"><code>NO_CONTACT</code>、<code>STICK</code>、<code>SLIP</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>compute_vector_angle</code></td>
-<td style="white-space:normal">计算二维向量方向角</td>
+<td style="white-space:normal">二维向量 x/y → atan2角度 → [0, 360)度</td>
 <td style="white-space:normal"><code>x</code>、<code>y</code></td>
 <td style="white-space:normal"><code>[0, 360)</code> 度角</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>angle_difference</code></td>
-<td style="white-space:normal">计算两个方向角的最小环绕差</td>
+<td style="white-space:normal">两个方向角 → 环绕差计算 → [0, 180]度</td>
 <td style="white-space:normal">两个角度</td>
 <td style="white-space:normal"><code>[0, 180]</code> 度差</td>
 </tr>
@@ -501,13 +453,13 @@ run_application(config)
 <tbody>
 <tr>
 <td style="white-space:normal"><code>run_application</code></td>
-<td style="white-space:normal">启动一路完整采集、CSV和实时 GUI</td>
+<td style="white-space:normal">FullApplicationConfig → 设备/会话/GUI/CSV → 单路完整应用</td>
 <td style="white-space:normal"><code>FullApplicationConfig</code></td>
 <td style="white-space:normal">阻塞运行至窗口关闭；正常退出返回0并输出CSV/分析图</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>run_dual_application</code></td>
-<td style="white-space:normal">在同一 Qt 应用中启动两路相互隔离的完整采集</td>
+<td style="white-space:normal">两份独立配置 → 两路会话与GUI → 两套CSV/分析图</td>
 <td style="white-space:normal"><code>config_a</code>、<code>config_b</code></td>
 <td style="white-space:normal">正常退出返回0，并生成两个GUI、两套CSV和分析图</td>
 </tr>
@@ -528,73 +480,73 @@ run_application(config)
 <tbody>
 <tr>
 <td style="white-space:normal"><code>FullApplicationConfig</code></td>
-<td style="white-space:normal">聚合完整应用的全部分类配置</td>
+<td style="white-space:normal">分类配置对象 → 组合与校验 → 完整应用配置</td>
 <td style="white-space:normal">pressure、force、processing、calibration、sync、output、gui</td>
 <td style="white-space:normal">经校验的完整配置对象</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>PressureConfig</code></td>
-<td style="white-space:normal">压力串口、请求频率、超时和队列配置</td>
+<td style="white-space:normal">端口/频率/超时/队列 → 校验 → 压力采集配置</td>
 <td style="white-space:normal">端口及轮询参数</td>
 <td style="white-space:normal">压力设备配置；<code>period_s</code> 返回周期</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>ForceConfig</code></td>
-<td style="white-space:normal">六维力启用、串口、频率和软件校零配置</td>
+<td style="white-space:normal">启用开关/端口/频率/校零参数 → 校验 → 六维力配置</td>
 <td style="white-space:normal">端口、频率、校零样本/超时</td>
 <td style="white-space:normal">六维力设备配置；<code>enabled=False</code> 禁用通道</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>CopConfig</code></td>
-<td style="white-space:normal">CoP、动态阈值、接触、精修和区域参数</td>
+<td style="white-space:normal">阈值/帧数/区域参数 → 校验 → CoP算法配置</td>
 <td style="white-space:normal">各阈值、帧数和区域参数</td>
 <td style="white-space:normal">CoP配置；<code>as_kwargs()</code> 返回算法参数字典</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>ProcessingConfig</code></td>
-<td style="white-space:normal">组合单帧处理模式、滤波、CoP和滑移参数</td>
+<td style="white-space:normal">处理模式/滤波/CoP/滑移参数 → 组合 → 单帧处理配置</td>
 <td style="white-space:normal">cal_dim、region_mode、cop、slip等</td>
 <td style="white-space:normal">单帧处理配置</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>SlipConfig</code></td>
-<td style="white-space:normal">控制滑移窗口、判定阈值、滞回和方向平滑</td>
+<td style="white-space:normal">窗口/阈值/滞回/平滑参数 → 校验 → 滑移检测配置</td>
 <td style="white-space:normal">12项滑移参数</td>
 <td style="white-space:normal">经<code>validate()</code> 校验的滑移配置</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>CalibrationConfig</code></td>
-<td style="white-space:normal">选择内置模型或外部模型</td>
+<td style="white-space:normal">模型路径 → 选择内置或外部模型 → 标定配置</td>
 <td style="white-space:normal"><code>model_path</code></td>
 <td style="white-space:normal">模型路径配置；<code>None</code> 使用内置模型</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>SyncConfig</code></td>
-<td style="white-space:normal">主循环、GUI刷新、缓存和压力—力匹配窗口</td>
+<td style="white-space:normal">循环/刷新/缓存/匹配窗口 → 校验 → 同步配置</td>
 <td style="white-space:normal">频率、15 ms窗口等</td>
 <td style="white-space:normal">同步配置</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>OutputConfig</code></td>
-<td style="white-space:normal">指定CSV输出目录</td>
+<td style="white-space:normal">保存目录 → 指定CSV与分析图位置 → 输出配置</td>
 <td style="white-space:normal"><code>save_dir</code></td>
 <td style="white-space:normal">输出配置</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>GuiConfig</code></td>
-<td style="white-space:normal">控制窗口、历史长度、热图和区域显示</td>
+<td style="white-space:normal">窗口/历史/热图/区域参数 → 校验 → GUI配置</td>
 <td style="white-space:normal">GUI参数</td>
 <td style="white-space:normal">GUI配置</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>TrainingConfig</code></td>
-<td style="white-space:normal">定义离线标定训练任务</td>
+<td style="white-space:normal">训练数据/模型类型/输出选项 → 统一封装 → train_model输入</td>
 <td style="white-space:normal">XY/Z CSV、模型类型、输出路径等</td>
 <td style="white-space:normal">传给<code>train_model</code> 的训练配置</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>PlotConfig</code></td>
-<td style="white-space:normal">定义离线CSV绘图任务</td>
+<td style="white-space:normal">CSV/列/行范围/输出选项 → 统一封装 → plot_csv输入</td>
 <td style="white-space:normal">文件、列、行范围、模式和输出路径</td>
 <td style="white-space:normal">传给绘图API的配置</td>
 </tr>
@@ -615,31 +567,31 @@ run_application(config)
 <tbody>
 <tr>
 <td style="white-space:normal"><code>TrainingResult</code></td>
-<td style="white-space:normal">描述训练产物和评估结果</td>
+<td style="white-space:normal">训练产物与指标 → 统一封装 → 训练结果对象</td>
 <td style="white-space:normal">由<code>train_model</code> 创建</td>
 <td style="white-space:normal">模型路径、评估图、指标和写回信息</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>train_model</code></td>
-<td style="white-space:normal">从XY和Z训练CSV拟合标定模型</td>
+<td style="white-space:normal">TrainingConfig → 读取CSV并拟合 → 模型/评估结果</td>
 <td style="white-space:normal"><code>TrainingConfig</code></td>
 <td style="white-space:normal"><code>TrainingResult</code>；默认不修改输入CSV</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>PlotResult</code></td>
-<td style="white-space:normal">描述离线绘图产物</td>
+<td style="white-space:normal">绘图产物与处理信息 → 统一封装 → 绘图结果对象</td>
 <td style="white-space:normal">由绘图函数创建</td>
 <td style="white-space:normal">图片、分析文件和处理信息</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>plot_csv</code></td>
-<td style="white-space:normal">按CSV真实表头绘制指定列和范围</td>
+<td style="white-space:normal">PlotConfig → 按表头读取并绘图 → PlotResult</td>
 <td style="white-space:normal"><code>PlotConfig</code></td>
 <td style="white-space:normal"><code>PlotResult</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>plot_full_analysis</code></td>
-<td style="white-space:normal">生成完整采集数据的综合分析图</td>
+<td style="white-space:normal">完整CSV与绘图配置 → 综合分析 → PlotResult</td>
 <td style="white-space:normal"><code>PlotConfig</code> 或完整分析参数</td>
 <td style="white-space:normal"><code>PlotResult</code></td>
 </tr>
@@ -1024,14 +976,14 @@ export TANGENTIAL_MODEL_PATH=/path/to/fit_coefs.bin
 </tr>
 <tr>
 <td style="white-space:normal"><code>enter_frames</code></td>
-<td style="white-space:normal"><code>3</code>；整数&gt;0，窗口</td>
+<td style="white-space:normal"><code>3</code>；整数>0，窗口</td>
 <td style="white-space:normal">连续证据要求更久，降低瞬态误报、增加延迟</td>
 <td style="white-space:normal">更快进入SLIP，但抗噪降低</td>
 <td style="white-space:normal"><code>TANGENTIAL_SLIP_ENTER_FRAMES</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>exit_frames</code></td>
-<td style="white-space:normal"><code>8</code>；整数&gt;0，窗口</td>
+<td style="white-space:normal"><code>8</code>；整数>0，窗口</td>
 <td style="white-space:normal">短暂停顿不会立即退出，方向保持更稳</td>
 <td style="white-space:normal">停止后更快回到STICK</td>
 <td style="white-space:normal"><code>TANGENTIAL_SLIP_EXIT_FRAMES</code></td>
