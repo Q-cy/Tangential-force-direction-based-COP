@@ -203,13 +203,43 @@ run(
 
 ### 常见错误
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">现象</span> | 原因 | 处理方法 |
-| --- | --- | --- |
-| Bash报告 ``unexpected token newline`` | 原样复制了带 ``<...>`` 的占位符 | 按第1、2步设置真实 ``PORT_A``/``PORT_B`` |
-| ``No such file or directory`` | 设备未连接或端口名已变化 | 重新运行 ``serial.tools.list_ports -v`` |
-| ``Permission denied`` | 当前用户没有串口权限 | 加入 ``dialout`` 后重新登录 |
-| 提示两个传感器使用同一物理串口 | 两个路径相同，或两个符号链接指向同一设备 | 为A、B选择两个不同设备路径 |
-| 某一路窗口持续无数据 | 端口选错、设备无响应、供电或USB带宽异常 | 单独运行最小示例验证该端口，再检查USB连接 |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">现象</th>
+<th>原因</th>
+<th>处理方法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bash报告<code>unexpected token newline</code></td>
+<td>原样复制了带<code>&lt;...&gt;</code> 的占位符</td>
+<td>按第1、2步设置真实<code>PORT_A</code>/<code>PORT_B</code></td>
+</tr>
+<tr>
+<td><code>No such file or directory</code></td>
+<td>设备未连接或端口名已变化</td>
+<td>重新运行<code>serial.tools.list_ports -v</code></td>
+</tr>
+<tr>
+<td><code>Permission denied</code></td>
+<td>当前用户没有串口权限</td>
+<td>加入<code>dialout</code> 后重新登录</td>
+</tr>
+<tr>
+<td>提示两个传感器使用同一物理串口</td>
+<td>两个路径相同，或两个符号链接指向同一设备</td>
+<td>为A、B选择两个不同设备路径</td>
+</tr>
+<tr>
+<td>某一路窗口持续无数据</td>
+<td>端口选错、设备无响应、供电或USB带宽异常</td>
+<td>单独运行最小示例验证该端口，再检查USB连接</td>
+</tr>
+</tbody>
+</table>
 
 ## 命令行
 
@@ -332,97 +362,494 @@ run_application(config)
 以下表格覆盖当前 ``tangential.__all__`` 的全部33个公共名称。
 
 #### 采集、处理与终端输出
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">API</th>
+<th>作用</th>
+<th>主要输入</th>
+<th>返回值或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TangentialSensor</code></td>
+<td>推荐的单压力传感器高级 API；是<code>TangentialSensorAPI</code> 的别名，支持上下文管理器</td>
+<td><code>PressureConfig</code>、可选 <code>ProcessingConfig</code>、模型路径</td>
+<td><code>read(timeout_s)</code> 返回 <code>TangentialSample</code> 或 <code>None</code></td>
+</tr>
+<tr>
+<td><code>TangentialSensorAPI</code></td>
+<td>管理压力设备生命周期并串联解码、CoP、滑移和标定</td>
+<td>传感器/工厂注入、压力配置、处理配置</td>
+<td>逐帧<code>TangentialSample</code>；<code>close()</code> 释放设备</td>
+</tr>
+<tr>
+<td><code>TangentialSample</code></td>
+<td>保存一帧压力数据和全部计算结果</td>
+<td>通常由处理器创建，不建议用户手工构造</td>
+<td>ADC、CoP、角度、标定、时间戳、区域和滑移字段</td>
+</tr>
+<tr>
+<td><code>TangentialFrameProcessor</code></td>
+<td>对已有84通道 ADC 做单帧计算，不负责串口</td>
+<td><code>raw</code>、<code>ProcessingConfig</code>、可选标定模型</td>
+<td><code>process()</code> 返回 <code>TangentialSample</code></td>
+</tr>
+<tr>
+<td><code>FixedTerminalRenderer</code></td>
+<td>在终端固定位置刷新12×7矩阵和指标</td>
+<td>输出流、<code>TangentialSample</code></td>
+<td><code>render()</code> 写入并刷新终端，同时返回文本</td>
+</tr>
+<tr>
+<td><code>format_terminal_sample</code></td>
+<td>将样本格式化为固定布局文本，不直接采集</td>
+<td><code>TangentialSample</code></td>
+<td><code>str</code></td>
+</tr>
+</tbody>
+</table>
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">API</span> | 作用 | 主要输入 | 返回值或输出 |
-| --- | --- | --- | --- |
-| ``TangentialSensor`` | 推荐的单压力传感器高级 API；是 ``TangentialSensorAPI`` 的别名，支持上下文管理器 | ``PressureConfig``、可选 ``ProcessingConfig``、模型路径 | ``read(timeout_s)`` 返回 ``TangentialSample`` 或 ``None`` |
-| ``TangentialSensorAPI`` | 管理压力设备生命周期并串联解码、CoP、滑移和标定 | 传感器/工厂注入、压力配置、处理配置 | 逐帧 ``TangentialSample``；``close()`` 释放设备 |
-| ``TangentialSample`` | 保存一帧压力数据和全部计算结果 | 通常由处理器创建，不建议用户手工构造 | ADC、CoP、角度、标定、时间戳、区域和滑移字段 |
-| ``TangentialFrameProcessor`` | 对已有84通道 ADC 做单帧计算，不负责串口 | ``raw``、``ProcessingConfig``、可选标定模型 | ``process()`` 返回 ``TangentialSample`` |
-| ``FixedTerminalRenderer`` | 在终端固定位置刷新12×7矩阵和指标 | 输出流、``TangentialSample`` | ``render()`` 写入并刷新终端，同时返回文本 |
-| ``format_terminal_sample`` | 将样本格式化为固定布局文本，不直接采集 | ``TangentialSample`` | ``str`` |
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">API</th>
+<th>作用</th>
+<th>主要输入</th>
+<th>返回值或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TangentialSensor</code></td>
+<td>推荐的单压力传感器高级 API；是<code>TangentialSensorAPI</code> 的别名，支持上下文管理器</td>
+<td><code>PressureConfig</code>、可选 <code>ProcessingConfig</code>、模型路径</td>
+<td><code>read(timeout_s)</code> 返回 <code>TangentialSample</code> 或 <code>None</code></td>
+</tr>
+<tr>
+<td><code>TangentialSensorAPI</code></td>
+<td>管理压力设备生命周期并串联解码、CoP、滑移和标定</td>
+<td>传感器/工厂注入、压力配置、处理配置</td>
+<td>逐帧<code>TangentialSample</code>；<code>close()</code> 释放设备</td>
+</tr>
+<tr>
+<td><code>TangentialSample</code></td>
+<td>保存一帧压力数据和全部计算结果</td>
+<td>通常由处理器创建，不建议用户手工构造</td>
+<td>ADC、CoP、角度、标定、时间戳、区域和滑移字段</td>
+</tr>
+<tr>
+<td><code>TangentialFrameProcessor</code></td>
+<td>对已有84通道 ADC 做单帧计算，不负责串口</td>
+<td><code>raw</code>、<code>ProcessingConfig</code>、可选标定模型</td>
+<td><code>process()</code> 返回 <code>TangentialSample</code></td>
+</tr>
+<tr>
+<td><code>FixedTerminalRenderer</code></td>
+<td>在终端固定位置刷新12×7矩阵和指标</td>
+<td>输出流、<code>TangentialSample</code></td>
+<td><code>render()</code> 写入并刷新终端，同时返回文本</td>
+</tr>
+<tr>
+<td><code>format_terminal_sample</code></td>
+<td>将样本格式化为固定布局文本，不直接采集</td>
+<td><code>TangentialSample</code></td>
+<td><code>str</code></td>
+</tr>
+</tbody>
+</table>
 
 #### 算法、模型与底层压力驱动
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">API</span> | 作用 | 主要输入 | 返回值或输出 |
-| --- | --- | --- | --- |
-| ``FitCalibrationModel`` | 加载内置或外部 ``fit_coefs.bin``，预测 Fx/Fy/Fz | ``from_default()`` 或 ``from_path(path)``；``predict(dx, dy, total, dim)`` | 三个标定力分量及模型状态 |
-| ``PRSensorAngle`` | 动态阈值、接触状态、CoP、origin、角度、梯度和区域计算 | 84通道 ADC、``CopConfig`` | CoP/角度/梯度/状态；高级用户使用 |
-| ``PressureSensor`` | 底层 PZT 串口请求、帧解析、CRC和时序统计 | 串口、周期、超时、队列等 | ``read_frame()`` 帧字典、``decode()`` 84通道数据 |
-| ``SlipDetector`` | 独立的逐帧全局滑移状态机 | 压力矩阵、CoP、接触/ready状态、``SlipConfig`` | ``SlipResult`` |
-| ``SlipResult`` | 不可变的单帧滑移检测结果 | 由 ``SlipDetector`` 生成 | 状态、位移、置信度、方向、斑块平移和重锚定标志 |
-| ``TangentialMotionState`` | 滑移状态枚举 | 无 | ``NO_CONTACT``、``STICK``、``SLIP`` |
-| ``compute_vector_angle`` | 计算二维向量方向角 | ``x``、``y`` | ``[0, 360)`` 度角 |
-| ``angle_difference`` | 计算两个方向角的最小环绕差 | 两个角度 | ``[0, 180]`` 度差 |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">API</th>
+<th>作用</th>
+<th>主要输入</th>
+<th>返回值或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FitCalibrationModel</code></td>
+<td>加载内置或外部<code>fit_coefs.bin</code>，预测 Fx/Fy/Fz</td>
+<td><code>from_default()</code> 或 <code>from_path(path)</code>；<code>predict(dx, dy, total, dim)</code></td>
+<td>三个标定力分量及模型状态</td>
+</tr>
+<tr>
+<td><code>PRSensorAngle</code></td>
+<td>动态阈值、接触状态、CoP、origin、角度、梯度和区域计算</td>
+<td>84通道 ADC、<code>CopConfig</code></td>
+<td>CoP/角度/梯度/状态；高级用户使用</td>
+</tr>
+<tr>
+<td><code>PressureSensor</code></td>
+<td>底层 PZT 串口请求、帧解析、CRC和时序统计</td>
+<td>串口、周期、超时、队列等</td>
+<td><code>read_frame()</code> 帧字典、<code>decode()</code> 84通道数据</td>
+</tr>
+<tr>
+<td><code>SlipDetector</code></td>
+<td>独立的逐帧全局滑移状态机</td>
+<td>压力矩阵、CoP、接触/ready状态、<code>SlipConfig</code></td>
+<td><code>SlipResult</code></td>
+</tr>
+<tr>
+<td><code>SlipResult</code></td>
+<td>不可变的单帧滑移检测结果</td>
+<td>由<code>SlipDetector</code> 生成</td>
+<td>状态、位移、置信度、方向、斑块平移和重锚定标志</td>
+</tr>
+<tr>
+<td><code>TangentialMotionState</code></td>
+<td>滑移状态枚举</td>
+<td>无</td>
+<td><code>NO_CONTACT</code>、<code>STICK</code>、<code>SLIP</code></td>
+</tr>
+<tr>
+<td><code>compute_vector_angle</code></td>
+<td>计算二维向量方向角</td>
+<td><code>x</code>、<code>y</code></td>
+<td><code>[0, 360)</code> 度角</td>
+</tr>
+<tr>
+<td><code>angle_difference</code></td>
+<td>计算两个方向角的最小环绕差</td>
+<td>两个角度</td>
+<td><code>[0, 180]</code> 度差</td>
+</tr>
+</tbody>
+</table>
 
 #### 完整应用入口
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">API</span> | 作用 | 主要输入 | 返回值或输出 |
-| --- | --- | --- | --- |
-| ``run_application`` | 启动一路完整采集、CSV和实时 GUI | ``FullApplicationConfig`` | 阻塞运行至窗口关闭；正常退出返回0并输出CSV/分析图 |
-| ``run_dual_application`` | 在同一 Qt 应用中启动两路相互隔离的完整采集 | ``config_a``、``config_b`` | 正常退出返回0，并生成两个GUI、两套CSV和分析图 |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">API</th>
+<th>作用</th>
+<th>主要输入</th>
+<th>返回值或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>run_application</code></td>
+<td>启动一路完整采集、CSV和实时 GUI</td>
+<td><code>FullApplicationConfig</code></td>
+<td>阻塞运行至窗口关闭；正常退出返回0并输出CSV/分析图</td>
+</tr>
+<tr>
+<td><code>run_dual_application</code></td>
+<td>在同一 Qt 应用中启动两路相互隔离的完整采集</td>
+<td><code>config_a</code>、<code>config_b</code></td>
+<td>正常退出返回0，并生成两个GUI、两套CSV和分析图</td>
+</tr>
+</tbody>
+</table>
 
 #### 配置对象
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">API</span> | 作用 | 主要输入 | 返回值或输出 |
-| --- | --- | --- | --- |
-| ``FullApplicationConfig`` | 聚合完整应用的全部分类配置 | pressure、force、processing、calibration、sync、output、gui | 经校验的完整配置对象 |
-| ``PressureConfig`` | 压力串口、请求频率、超时和队列配置 | 端口及轮询参数 | 压力设备配置；``period_s`` 返回周期 |
-| ``ForceConfig`` | 六维力启用、串口、频率和软件校零配置 | 端口、频率、校零样本/超时 | 六维力设备配置；``enabled=False`` 禁用通道 |
-| ``CopConfig`` | CoP、动态阈值、接触、精修和区域参数 | 各阈值、帧数和区域参数 | CoP配置；``as_kwargs()`` 返回算法参数字典 |
-| ``ProcessingConfig`` | 组合单帧处理模式、滤波、CoP和滑移参数 | cal_dim、region_mode、cop、slip等 | 单帧处理配置 |
-| ``SlipConfig`` | 控制滑移窗口、判定阈值、滞回和方向平滑 | 12项滑移参数 | 经 ``validate()`` 校验的滑移配置 |
-| ``CalibrationConfig`` | 选择内置模型或外部模型 | ``model_path`` | 模型路径配置；``None`` 使用内置模型 |
-| ``SyncConfig`` | 主循环、GUI刷新、缓存和压力—力匹配窗口 | 频率、15 ms窗口等 | 同步配置 |
-| ``OutputConfig`` | 指定CSV输出目录 | ``save_dir`` | 输出配置 |
-| ``GuiConfig`` | 控制窗口、历史长度、热图和区域显示 | GUI参数 | GUI配置 |
-| ``TrainingConfig`` | 定义离线标定训练任务 | XY/Z CSV、模型类型、输出路径等 | 传给 ``train_model`` 的训练配置 |
-| ``PlotConfig`` | 定义离线CSV绘图任务 | 文件、列、行范围、模式和输出路径 | 传给绘图API的配置 |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">API</th>
+<th>作用</th>
+<th>主要输入</th>
+<th>返回值或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FullApplicationConfig</code></td>
+<td>聚合完整应用的全部分类配置</td>
+<td>pressure、force、processing、calibration、sync、output、gui</td>
+<td>经校验的完整配置对象</td>
+</tr>
+<tr>
+<td><code>PressureConfig</code></td>
+<td>压力串口、请求频率、超时和队列配置</td>
+<td>端口及轮询参数</td>
+<td>压力设备配置；<code>period_s</code> 返回周期</td>
+</tr>
+<tr>
+<td><code>ForceConfig</code></td>
+<td>六维力启用、串口、频率和软件校零配置</td>
+<td>端口、频率、校零样本/超时</td>
+<td>六维力设备配置；<code>enabled=False</code> 禁用通道</td>
+</tr>
+<tr>
+<td><code>CopConfig</code></td>
+<td>CoP、动态阈值、接触、精修和区域参数</td>
+<td>各阈值、帧数和区域参数</td>
+<td>CoP配置；<code>as_kwargs()</code> 返回算法参数字典</td>
+</tr>
+<tr>
+<td><code>ProcessingConfig</code></td>
+<td>组合单帧处理模式、滤波、CoP和滑移参数</td>
+<td>cal_dim、region_mode、cop、slip等</td>
+<td>单帧处理配置</td>
+</tr>
+<tr>
+<td><code>SlipConfig</code></td>
+<td>控制滑移窗口、判定阈值、滞回和方向平滑</td>
+<td>12项滑移参数</td>
+<td>经<code>validate()</code> 校验的滑移配置</td>
+</tr>
+<tr>
+<td><code>CalibrationConfig</code></td>
+<td>选择内置模型或外部模型</td>
+<td><code>model_path</code></td>
+<td>模型路径配置；<code>None</code> 使用内置模型</td>
+</tr>
+<tr>
+<td><code>SyncConfig</code></td>
+<td>主循环、GUI刷新、缓存和压力—力匹配窗口</td>
+<td>频率、15 ms窗口等</td>
+<td>同步配置</td>
+</tr>
+<tr>
+<td><code>OutputConfig</code></td>
+<td>指定CSV输出目录</td>
+<td><code>save_dir</code></td>
+<td>输出配置</td>
+</tr>
+<tr>
+<td><code>GuiConfig</code></td>
+<td>控制窗口、历史长度、热图和区域显示</td>
+<td>GUI参数</td>
+<td>GUI配置</td>
+</tr>
+<tr>
+<td><code>TrainingConfig</code></td>
+<td>定义离线标定训练任务</td>
+<td>XY/Z CSV、模型类型、输出路径等</td>
+<td>传给<code>train_model</code> 的训练配置</td>
+</tr>
+<tr>
+<td><code>PlotConfig</code></td>
+<td>定义离线CSV绘图任务</td>
+<td>文件、列、行范围、模式和输出路径</td>
+<td>传给绘图API的配置</td>
+</tr>
+</tbody>
+</table>
 
 #### 训练与绘图
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">API</span> | 作用 | 主要输入 | 返回值或输出 |
-| --- | --- | --- | --- |
-| ``TrainingResult`` | 描述训练产物和评估结果 | 由 ``train_model`` 创建 | 模型路径、评估图、指标和写回信息 |
-| ``train_model`` | 从XY和Z训练CSV拟合标定模型 | ``TrainingConfig`` | ``TrainingResult``；默认不修改输入CSV |
-| ``PlotResult`` | 描述离线绘图产物 | 由绘图函数创建 | 图片、分析文件和处理信息 |
-| ``plot_csv`` | 按CSV真实表头绘制指定列和范围 | ``PlotConfig`` | ``PlotResult`` |
-| ``plot_full_analysis`` | 生成完整采集数据的综合分析图 | ``PlotConfig`` 或完整分析参数 | ``PlotResult`` |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">API</th>
+<th>作用</th>
+<th>主要输入</th>
+<th>返回值或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TrainingResult</code></td>
+<td>描述训练产物和评估结果</td>
+<td>由<code>train_model</code> 创建</td>
+<td>模型路径、评估图、指标和写回信息</td>
+</tr>
+<tr>
+<td><code>train_model</code></td>
+<td>从XY和Z训练CSV拟合标定模型</td>
+<td><code>TrainingConfig</code></td>
+<td><code>TrainingResult</code>；默认不修改输入CSV</td>
+</tr>
+<tr>
+<td><code>PlotResult</code></td>
+<td>描述离线绘图产物</td>
+<td>由绘图函数创建</td>
+<td>图片、分析文件和处理信息</td>
+</tr>
+<tr>
+<td><code>plot_csv</code></td>
+<td>按CSV真实表头绘制指定列和范围</td>
+<td><code>PlotConfig</code></td>
+<td><code>PlotResult</code></td>
+</tr>
+<tr>
+<td><code>plot_full_analysis</code></td>
+<td>生成完整采集数据的综合分析图</td>
+<td><code>PlotConfig</code> 或完整分析参数</td>
+<td><code>PlotResult</code></td>
+</tr>
+</tbody>
+</table>
 
 ### TangentialSample 字段
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">字段</span> | 类型/单位 | 含义 |
-| --- | --- | --- |
-| ``raw`` | ndarray，84 | 原始一维 ADC 数据副本 |
-| ``matrix`` / ``raw_2d`` | ndarray，12×7 | 按阵列布局排列的 ADC |
-| ``gradient`` | ndarray，12×7×2 | 每个压力单元的二维梯度 |
-| ``minimum`` / ``min`` | float，ADC | 当前帧最小值 |
-| ``maximum`` / ``max`` | float，ADC | 当前帧最大值 |
-| ``total`` / ``sum`` / ``adc_sum`` | float，ADC | 84通道总和 |
-| ``mean`` | float，ADC | 84通道均值 |
-| ``cop_x`` / ``copX`` | float，cell | CoP列坐标；无效时可能为NaN |
-| ``cop_y`` / ``copY`` | float，cell | CoP行坐标；无效时可能为NaN |
-| ``angle`` | float，度 | 当前静态切向或滑移方向角 |
-| ``dx``、``dy`` | float，cell | 中值滤波后的CoP相对origin偏移 |
-| ``state`` | int | CoP状态：0未接触、1粗略、2精修完成 |
-| ``calibrated_fx``、``calibrated_fy``、``calibrated_fz`` | float | 模型预测的三轴力；模型不可用时为NaN |
-| ``calibrated_angle`` | float，度 | 标定Fx/Fy方向角；不可用时为NaN |
-| ``request_seq`` | int | 压力请求序号；无元数据时为-1 |
-| ``tx_t``、``rx_t`` | float，秒 | ``perf_counter`` 发送/合法响应接收时间 |
-| ``latency_s`` | float，秒 | 单次压力请求响应延迟 |
-| ``rel_ms`` | int，毫秒 | 相对首个合法压力帧的真实接收时间 |
-| ``origin_x``、``origin_y`` | float或None，cell | 当前静态CoP基准 |
-| ``contact`` | bool | 全局CoP状态机是否接触 |
-| ``display_contact`` | bool | GUI是否应显示接触；region模式可与contact不同 |
-| ``refined`` | bool | 全局CoP二次精修是否完成 |
-| ``region_mask`` | ndarray或None | 每个cell对应的区域编号 |
-| ``regions`` | list[dict] | 每个区域的CoP、delta、坐标和状态 |
-| ``centroid`` | (x, y)或None | 当前压力区域形心 |
-| ``motion_state`` | ``TangentialMotionState`` | NO_CONTACT、STICK或SLIP |
-| ``is_slipping`` | bool | 当前帧是否正在滑移 |
-| ``slip_motion_distance`` | float，cell | 滑移短窗首尾CoP位移 |
-| ``slip_confidence`` | float，0..1 | 斑块平移确认后的余弦相关置信度 |
-| ``angle_vector_magnitude`` | float，cell | angle所用向量模长；STICK为静态delta，SLIP为EMA滑移向量 |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">字段</th>
+<th>类型/单位</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>raw</code></td>
+<td>ndarray，84</td>
+<td>原始一维 ADC 数据副本</td>
+</tr>
+<tr>
+<td><code>matrix</code> / <code>raw_2d</code></td>
+<td>ndarray，12×7</td>
+<td>按阵列布局排列的 ADC</td>
+</tr>
+<tr>
+<td><code>gradient</code></td>
+<td>ndarray，12×7×2</td>
+<td>每个压力单元的二维梯度</td>
+</tr>
+<tr>
+<td><code>minimum</code> / <code>min</code></td>
+<td>float，ADC</td>
+<td>当前帧最小值</td>
+</tr>
+<tr>
+<td><code>maximum</code> / <code>max</code></td>
+<td>float，ADC</td>
+<td>当前帧最大值</td>
+</tr>
+<tr>
+<td><code>total</code> / <code>sum</code> / <code>adc_sum</code></td>
+<td>float，ADC</td>
+<td>84通道总和</td>
+</tr>
+<tr>
+<td><code>mean</code></td>
+<td>float，ADC</td>
+<td>84通道均值</td>
+</tr>
+<tr>
+<td><code>cop_x</code> / <code>copX</code></td>
+<td>float，cell</td>
+<td>CoP列坐标；无效时可能为NaN</td>
+</tr>
+<tr>
+<td><code>cop_y</code> / <code>copY</code></td>
+<td>float，cell</td>
+<td>CoP行坐标；无效时可能为NaN</td>
+</tr>
+<tr>
+<td><code>angle</code></td>
+<td>float，度</td>
+<td>当前静态切向或滑移方向角</td>
+</tr>
+<tr>
+<td><code>dx</code>、<code>dy</code></td>
+<td>float，cell</td>
+<td>中值滤波后的CoP相对origin偏移</td>
+</tr>
+<tr>
+<td><code>state</code></td>
+<td>int</td>
+<td>CoP状态：0未接触、1粗略、2精修完成</td>
+</tr>
+<tr>
+<td><code>calibrated_fx</code>、<code>calibrated_fy</code>、<code>calibrated_fz</code></td>
+<td>float</td>
+<td>模型预测的三轴力；模型不可用时为NaN</td>
+</tr>
+<tr>
+<td><code>calibrated_angle</code></td>
+<td>float，度</td>
+<td>标定Fx/Fy方向角；不可用时为NaN</td>
+</tr>
+<tr>
+<td><code>request_seq</code></td>
+<td>int</td>
+<td>压力请求序号；无元数据时为-1</td>
+</tr>
+<tr>
+<td><code>tx_t</code>、<code>rx_t</code></td>
+<td>float，秒</td>
+<td><code>perf_counter</code> 发送/合法响应接收时间</td>
+</tr>
+<tr>
+<td><code>latency_s</code></td>
+<td>float，秒</td>
+<td>单次压力请求响应延迟</td>
+</tr>
+<tr>
+<td><code>rel_ms</code></td>
+<td>int，毫秒</td>
+<td>相对首个合法压力帧的真实接收时间</td>
+</tr>
+<tr>
+<td><code>origin_x</code>、<code>origin_y</code></td>
+<td>float或None，cell</td>
+<td>当前静态CoP基准</td>
+</tr>
+<tr>
+<td><code>contact</code></td>
+<td>bool</td>
+<td>全局CoP状态机是否接触</td>
+</tr>
+<tr>
+<td><code>display_contact</code></td>
+<td>bool</td>
+<td>GUI是否应显示接触；region模式可与contact不同</td>
+</tr>
+<tr>
+<td><code>refined</code></td>
+<td>bool</td>
+<td>全局CoP二次精修是否完成</td>
+</tr>
+<tr>
+<td><code>region_mask</code></td>
+<td>ndarray或None</td>
+<td>每个cell对应的区域编号</td>
+</tr>
+<tr>
+<td><code>regions</code></td>
+<td>list[dict]</td>
+<td>每个区域的CoP、delta、坐标和状态</td>
+</tr>
+<tr>
+<td><code>centroid</code></td>
+<td>(x, y)或None</td>
+<td>当前压力区域形心</td>
+</tr>
+<tr>
+<td><code>motion_state</code></td>
+<td><code>TangentialMotionState</code></td>
+<td>NO_CONTACT、STICK或SLIP</td>
+</tr>
+<tr>
+<td><code>is_slipping</code></td>
+<td>bool</td>
+<td>当前帧是否正在滑移</td>
+</tr>
+<tr>
+<td><code>slip_motion_distance</code></td>
+<td>float，cell</td>
+<td>滑移短窗首尾CoP位移</td>
+</tr>
+<tr>
+<td><code>slip_confidence</code></td>
+<td>float，0..1</td>
+<td>斑块平移确认后的余弦相关置信度</td>
+</tr>
+<tr>
+<td><code>angle_vector_magnitude</code></td>
+<td>float，cell</td>
+<td>angle所用向量模长；STICK为静态delta，SLIP为EMA滑移向量</td>
+</tr>
+</tbody>
+</table>
 
 不要用 ``rel_ms`` 反推请求发送时间；需要分析设备延迟时使用
 ``tx_t``、``rx_t`` 和 ``latency_s``。
@@ -461,21 +888,61 @@ CLI显式参数 > 代码显式传入的配置对象 > TANGENTIAL_*环境变量 >
 
 ### 设备配置
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">配置</span> | 字段（默认值） | 用户用途 |
-| --- | --- | --- |
-| ``PressureConfig`` | ``port=/dev/ttyUSB0``、``baudrate=921600``、``target_hz=200``、``response_timeout_s=0.050``、``frame_queue_size=256``、``startup_timeout_s=2.0`` | 压力设备端口和请求—响应轮询；实际帧率受设备响应速度影响 |
-| ``ForceConfig`` | ``enabled=True``、``port=/dev/ttyUSB1``、``baudrate=460800``、``target_hz=200``、``response_timeout_s=0.050``、``frame_queue_size=256``、``startup_timeout_s=2.0``、``zero_sample_count=10``、``zero_timeout_s=1.0``、``rezero_timeout_s=1.0`` | 六维力设备、启动软件校零和运行期重新归零；不需要力传感器时设置 ``enabled=False`` |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">配置</th>
+<th>字段（默认值）</th>
+<th>用户用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PressureConfig</code></td>
+<td><code>port=/dev/ttyUSB0</code>、<code>baudrate=921600</code>、<code>target_hz=200</code>、<code>response_timeout_s=0.050</code>、<code>frame_queue_size=256</code>、<code>startup_timeout_s=2.0</code></td>
+<td>压力设备端口和请求—响应轮询；实际帧率受设备响应速度影响</td>
+</tr>
+<tr>
+<td><code>ForceConfig</code></td>
+<td><code>enabled=True</code>、<code>port=/dev/ttyUSB1</code>、<code>baudrate=460800</code>、<code>target_hz=200</code>、<code>response_timeout_s=0.050</code>、<code>frame_queue_size=256</code>、<code>startup_timeout_s=2.0</code>、<code>zero_sample_count=10</code>、<code>zero_timeout_s=1.0</code>、<code>rezero_timeout_s=1.0</code></td>
+<td>六维力设备、启动软件校零和运行期重新归零；不需要力传感器时设置<code>enabled=False</code></td>
+</tr>
+</tbody>
+</table>
 
 ``target_hz`` 是请求上限，不代表设备一定能返回同样帧率。增大队列可吸收短时
 消费延迟，但不能修复串口断开或持续处理过慢。
 
 ### CoP与处理配置
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">配置</span> | 字段（默认值） | 用户用途 |
-| --- | --- | --- |
-| ``CopConfig`` | ``rows=12``、``cols=7``、``total_threshold_factor=3.0``、``pixel_threshold_factor=5.0``、``collect_frames=10``、``stability_frames=5``、``reset_at_frame=0``、``refine_cnt=10``、``refine_distance=0.1``、``merge_ratio=0.6``、``region_match_dist=5.0``、``region_min_area=4``、``region_peak_ratio=1.0``、``region_peak_dist=3`` | 动态阈值、接触稳定、origin精修和区域跟踪。标准硬件固定12×7，不要修改rows/cols |
-| ``ProcessingConfig`` | ``cal_dim=3D``、``region_mode=full``、``median_window=5``、``refine_rezero_force=True``、``cop=CopConfig()``、``slip=SlipConfig()`` | 选择1D/2D/3D标定、full/region/both模式、CoP偏移滤波以及滑移配置 |
-| ``CalibrationConfig`` | ``model_path=None`` | ``None`` 加载SDK内置模型；传路径时加载外部 ``fit_coefs.bin`` |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">配置</th>
+<th>字段（默认值）</th>
+<th>用户用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CopConfig</code></td>
+<td><code>rows=12</code>、<code>cols=7</code>、<code>total_threshold_factor=3.0</code>、<code>pixel_threshold_factor=5.0</code>、<code>collect_frames=10</code>、<code>stability_frames=5</code>、<code>reset_at_frame=0</code>、<code>refine_cnt=10</code>、<code>refine_distance=0.1</code>、<code>merge_ratio=0.6</code>、<code>region_match_dist=5.0</code>、<code>region_min_area=4</code>、<code>region_peak_ratio=1.0</code>、<code>region_peak_dist=3</code></td>
+<td>动态阈值、接触稳定、origin精修和区域跟踪。标准硬件固定12×7，不要修改rows/cols</td>
+</tr>
+<tr>
+<td><code>ProcessingConfig</code></td>
+<td><code>cal_dim=3D</code>、<code>region_mode=full</code>、<code>median_window=5</code>、<code>refine_rezero_force=True</code>、<code>cop=CopConfig()</code>、<code>slip=SlipConfig()</code></td>
+<td>选择1D/2D/3D标定、full/region/both模式、CoP偏移滤波以及滑移配置</td>
+</tr>
+<tr>
+<td><code>CalibrationConfig</code></td>
+<td><code>model_path=None</code></td>
+<td><code>None</code> 加载SDK内置模型；传路径时加载外部 <code>fit_coefs.bin</code></td>
+</tr>
+</tbody>
+</table>
 
 常用调节原则：增大 ``collect_frames`` 会延长启动背景学习；增大
 ``stability_frames`` 会降低短时卸载导致的接触复位；增大 ``refine_cnt`` 或减小
@@ -483,20 +950,60 @@ CLI显式参数 > 代码显式传入的配置对象 > TANGENTIAL_*环境变量 >
 
 ### 同步、输出与GUI配置
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">配置</span> | 字段（默认值） | 用户用途 |
-| --- | --- | --- |
-| ``SyncConfig`` | ``target_fps=100``、``plot_fps=60``、``max_time_diff_s=0.015``、``timing_log_interval_s=1.0``、``buffer_size=500`` | 主循环、GUI刷新上限、压力—力一对一匹配窗口和时间戳缓存 |
-| ``OutputConfig`` | ``save_dir=当前目录/data`` | CSV及退出分析图保存目录 |
-| ``GuiConfig`` | ``window_title=RealTime``、``timer_interval_ms=10``、``history_size=100``、``error_history_size=100``、``max_region_arrows=8``、``heat_vmax=500``、``window_width=1900``、``window_height=1050``、8色 ``region_palette`` | 窗口标题、刷新定时、历史长度、热图范围和区域颜色 |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">配置</th>
+<th>字段（默认值）</th>
+<th>用户用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SyncConfig</code></td>
+<td><code>target_fps=100</code>、<code>plot_fps=60</code>、<code>max_time_diff_s=0.015</code>、<code>timing_log_interval_s=1.0</code>、<code>buffer_size=500</code></td>
+<td>主循环、GUI刷新上限、压力—力一对一匹配窗口和时间戳缓存</td>
+</tr>
+<tr>
+<td><code>OutputConfig</code></td>
+<td><code>save_dir=当前目录/data</code></td>
+<td>CSV及退出分析图保存目录</td>
+</tr>
+<tr>
+<td><code>GuiConfig</code></td>
+<td><code>window_title=RealTime</code>、<code>timer_interval_ms=10</code>、<code>history_size=100</code>、<code>error_history_size=100</code>、<code>max_region_arrows=8</code>、<code>heat_vmax=500</code>、<code>window_width=1900</code>、<code>window_height=1050</code>、8色 <code>region_palette</code></td>
+<td>窗口标题、刷新定时、历史长度、热图范围和区域颜色</td>
+</tr>
+</tbody>
+</table>
 
 ``max_time_diff_s`` 只用于压力帧和六维力帧匹配，不控制压力请求频率。
 
 ### 训练和绘图配置
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">配置</span> | 字段（默认值） | 用户用途 |
-| --- | --- | --- |
-| ``TrainingConfig`` | 必填 ``xy_csv``、``z_csv``；``output_model=fit_coefs.bin``、``output_plot=fit_report.png``、``dim=1``、``poly_order=3``、``fx=sym_log``、``fy=sym_log``、``fz=exp``、``valid_only=True``、``split_sign=True``、``one_on_one=True``、``write_back=None``、``force=False`` | 选择训练数据、模型形式和输出；默认不回写输入CSV |
-| ``PlotConfig`` | ``files=None``、``directory=当前目录/data``、``columns=(Fy_cal, delta_Force_Y)``、``rows=None``、``x_column=rel_ms``、``title=None``、``save_path=None``、``error_ref=None``、``mode=plot``、``highlight_valid=True``、``show_annotations=True``、``force_min=0.2`` | 选择文件、列、行范围、横轴、绘图模式和保存位置 |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">配置</th>
+<th>字段（默认值）</th>
+<th>用户用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TrainingConfig</code></td>
+<td>必填<code>xy_csv</code>、<code>z_csv</code>；<code>output_model=fit_coefs.bin</code>、<code>output_plot=fit_report.png</code>、<code>dim=1</code>、<code>poly_order=3</code>、<code>fx=sym_log</code>、<code>fy=sym_log</code>、<code>fz=exp</code>、<code>valid_only=True</code>、<code>split_sign=True</code>、<code>one_on_one=True</code>、<code>write_back=None</code>、<code>force=False</code></td>
+<td>选择训练数据、模型形式和输出；默认不回写输入CSV</td>
+</tr>
+<tr>
+<td><code>PlotConfig</code></td>
+<td><code>files=None</code>、<code>directory=当前目录/data</code>、<code>columns=(Fy_cal, delta_Force_Y)</code>、<code>rows=None</code>、<code>x_column=rel_ms</code>、<code>title=None</code>、<code>save_path=None</code>、<code>error_ref=None</code>、<code>mode=plot</code>、<code>highlight_valid=True</code>、<code>show_annotations=True</code>、<code>force_min=0.2</code></td>
+<td>选择文件、列、行范围、横轴、绘图模式和保存位置</td>
+</tr>
+</tbody>
+</table>
 
 ``FullApplicationConfig`` 将 pressure、force、processing、calibration、sync、
 output 和 gui 七类配置组合为完整应用的唯一配置入口。
@@ -525,20 +1032,104 @@ export TANGENTIAL_MODEL_PATH=/path/to/fit_coefs.bin
 距离和搜索半径的单位都是压力阵列 cell。参数修改只影响之后创建的处理器；
 运行中的 detector 不会自动读取新配置。
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">参数</span> | 默认值；范围/单位 | 调大后的影响 | 调小后的影响 | 环境变量 |
-| --- | --- | --- | --- | --- |
-| ``enabled`` | ``True``；布尔 | 开启滑移状态机 | ``False`` 时接触帧保持STICK，不判定SLIP | ``TANGENTIAL_SLIP_ENABLED`` |
-| ``window_frames`` | ``5``；整数≥2，帧 | 短窗更平滑、抗噪更强，但检测更慢 | 响应更快，但更容易受单帧抖动影响 | ``TANGENTIAL_SLIP_WINDOW_FRAMES`` |
-| ``enter_distance`` | ``0.20``；≥0，cell | 需要更明显运动才进入SLIP，误报更少 | 微小运动更容易触发，灵敏但可能误报 | ``TANGENTIAL_SLIP_ENTER_DISTANCE`` |
-| ``exit_distance`` | ``0.05``；≥0，cell | 更容易把残余小运动视为停止，较快退出 | 必须更稳定才退出，SLIP保持更久 | ``TANGENTIAL_SLIP_EXIT_DISTANCE`` |
-| ``reanchor_distance`` | ``1.0``；≥``enter_distance``，cell | 斑块相关不足时的大位移兜底更严格 | CoP累计位移更容易绕过斑块确认触发SLIP | ``TANGENTIAL_SLIP_REANCHOR_DISTANCE`` |
-| ``enter_frames`` | ``3``；整数>0，窗口 | 连续证据要求更久，降低瞬态误报、增加延迟 | 更快进入SLIP，但抗噪降低 | ``TANGENTIAL_SLIP_ENTER_FRAMES`` |
-| ``exit_frames`` | ``8``；整数>0，窗口 | 短暂停顿不会立即退出，方向保持更稳 | 停止后更快回到STICK | ``TANGENTIAL_SLIP_EXIT_FRAMES`` |
-| ``direction_smoothing`` | ``0.35``；``(0,1]``，EMA系数 | 更跟随最新方向，转向快但更抖 | 方向更平滑，但转向响应更慢 | ``TANGENTIAL_SLIP_DIRECTION_SMOOTHING`` |
-| ``patch_search_radius`` | ``2``；整数≥0，cell | 可识别更大斑块平移，但计算量和误匹配机会增加 | 计算更少，但可能漏掉大步移动 | ``TANGENTIAL_SLIP_PATCH_SEARCH_RADIUS`` |
-| ``patch_min_correlation`` | ``0.75``；``[0,1]`` | 压力形状匹配更严格，误报更少 | 更容忍形变和噪声，但误确认概率增加 | ``TANGENTIAL_SLIP_PATCH_MIN_CORRELATION`` |
-| ``patch_min_improvement`` | ``0.03``；≥0 | 非零平移必须明显优于零平移，判定更保守 | 更容易接受微弱平移证据 | ``TANGENTIAL_SLIP_PATCH_MIN_IMPROVEMENT`` |
-| ``angle_deadband`` | ``0.1``；≥0，cell | 更多小方向向量被置为0，箭头更稳定 | 更容易显示弱方向，也更容易抖动 | ``TANGENTIAL_SLIP_ANGLE_DEADBAND`` |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">参数</th>
+<th>默认值；范围/单位</th>
+<th>调大后的影响</th>
+<th>调小后的影响</th>
+<th>环境变量</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td><code>True</code>；布尔</td>
+<td>开启滑移状态机</td>
+<td><code>False</code> 时接触帧保持STICK，不判定SLIP</td>
+<td><code>TANGENTIAL_SLIP_ENABLED</code></td>
+</tr>
+<tr>
+<td><code>window_frames</code></td>
+<td><code>5</code>；整数≥2，帧</td>
+<td>短窗更平滑、抗噪更强，但检测更慢</td>
+<td>响应更快，但更容易受单帧抖动影响</td>
+<td><code>TANGENTIAL_SLIP_WINDOW_FRAMES</code></td>
+</tr>
+<tr>
+<td><code>enter_distance</code></td>
+<td><code>0.20</code>；≥0，cell</td>
+<td>需要更明显运动才进入SLIP，误报更少</td>
+<td>微小运动更容易触发，灵敏但可能误报</td>
+<td><code>TANGENTIAL_SLIP_ENTER_DISTANCE</code></td>
+</tr>
+<tr>
+<td><code>exit_distance</code></td>
+<td><code>0.05</code>；≥0，cell</td>
+<td>更容易把残余小运动视为停止，较快退出</td>
+<td>必须更稳定才退出，SLIP保持更久</td>
+<td><code>TANGENTIAL_SLIP_EXIT_DISTANCE</code></td>
+</tr>
+<tr>
+<td><code>reanchor_distance</code></td>
+<td><code>1.0</code>；≥<code>enter_distance</code>，cell</td>
+<td>斑块相关不足时的大位移兜底更严格</td>
+<td>CoP累计位移更容易绕过斑块确认触发SLIP</td>
+<td><code>TANGENTIAL_SLIP_REANCHOR_DISTANCE</code></td>
+</tr>
+<tr>
+<td><code>enter_frames</code></td>
+<td><code>3</code>；整数&gt;0，窗口</td>
+<td>连续证据要求更久，降低瞬态误报、增加延迟</td>
+<td>更快进入SLIP，但抗噪降低</td>
+<td><code>TANGENTIAL_SLIP_ENTER_FRAMES</code></td>
+</tr>
+<tr>
+<td><code>exit_frames</code></td>
+<td><code>8</code>；整数&gt;0，窗口</td>
+<td>短暂停顿不会立即退出，方向保持更稳</td>
+<td>停止后更快回到STICK</td>
+<td><code>TANGENTIAL_SLIP_EXIT_FRAMES</code></td>
+</tr>
+<tr>
+<td><code>direction_smoothing</code></td>
+<td><code>0.35</code>；<code>(0,1]</code>，EMA系数</td>
+<td>更跟随最新方向，转向快但更抖</td>
+<td>方向更平滑，但转向响应更慢</td>
+<td><code>TANGENTIAL_SLIP_DIRECTION_SMOOTHING</code></td>
+</tr>
+<tr>
+<td><code>patch_search_radius</code></td>
+<td><code>2</code>；整数≥0，cell</td>
+<td>可识别更大斑块平移，但计算量和误匹配机会增加</td>
+<td>计算更少，但可能漏掉大步移动</td>
+<td><code>TANGENTIAL_SLIP_PATCH_SEARCH_RADIUS</code></td>
+</tr>
+<tr>
+<td><code>patch_min_correlation</code></td>
+<td><code>0.75</code>；<code>[0,1]</code></td>
+<td>压力形状匹配更严格，误报更少</td>
+<td>更容忍形变和噪声，但误确认概率增加</td>
+<td><code>TANGENTIAL_SLIP_PATCH_MIN_CORRELATION</code></td>
+</tr>
+<tr>
+<td><code>patch_min_improvement</code></td>
+<td><code>0.03</code>；≥0</td>
+<td>非零平移必须明显优于零平移，判定更保守</td>
+<td>更容易接受微弱平移证据</td>
+<td><code>TANGENTIAL_SLIP_PATCH_MIN_IMPROVEMENT</code></td>
+</tr>
+<tr>
+<td><code>angle_deadband</code></td>
+<td><code>0.1</code>；≥0，cell</td>
+<td>更多小方向向量被置为0，箭头更稳定</td>
+<td>更容易显示弱方向，也更容易抖动</td>
+<td><code>TANGENTIAL_SLIP_ANGLE_DEADBAND</code></td>
+</tr>
+</tbody>
+</table>
 
 关键关系：``reanchor_distance`` 不能小于 ``enter_distance``；
 ``direction_smoothing`` 必须大于0且不超过1；相关阈值必须在0到1之间。
@@ -704,19 +1295,73 @@ region 单独检测滑移。多接触点的 CoP 可能互相抵消，因此全�
 
 ## 常见故障
 
-| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">现象</span> | 常见原因 | 处理方法 |
-| --- | --- | --- |
-| ``Permission denied`` | 当前用户没有串口权限 | 将用户加入 ``dialout``，注销后重新登录 |
-| ``No such file or directory`` | 端口路径错误或设备重插后编号改变 | 运行 ``python -m serial.tools.list_ports -v``，优先使用 ``/dev/serial/by-id`` |
-| 压力传感器连接失败 | 端口错误、被占用或设备无响应 | 用 ``fuser PORT`` 检查占用，压力设备失败时应用会退出且不创建空CSV |
-| 六维力不可用但GUI仍运行 | 力端口连接或启动校零失败 | 这是预期降级行为；压力继续采集，力字段写NaN |
-| 实际帧率低于200 Hz | 设备响应、USB调度或系统负载超过5 ms | 查看每秒时序日志中的响应延迟、超时和跳过周期；不要用插值伪造频率 |
-| ``delta_ms`` 有少量抖动 | Linux/Python和串口不是硬实时系统 | 使用真实 ``rx_t`` 分析；关闭不必要负载并检查设备响应延迟 |
-| 滑移误报较多 | 阈值过灵敏或压力斑块噪声较大 | 使用保守预设，优先增大 ``enter_distance``、``enter_frames`` 和相关阈值 |
-| 短促滑移检测不到 | 窗口或进入滞回过长 | 使用灵敏预设，减小 ``window_frames``、``enter_distance`` 或 ``enter_frames`` |
-| 滑移停止后仍保持SLIP | ``exit_frames`` 较大或 ``exit_distance`` 较小 | 增大 ``exit_distance`` 或减小 ``exit_frames`` |
-| 两路传感器互相影响 | 两个配置指向同一物理端口或共享状态对象 | 使用不同 ``by-id`` 路径并为A/B分别创建完整配置和会话 |
-| Bash提示 ``unexpected token newline`` | 原样输入了带尖括号的占位符 | 用真实端口路径替换示例名称，不要输入 ``<`` 或 ``>`` |
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">现象</th>
+<th>常见原因</th>
+<th>处理方法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Permission denied</code></td>
+<td>当前用户没有串口权限</td>
+<td>将用户加入<code>dialout</code>，注销后重新登录</td>
+</tr>
+<tr>
+<td><code>No such file or directory</code></td>
+<td>端口路径错误或设备重插后编号改变</td>
+<td>运行<code>python -m serial.tools.list_ports -v</code>，优先使用 <code>/dev/serial/by-id</code></td>
+</tr>
+<tr>
+<td>压力传感器连接失败</td>
+<td>端口错误、被占用或设备无响应</td>
+<td>用<code>fuser PORT</code> 检查占用，压力设备失败时应用会退出且不创建空CSV</td>
+</tr>
+<tr>
+<td>六维力不可用但GUI仍运行</td>
+<td>力端口连接或启动校零失败</td>
+<td>这是预期降级行为；压力继续采集，力字段写NaN</td>
+</tr>
+<tr>
+<td>实际帧率低于200 Hz</td>
+<td>设备响应、USB调度或系统负载超过5 ms</td>
+<td>查看每秒时序日志中的响应延迟、超时和跳过周期；不要用插值伪造频率</td>
+</tr>
+<tr>
+<td><code>delta_ms</code> 有少量抖动</td>
+<td>Linux/Python和串口不是硬实时系统</td>
+<td>使用真实<code>rx_t</code> 分析；关闭不必要负载并检查设备响应延迟</td>
+</tr>
+<tr>
+<td>滑移误报较多</td>
+<td>阈值过灵敏或压力斑块噪声较大</td>
+<td>使用保守预设，优先增大<code>enter_distance</code>、<code>enter_frames</code> 和相关阈值</td>
+</tr>
+<tr>
+<td>短促滑移检测不到</td>
+<td>窗口或进入滞回过长</td>
+<td>使用灵敏预设，减小<code>window_frames</code>、<code>enter_distance</code> 或 <code>enter_frames</code></td>
+</tr>
+<tr>
+<td>滑移停止后仍保持SLIP</td>
+<td><code>exit_frames</code> 较大或 <code>exit_distance</code> 较小</td>
+<td>增大<code>exit_distance</code> 或减小 <code>exit_frames</code></td>
+</tr>
+<tr>
+<td>两路传感器互相影响</td>
+<td>两个配置指向同一物理端口或共享状态对象</td>
+<td>使用不同<code>by-id</code> 路径并为A/B分别创建完整配置和会话</td>
+</tr>
+<tr>
+<td>Bash提示<code>unexpected token newline</code></td>
+<td>原样输入了带尖括号的占位符</td>
+<td>用真实端口路径替换示例名称，不要输入<code>&lt;</code> 或 <code>&gt;</code></td>
+</tr>
+</tbody>
+</table>
 
 如果问题仍存在，先分别运行单传感器最小示例验证两只设备，再运行完整或双路GUI，
 这样可以区分硬件通信、算法配置和GUI负载问题。
