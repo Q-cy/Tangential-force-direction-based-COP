@@ -203,7 +203,7 @@ run(
 
 ### 常见错误
 
-| 现象 | 原因 | 处理方法 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">现象</span> | 原因 | 处理方法 |
 | --- | --- | --- |
 | Bash报告 ``unexpected token newline`` | 原样复制了带 ``<...>`` 的占位符 | 按第1、2步设置真实 ``PORT_A``/``PORT_B`` |
 | ``No such file or directory`` | 设备未连接或端口名已变化 | 重新运行 ``serial.tools.list_ports -v`` |
@@ -333,7 +333,7 @@ run_application(config)
 
 #### 采集、处理与终端输出
 
-| API | 作用 | 主要输入 | 返回值或输出 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">API</span> | 作用 | 主要输入 | 返回值或输出 |
 | --- | --- | --- | --- |
 | ``TangentialSensor`` | 推荐的单压力传感器高级 API；是 ``TangentialSensorAPI`` 的别名，支持上下文管理器 | ``PressureConfig``、可选 ``ProcessingConfig``、模型路径 | ``read(timeout_s)`` 返回 ``TangentialSample`` 或 ``None`` |
 | ``TangentialSensorAPI`` | 管理压力设备生命周期并串联解码、CoP、滑移和标定 | 传感器/工厂注入、压力配置、处理配置 | 逐帧 ``TangentialSample``；``close()`` 释放设备 |
@@ -344,7 +344,7 @@ run_application(config)
 
 #### 算法、模型与底层压力驱动
 
-| API | 作用 | 主要输入 | 返回值或输出 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">API</span> | 作用 | 主要输入 | 返回值或输出 |
 | --- | --- | --- | --- |
 | ``FitCalibrationModel`` | 加载内置或外部 ``fit_coefs.bin``，预测 Fx/Fy/Fz | ``from_default()`` 或 ``from_path(path)``；``predict(dx, dy, total, dim)`` | 三个标定力分量及模型状态 |
 | ``PRSensorAngle`` | 动态阈值、接触状态、CoP、origin、角度、梯度和区域计算 | 84通道 ADC、``CopConfig`` | CoP/角度/梯度/状态；高级用户使用 |
@@ -357,14 +357,14 @@ run_application(config)
 
 #### 完整应用入口
 
-| API | 作用 | 主要输入 | 返回值或输出 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">API</span> | 作用 | 主要输入 | 返回值或输出 |
 | --- | --- | --- | --- |
 | ``run_application`` | 启动一路完整采集、CSV和实时 GUI | ``FullApplicationConfig`` | 阻塞运行至窗口关闭；正常退出返回0并输出CSV/分析图 |
 | ``run_dual_application`` | 在同一 Qt 应用中启动两路相互隔离的完整采集 | ``config_a``、``config_b`` | 正常退出返回0，并生成两个GUI、两套CSV和分析图 |
 
 #### 配置对象
 
-| API | 作用 | 主要输入 | 返回值或输出 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">API</span> | 作用 | 主要输入 | 返回值或输出 |
 | --- | --- | --- | --- |
 | ``FullApplicationConfig`` | 聚合完整应用的全部分类配置 | pressure、force、processing、calibration、sync、output、gui | 经校验的完整配置对象 |
 | ``PressureConfig`` | 压力串口、请求频率、超时和队列配置 | 端口及轮询参数 | 压力设备配置；``period_s`` 返回周期 |
@@ -381,7 +381,7 @@ run_application(config)
 
 #### 训练与绘图
 
-| API | 作用 | 主要输入 | 返回值或输出 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">API</span> | 作用 | 主要输入 | 返回值或输出 |
 | --- | --- | --- | --- |
 | ``TrainingResult`` | 描述训练产物和评估结果 | 由 ``train_model`` 创建 | 模型路径、评估图、指标和写回信息 |
 | ``train_model`` | 从XY和Z训练CSV拟合标定模型 | ``TrainingConfig`` | ``TrainingResult``；默认不修改输入CSV |
@@ -391,7 +391,7 @@ run_application(config)
 
 ### TangentialSample 字段
 
-| 字段 | 类型/单位 | 含义 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">字段</span> | 类型/单位 | 含义 |
 | --- | --- | --- |
 | ``raw`` | ndarray，84 | 原始一维 ADC 数据副本 |
 | ``matrix`` / ``raw_2d`` | ndarray，12×7 | 按阵列布局排列的 ADC |
@@ -461,7 +461,7 @@ CLI显式参数 > 代码显式传入的配置对象 > TANGENTIAL_*环境变量 >
 
 ### 设备配置
 
-| 配置 | 字段（默认值） | 用户用途 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">配置</span> | 字段（默认值） | 用户用途 |
 | --- | --- | --- |
 | ``PressureConfig`` | ``port=/dev/ttyUSB0``、``baudrate=921600``、``target_hz=200``、``response_timeout_s=0.050``、``frame_queue_size=256``、``startup_timeout_s=2.0`` | 压力设备端口和请求—响应轮询；实际帧率受设备响应速度影响 |
 | ``ForceConfig`` | ``enabled=True``、``port=/dev/ttyUSB1``、``baudrate=460800``、``target_hz=200``、``response_timeout_s=0.050``、``frame_queue_size=256``、``startup_timeout_s=2.0``、``zero_sample_count=10``、``zero_timeout_s=1.0``、``rezero_timeout_s=1.0`` | 六维力设备、启动软件校零和运行期重新归零；不需要力传感器时设置 ``enabled=False`` |
@@ -471,7 +471,7 @@ CLI显式参数 > 代码显式传入的配置对象 > TANGENTIAL_*环境变量 >
 
 ### CoP与处理配置
 
-| 配置 | 字段（默认值） | 用户用途 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">配置</span> | 字段（默认值） | 用户用途 |
 | --- | --- | --- |
 | ``CopConfig`` | ``rows=12``、``cols=7``、``total_threshold_factor=3.0``、``pixel_threshold_factor=5.0``、``collect_frames=10``、``stability_frames=5``、``reset_at_frame=0``、``refine_cnt=10``、``refine_distance=0.1``、``merge_ratio=0.6``、``region_match_dist=5.0``、``region_min_area=4``、``region_peak_ratio=1.0``、``region_peak_dist=3`` | 动态阈值、接触稳定、origin精修和区域跟踪。标准硬件固定12×7，不要修改rows/cols |
 | ``ProcessingConfig`` | ``cal_dim=3D``、``region_mode=full``、``median_window=5``、``refine_rezero_force=True``、``cop=CopConfig()``、``slip=SlipConfig()`` | 选择1D/2D/3D标定、full/region/both模式、CoP偏移滤波以及滑移配置 |
@@ -483,7 +483,7 @@ CLI显式参数 > 代码显式传入的配置对象 > TANGENTIAL_*环境变量 >
 
 ### 同步、输出与GUI配置
 
-| 配置 | 字段（默认值） | 用户用途 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">配置</span> | 字段（默认值） | 用户用途 |
 | --- | --- | --- |
 | ``SyncConfig`` | ``target_fps=100``、``plot_fps=60``、``max_time_diff_s=0.015``、``timing_log_interval_s=1.0``、``buffer_size=500`` | 主循环、GUI刷新上限、压力—力一对一匹配窗口和时间戳缓存 |
 | ``OutputConfig`` | ``save_dir=当前目录/data`` | CSV及退出分析图保存目录 |
@@ -493,7 +493,7 @@ CLI显式参数 > 代码显式传入的配置对象 > TANGENTIAL_*环境变量 >
 
 ### 训练和绘图配置
 
-| 配置 | 字段（默认值） | 用户用途 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">配置</span> | 字段（默认值） | 用户用途 |
 | --- | --- | --- |
 | ``TrainingConfig`` | 必填 ``xy_csv``、``z_csv``；``output_model=fit_coefs.bin``、``output_plot=fit_report.png``、``dim=1``、``poly_order=3``、``fx=sym_log``、``fy=sym_log``、``fz=exp``、``valid_only=True``、``split_sign=True``、``one_on_one=True``、``write_back=None``、``force=False`` | 选择训练数据、模型形式和输出；默认不回写输入CSV |
 | ``PlotConfig`` | ``files=None``、``directory=当前目录/data``、``columns=(Fy_cal, delta_Force_Y)``、``rows=None``、``x_column=rel_ms``、``title=None``、``save_path=None``、``error_ref=None``、``mode=plot``、``highlight_valid=True``、``show_annotations=True``、``force_min=0.2`` | 选择文件、列、行范围、横轴、绘图模式和保存位置 |
@@ -525,7 +525,7 @@ export TANGENTIAL_MODEL_PATH=/path/to/fit_coefs.bin
 距离和搜索半径的单位都是压力阵列 cell。参数修改只影响之后创建的处理器；
 运行中的 detector 不会自动读取新配置。
 
-| 参数 | 默认值；范围/单位 | 调大后的影响 | 调小后的影响 | 环境变量 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">参数</span> | 默认值；范围/单位 | 调大后的影响 | 调小后的影响 | 环境变量 |
 | --- | --- | --- | --- | --- |
 | ``enabled`` | ``True``；布尔 | 开启滑移状态机 | ``False`` 时接触帧保持STICK，不判定SLIP | ``TANGENTIAL_SLIP_ENABLED`` |
 | ``window_frames`` | ``5``；整数≥2，帧 | 短窗更平滑、抗噪更强，但检测更慢 | 响应更快，但更容易受单帧抖动影响 | ``TANGENTIAL_SLIP_WINDOW_FRAMES`` |
@@ -704,7 +704,7 @@ region 单独检测滑移。多接触点的 CoP 可能互相抵消，因此全�
 
 ## 常见故障
 
-| 现象 | 常见原因 | 处理方法 |
+| <span style="display: inline-block; min-width: 15rem; white-space: nowrap;">现象</span> | 常见原因 | 处理方法 |
 | --- | --- | --- |
 | ``Permission denied`` | 当前用户没有串口权限 | 将用户加入 ``dialout``，注销后重新登录 |
 | ``No such file or directory`` | 端口路径错误或设备重插后编号改变 | 运行 ``python -m serial.tools.list_ports -v``，优先使用 ``/dev/serial/by-id`` |
