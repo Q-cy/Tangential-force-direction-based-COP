@@ -1,0 +1,803 @@
+# Tangential Sensor SDK 0.4.0 开发者维护指南
+
+本文面向维护 Tangential SDK 源码的开发者，说明系统为什么这样分层、数据如何穿过各模块、哪些状态必须相互隔离、修改某项功能时应进入哪个文件，以及怎样验证源码和 wheel 没有破坏既有协议与数据语义。安装、公共 API、命令行和用户二次开发示例请先阅读 [用户与二次开发指南](readme.md)。
+
+## 1. 开发目标与不可破坏边界
+
+项目处理 12×7 PZT 压力阵列与可选六维力传感器，完整功能包括串口请求—响应采集、时间戳、压力—力匹配、CoP、角度、梯度、区域、滑移、标定、108列CSV、实时GUI、离线训练和绘图。
+
+维护时必须保留以下边界：
+
+- `src/tangential/`是唯一正式源码，不在根目录恢复旧实现或创建第二套算法。
+- 压力和六维力协议分别只在`sensors/pressure.py`与`sensors/force.py`实现。
+- CoP、区域和梯度只在`processing/cop.py`实现，滑移只在`processing/slip.py`实现，标定只在`processing/calibration.py`实现。
+- 108列CSV只能由`storage/csv.py`中的`TABLE_CSV_HEADER`与`build_csv_row()`生成。
+- `fit_coefs.bin`是package resource，运行时通过`importlib.resources`加载。
+- 压力与六维力的发送、接收和合法帧完成时间使用单调时钟；不得由GUI刷新时间、主循环周期或重采样伪造。
+- 一个物理串口只能有一个消费者；启动校零和运行期重新归零都读取普通六维力帧，不向设备发送额外置零命令。
+- 每只压力传感器必须拥有独立串口、进程、队列、缓存、处理器、CoP状态、滑移状态、GUI和输出目录。
+- 源码模式必须可以直接运行；`.so`只是wheel构建产物，不能替代仓库中的`.py`源码。
+
+维护时以实际代码为事实来源，判断顺序为：`pyproject.toml`决定版本、依赖、入口和资源声明；`setup.py`决定编译模块与wheel过滤；`src/tangential/`决定运行时行为；`tests/`把协议、时序、API、GUI、分发和模型回归固化为可执行契约；两份README只解释这些事实，不创建第二套默认值或算法定义。
+
+## 2. 文档分工
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">文档</th>
+<th>读者</th>
+<th>内容流程</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="white-space:normal"><code>readme.md</code></td>
+<td style="white-space:normal">SDK用户与二次开发者</td>
+<td style="white-space:normal">安装 → 公共API → 配置 → 示例 → 常见故障</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>readme_developer.md</code></td>
+<td style="white-space:normal">项目维护者</td>
+<td style="white-space:normal">架构 → 数据流 → 修改路由 → 测试 → 构建与排障</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>AGENTS.md</code></td>
+<td style="white-space:normal">自动化开发代理</td>
+<td style="white-space:normal">强制约束 → 不变量 → 验收命令 → Git安全</td>
+</tr>
+</tbody>
+</table>
+
+`pyproject.toml`继续使用`readme.md`作为发行说明，因此用户安装页面只展示用户文档；开发者文档属于源码仓库维护资料。
+
+## 3. 一分钟理解整个系统
+
+最小压力API的数据流：
+
+```text
+压力串口
+→ PressureSensor请求、收包、校验、时间戳
+→ decode得到84通道ADC
+→ TangentialFrameProcessor计算CoP、梯度、滑移和标定
+→ TangentialSample
+→ 用户循环或FixedTerminalRenderer
+```
+
+完整应用的数据流：
+
+```text
+压力采集进程 → PressureThread → TimestampedBuffer ┐
+                                                     ├→ FullAcquisitionSession
+六维力采集进程 → ForceThread → TimestampedBuffer ───┘
+→ 压力帧按seq顺序推进处理器
+→ 在15 ms窗口内一对一匹配六维力
+→ build_csv_row生成108列
+→ CSV与RealTimePlot
+```
+
+当`ForceConfig.enabled=False`，完整会话只建立压力缓存和压力消费线程，并为每个已保存压力帧把力相关字段写成`NaN`；当力通道启用但连接或普通帧校零失败时，会关闭力传感器并采用同样的压力模式降级路径。
+
+完整应用入口的数据流：
+
+```text
+用户代码 / CLI / examples
+→ application.py
+→ FullApplicationRunner或DualApplicationRunner
+→ acquisition_loop
+→ FullAcquisitionSession
+→ 设备、处理、同步、CSV、GUI和清理
+```
+
+## 4. 目录结构与职责
+
+```text
+04_tang_7_12_COP_fit_std/
+├── readme.md                      用户与二次开发指南，发行页面使用
+├── readme_developer.md            开发者维护指南
+├── AGENTS.md                      自动化修改约束
+├── pyproject.toml                 包元数据、依赖、CLI入口和package data
+├── setup.py                       Cython扩展清单与wheel源码过滤
+├── MANIFEST.in                    源码分发清单
+├── requirements.txt               完整开发与GUI环境依赖
+├── src/tangential/
+│   ├── __init__.py                顶层稳定公共API
+│   ├── api.py                     可读公共API门面
+│   ├── application.py             单路/双路完整应用公共入口
+│   ├── cli.py                     统一命令解析与分发
+│   ├── config.py                  分类配置、环境默认和校验
+│   ├── acquisition/               顺序缓存与一次性匹配
+│   ├── sensors/                   压力和六维力协议采集
+│   ├── processing/                CoP、滑移和标定
+│   ├── runtime/                   最小API、完整会话和同步编排
+│   ├── storage/                   唯一CSV结构
+│   ├── gui/                       PyQtGraph实时显示
+│   ├── tools/                     离线训练与绘图
+│   ├── examples/                  最小、完整和双路调用示例
+│   └── resources/                 内置fit_coefs.bin
+└── tests/                          协议、时序、API、GUI、分发和回归测试
+```
+
+目录层级按职责划分，不表示重要程度。`runtime`、`acquisition`、`sensors`、`processing`和`storage`在发布wheel中编译为多个同名CPython扩展；仓库中的`.py`仍是唯一维护源。
+
+## 5. 推荐源码阅读顺序
+
+第一次阅读不要从最长的`runtime/session.py`或`processing/cop.py`开始，建议按以下顺序建立心智模型：
+
+1. `src/tangential/__init__.py`：先确认稳定公共名称。
+2. `src/tangential/config.py`：理解设备、处理、同步、输出和GUI有哪些可调边界。
+3. `src/tangential/examples/minimal.py`：观察最小用户循环。
+4. `src/tangential/runtime/sensor.py`：理解`TangentialSample`、单帧处理器和高级传感器API。
+5. `src/tangential/sensors/pressure.py`：理解压力请求、收包、校验、时间戳和独立进程。
+6. `src/tangential/processing/cop.py`、`slip.py`、`calibration.py`：分别阅读CoP状态、滑移状态和模型预测。
+7. `src/tangential/storage/csv.py`：确认完整应用最终写出的108列语义。
+8. `src/tangential/acquisition/buffer.py`与`runtime/synchronization.py`：理解seq消费和一次性时间匹配。
+9. `src/tangential/runtime/session.py`：把设备、处理、匹配、CSV、GUI和清理串起来。
+10. `src/tangential/application.py`、`examples/full.py`、`examples/dual_sensor.py`与`cli.py`：理解公共入口如何复用完整会话。
+11. `src/tangential/tools/training.py`与`plotting.py`：最后阅读离线工具和模型生产流程。
+12. `setup.py`与`tests/test_distribution.py`：理解源码怎样变成独立wheel。
+
+## 6. 分层职责总表
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">模块</th>
+<th>职责流程</th>
+<th>明确不负责</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="white-space:normal"><code>config.py</code></td>
+<td style="white-space:normal">环境默认/显式参数 → 分类dataclass → 启动前校验</td>
+<td style="white-space:normal">协议常量、算法执行和硬件连接</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>sensors/pressure.py</code></td>
+<td style="white-space:normal">发送请求 → 接收并校验响应 → 168字节payload与真实时间戳</td>
+<td style="white-space:normal">CoP、滑移、模型、CSV和GUI</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>sensors/force.py</code></td>
+<td style="white-space:normal">发送普通请求 → 校验28字节帧 → 六轴物理量与软件零点</td>
+<td style="white-space:normal">压力匹配、CoP和CSV格式</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>acquisition/buffer.py</code></td>
+<td style="white-space:normal">时间戳数据 → 单调seq缓存 → 顺序消费或一次性最近匹配</td>
+<td style="white-space:normal">串口读取和业务计算</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>processing/cop.py</code></td>
+<td style="white-space:normal">84通道ADC → 动态阈值/接触/origin/区域 → CoP、角度和梯度</td>
+<td style="white-space:normal">串口、模型文件和CSV</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>processing/slip.py</code></td>
+<td style="white-space:normal">压力矩阵与CoP短窗 → 斑块相关和滞回 → STICK/SLIP与方向</td>
+<td style="white-space:normal">修改CSV列和直接操作GUI</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>processing/calibration.py</code></td>
+<td style="white-space:normal">fit_coefs.bin → 输入特征与拟合类型 → Fx/Fy/Fz预测</td>
+<td style="white-space:normal">训练数据拟合和硬件读取</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>runtime/sensor.py</code></td>
+<td style="white-space:normal">PressureSensor帧 → TangentialFrameProcessor → TangentialSample</td>
+<td style="white-space:normal">完整Qt生命周期、六维力匹配和CSV</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>runtime/session.py</code></td>
+<td style="white-space:normal">压力缓存与可选力缓存 → 顺序处理与匹配 → CSV、GUI、统计和统一清理</td>
+<td style="white-space:normal">复制协议、CoP公式和CSV字段定义</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>storage/csv.py</code></td>
+<td style="white-space:normal">压力样本与可选力帧 → 固定映射 → 108列CSV行</td>
+<td style="white-space:normal">决定采集节拍和匹配策略</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>gui/realtime.py</code></td>
+<td style="white-space:normal">最新样本与历史序列 → PyQtGraph项目 → 实时窗口与分析图</td>
+<td style="white-space:normal">读取串口和推进算法状态</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>application.py</code></td>
+<td style="white-space:normal">FullApplicationConfig → 惰性加载完整运行器 → 单路或双路应用</td>
+<td style="white-space:normal">命令行解析和重复实现采集循环</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>examples/</code></td>
+<td style="white-space:normal">用户参数 → 构造公共配置 → 调用公共API</td>
+<td style="white-space:normal">成为SDK内部依赖或保存第二套业务逻辑</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>tools/</code></td>
+<td style="white-space:normal">CSV与离线配置 → 训练或绘图 → 模型、指标和图片</td>
+<td style="white-space:normal">实时采集和Qt事件循环</td>
+</tr>
+</tbody>
+</table>
+
+## 7. 配置系统
+
+所有用户可调参数集中在`config.py`，调用方不得重新定义相同默认值。配置优先级为：
+
+```text
+CLI显式参数 > 显式配置对象 > TANGENTIAL_*环境默认 > dataclass内置默认
+```
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">配置类</th>
+<th>输入 → 输出</th>
+<th>主要消费者</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="white-space:normal"><code>PressureConfig</code></td>
+<td style="white-space:normal">端口/波特率/频率/超时/队列 → 压力采集配置</td>
+<td style="white-space:normal"><code>PressureSensor</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>ForceConfig</code></td>
+<td style="white-space:normal">启用开关/端口/轮询/校零 → 六维力配置</td>
+<td style="white-space:normal"><code>SixAxisForceSensor</code>与完整会话</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>CopConfig</code></td>
+<td style="white-space:normal">阈值/帧数/区域/精修 → CoP算法参数</td>
+<td style="white-space:normal"><code>PRSensorAngle</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>SlipConfig</code></td>
+<td style="white-space:normal">窗口/距离/相关性/滞回/平滑 → 滑移状态机参数</td>
+<td style="white-space:normal"><code>SlipDetector</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>ProcessingConfig</code></td>
+<td style="white-space:normal">维度/区域模式/滤波/CoP/滑移 → 单帧处理配置</td>
+<td style="white-space:normal"><code>TangentialFrameProcessor</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>CalibrationConfig</code></td>
+<td style="white-space:normal">模型路径 → 内置或外部标定模型选择</td>
+<td style="white-space:normal">完整会话</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>SyncConfig</code></td>
+<td style="white-space:normal">循环/绘图频率/15 ms窗口/缓存 → 同步配置</td>
+<td style="white-space:normal">完整会话</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>OutputConfig</code></td>
+<td style="white-space:normal">保存目录 → CSV与分析图位置</td>
+<td style="white-space:normal">完整会话与GUI</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>GuiConfig</code></td>
+<td style="white-space:normal">窗口/历史/色阶/箭头/配色 → 实时显示配置</td>
+<td style="white-space:normal"><code>RealTimePlot</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>FullApplicationConfig</code></td>
+<td style="white-space:normal">上述运行时配置 → 组合与校验 → 完整应用配置</td>
+<td style="white-space:normal"><code>run_application</code>与<code>run_dual_application</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>TrainingConfig</code></td>
+<td style="white-space:normal">数据/拟合类型/输出/写回选项 → 训练任务</td>
+<td style="white-space:normal"><code>train_model</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>PlotConfig</code></td>
+<td style="white-space:normal">文件/列/范围/模式/输出 → 绘图任务</td>
+<td style="white-space:normal"><code>plot_csv</code>与<code>plot_full_analysis</code></td>
+</tr>
+</tbody>
+</table>
+
+协议帧头、CRC、多字节顺序、12×7布局、84通道、固定帧长度和108列CSV属于协议或格式不变量，不放入配置。单次操作参数，例如`read(timeout_s)`的超时，也不作为全局配置。
+
+新增配置时必须同步完成：在正确dataclass中增加字段和类型 → 如需环境默认则增加`TANGENTIAL_*`解析 → 在`validate()`或完整配置启动校验中拒绝非法值 → 把配置传到唯一消费者 → 更新用户文档和测试。不得只增加字段而不让实际运行路径读取它。
+
+## 8. 压力采集实现
+
+`PressureSensor`负责硬件通信，不负责业务算法。生产模式下父进程对象创建`spawn`采集子进程；子进程中的本地`PressureSensor`使用单一I/O线程执行请求、接收和解析，再通过IPC队列把帧与统计发回父进程。
+
+每轮压力采集流程：
+
+```text
+记录cycle_start
+→ 清空本轮串口输入/输出与解析缓存
+→ 记录tx_t并发送14字节CMD_BYTES
+→ 最长等待response_timeout_s
+→ select等待可读并批量读取最多1024字节
+→ 持久化缓存查找AA 55帧头
+→ 读取小端payload_len
+→ 验证长度、CRC、状态和168字节传感器payload
+→ 记录rx_t与latency_s
+→ 写入request_seq/tx_t/rx_t/latency_s/raw
+→ 本轮不足period_s时等待剩余时间，超期则直接进入下一轮并计数
+```
+
+解析器支持分包、单轮粘包、前导噪声、错误长度、CRC错误和状态错误恢复。当前策略每轮只接受一个合法响应，轮末清空残留，避免上一轮晚到数据被错误归属到下一请求。
+
+`read_frame()`返回168字节payload与时序元数据，`decode()`只执行84个little-endian `uint16`解码并保持设备原始线序。左右翻转、基线、增益、CoP和标定不属于该模块。
+
+重要统计包括`requests`、`frames`、`response_timeouts`、`crc_errors`、`length_errors`、`status_errors`、`serial_read_errors`、`serial_write_errors`、`serial_flush_errors`、`queue_drops`和`schedule_skips`，以及最近发送间隔、接收间隔和响应延迟。目标200 Hz是请求上限；设备响应约6 ms时实际频率约166 Hz属于正常物理结果。
+
+压力驱动的生产结构是“父进程`PressureSensor` → spawn子进程 → 子进程内本地`PressureSensor` → 单一压力I/O线程 → 串口”。父进程只从IPC帧队列读取，父进程的`PressureThread`负责解码并追加到`TimestampedBuffer`；因此业务处理、GUI刷新和CSV写入不会成为串口消费者。
+
+## 9. 六维力采集与软件校零
+
+`SixAxisForceSensor`与压力驱动采用相同的单请求在途思想和独立进程边界，但协议解析针对28字节六维力帧。合法普通帧完成后记录`request_seq`、`tx_t`、`rx_t`、`latency_s`和六轴数据。
+
+六维力协议请求为`49 AA 0D 0A`，完整帧长度为28字节，帧头为`49 AA`，字节2到25为6个little-endian `float32`，每个值乘以9.8并保留两位小数，帧尾必须为`0D 0A`。生产结构是“父进程`SixAxisForceSensor` → spawn子进程 → 子进程内本地驱动 → 单一I/O线程 → 串口”；父进程`ForceThread`只消费已解析的普通帧。
+
+启动校零流程：
+
+```text
+普通六维力帧
+→ 收集zero_sample_count个新样本
+→ 六轴逐项求均值
+→ 保存软件zero_data
+→ 后续普通帧减去zero_data
+```
+
+样本不足或超过`zero_timeout_s`时返回失败，完整会话关闭力通道并继续压力模式。运行期Fx/Fy重新归零仍从同一帧流读取，`schedule_rezero()`使用锁合并精修和卸载触发，避免多个任务同时修改零点或竞争串口。
+
+力子进程只传递未扣零点的六轴物理量；父进程在`read_frame()`取帧时用`_zero_lock`复制当前`zero_data`并应用软件零点。这样重新归零线程只读取父进程缓存中的新帧，不会直接调用串口`read()`，且零点更新不会与当前帧解析产生部分读写。
+
+## 10. 单帧处理、CoP与滑移
+
+`TangentialFrameProcessor`是脱离串口也能使用的处理入口，适合回放CSV、自定义采集源或算法测试。每个实例都持有自己的`PRSensorAngle`、`SlipDetector`和dx/dy中值窗口，因此一个实例不能跨物理传感器共享。
+
+单帧处理流程：
+
+```text
+84通道ADC
+→ reshape为12×7
+→ 更新动态总压与像素阈值
+→ 按full/region/both模式计算CoP、origin、区域和梯度
+→ 更新SlipDetector
+→ 必要时同步重锚定PRSensorAngle
+→ dx/dy中值滤波
+→ FitCalibrationModel预测Fx/Fy/Fz
+→ TangentialSample
+```
+
+`PRSensorAngle`维护接触状态、origin、二次精修和区域历史。首次接触建立粗origin，满足稳定与精修条件后进入状态2；卸载会重置接触相关状态。调用`reanchor_origin()`时必须保留已经完成的精修状态，只更新全局参考位置。
+
+滑移检测流程：
+
+```text
+接触且motion ready
+→ 保存短窗CoP与归一化压力斑块
+→ 比较窗口首尾CoP位移
+→ 在patch_search_radius内搜索零填充斑块平移
+→ 相关性与改善量确认运动
+→ enter_frames连续证据进入SLIP
+→ EMA保存独立滑移方向
+→ exit_frames连续低位移退出
+→ 同帧重锚定CoP并输出0°
+```
+
+`sample.angle`在STICK时来自静态CoP delta，在SLIP时来自滑移EMA方向；`sample.angle_vector_magnitude`必须与该角度使用同一向量。GUI Snapshot红色箭头不能重新使用`hypot(sample.dx, sample.dy)`覆盖滑移向量模长。
+
+## 11. 缓存、seq与压力—力同步
+
+`TimestampedBuffer.append()`为缓存项分配单调递增seq；`get_after(seq)`按顺序返回未消费项；`find_closest(ts, max_diff_s, min_seq)`只寻找未使用且满足窗口的候选项。`runtime/synchronization.py`只是该匹配能力的薄适配层，不保存第二套匹配算法。
+
+完整会话以压力帧为唯一业务驱动：
+
+```text
+get_after(last_press_seq)
+→ 按seq逐帧调用TangentialFrameProcessor
+→ 每帧推进阈值、CoP、滑移、标定和GUI状态
+→ 无力通道时立即写NaN力字段
+→ 有力通道时进入pending_press队列
+→ 队首压力帧在±15 ms内匹配一个未使用力帧
+→ 匹配成功写108列CSV
+→ 超过等待窗口仍未匹配则不写该CSV行
+```
+
+有力通道时，即使某个压力帧最终没有CSV行，它也已经推进了压力状态机并可更新GUI。每个力帧最多匹配一次，后到压力帧不能越过pending队首。修改该语义会影响数据量、训练筛选和时间连续性，必须同时修改测试与用户文档。
+
+`rel_ms`以第一帧合法压力`rx_t`为起点，`delta_ms`来自相邻已保存压力帧的真实接收时间差。不得把它们写成固定0、5、10网格，也不得使用GUI调用时间或文件flush时间。
+
+当前实现的未匹配语义必须特别保留：无力通道时每个合法压力帧都写一行并填充NaN力字段；力通道启用时，压力样本先进入`pending_press`，队首样本只有在15 ms窗口内找到尚未使用的力帧才写CSV，超过窗口会移出队列但不写该行。该语义与“压力状态机和GUI仍继续推进”同时成立，不能只根据CSV行数判断压力帧是否被处理。
+
+## 12. 完整会话与并发模型
+
+单路完整应用的线程与进程关系：
+
+```text
+Qt主线程
+├── RealTimePlot与QTimer
+└── 错误轮询
+
+full-acquisition工作线程
+└── acquisition_loop
+    └── FullAcquisitionSession
+        ├── pressure-consumer线程
+        │   └── 父PressureSensor.read_frame
+        │       └── IPC ← 压力采集子进程 ← 本地I/O线程 ← 压力串口
+        ├── force-consumer线程
+        │   └── 父SixAxisForceSensor.read_frame
+        │       └── IPC ← 六维力采集子进程 ← 本地I/O线程 ← 力串口
+        └── 主业务循环：处理、匹配、CSV、统计与GUI数据转发
+```
+
+`acquisition_loop`必须保持显式顺序：
+
+```python
+session.start()
+try:
+    while not session.should_stop():
+        session.check_errors()
+        session.process_new_pressure_frames()
+        session.drain_force_matches()
+        session.log_timing_stats()
+        session.update_plot()
+        session.wait_for_next_iteration()
+finally:
+    session.close()
+```
+
+该顺序确保线程错误先暴露、所有新压力帧按序处理、力匹配随后排空、GUI只消费最新状态、循环等待不会成为时间戳来源，并且任何异常都会进入统一清理。
+
+双路应用只共享一个`QApplication`，不共享设备或算法状态：
+
+```text
+一个QApplication
+├── Sensor A：config/窗口/工作线程/session/进程/缓存/CSV/输出目录
+└── Sensor B：config/窗口/工作线程/session/进程/缓存/CSV/输出目录
+```
+
+`_validate_dual_configs()`会解析物理路径并拒绝压力端口冲突、启用的力端口冲突、压力与力交叉冲突以及输出目录冲突。任一路工作线程异常会设置两路停止事件并由Qt主线程报告和退出。
+
+## 13. 资源生命周期与错误传播
+
+压力设备是必需资源，连接或启动握手失败时`FullAcquisitionSession.start()`抛出异常，不创建空CSV。六维力是可选资源，连接或启动校零失败时关闭该通道，压力采集继续运行。
+
+数据线程异常保存在`PressureThread.error`或`ForceThread.error`，`check_errors()`在业务循环中抛出；`FullApplicationRunner`通过线程安全队列把异常交给Qt主线程显示并退出，避免GUI仍存活但采集已经停止。
+
+`close()`必须幂等并按依赖顺序释放：设置停止事件 → 等待消费线程 → 等待重新归零任务 → 关闭传感器与IPC → flush/关闭CSV → 删除确实没有数据行的本次CSV。新增资源时必须把释放逻辑加入同一个生命周期，并新增异常退出测试。
+
+## 14. CSV与模型
+
+`storage/csv.py`是108列格式的唯一来源。业务代码只传参数给`build_csv_row()`，不得手写列索引、复制表头或在GUI中拼接第二套行结构。
+
+修改CSV时的最低要求：
+
+- 同时修改`TABLE_CSV_HEADER`和`build_csv_row()`，保持长度一致。
+- 更新训练、绘图、模型回归和集成测试。
+- 明确新旧CSV兼容策略，离线工具必须按实际表头解析。
+- 如果项目要求继续兼容108列，则不得增加、删除或重排列。
+
+`FitCalibrationModel.from_default()`从`tangential.resources`读取内置`fit_coefs.bin`，`from_path()`读取用户外部模型。运行时预测与离线训练共享模型格式，修改序列化结构前必须通过现有模型回归测试证明旧模型行为没有变化。
+
+## 15. application、examples与CLI为什么分开
+
+`application.py`是稳定的库入口，`examples/`是调用示范，`cli.py`是字符串参数到配置对象的适配层，三者不能互相复制完整应用逻辑。
+
+```text
+用户Python代码 → run_application(config) ┐
+examples/full.py → run_application(config) ├→ application.py → runtime/session.py
+CLI app → examples/full.main(config) ──────┘
+```
+
+`application.py`只导入轻量配置；Qt、PyQtGraph和完整会话在真正调用`run_application()`或`run_dual_application()`时惰性加载。这样基础`import tangential`不会加载可选GUI和绘图库。
+
+`examples/minimal.py`保留唯一最小压力循环；`examples/full.py`只调用完整应用公共入口；`examples/dual_sensor.py`只负责两份独立配置与命令行示范。示例不是SDK内部实现层，生产模块不得反向依赖示例。
+
+当前命令分工固定为：`tangential example`惰性调用`examples/minimal.py`并只显示压力样本；`tangential app`通过`examples/full.py`调用`run_application`；`tangential dual`调用双路示例并复用`run_dual_application`；`tangential plot`惰性加载`tools.plotting`；`tangential fit`惰性加载`tools.training`。基础`import tangential`不应创建Qt窗口，也不应把Matplotlib/PyQtGraph加载为运行时副作用。
+
+## 16. 公共API维护规则
+
+`tangential.__all__`定义稳定顶层公共边界。用户通过`from tangential import ...`、`help()`、IDE类型提示和`py.typed/.pyi`了解API；内部模块路径不承诺稳定。
+
+当前顶层共有33个导出名称：`TangentialSensor`、`TangentialSensorAPI`、`TangentialSample`、`TangentialFrameProcessor`、`FixedTerminalRenderer`、`FitCalibrationModel`、`FullApplicationConfig`、`PressureConfig`、`ForceConfig`、`CopConfig`、`ProcessingConfig`、`SlipConfig`、`CalibrationConfig`、`SyncConfig`、`OutputConfig`、`GuiConfig`、`PRSensorAngle`、`PressureSensor`、`TangentialMotionState`、`SlipResult`、`SlipDetector`、`compute_vector_angle`、`angle_difference`、`format_terminal_sample`、`TrainingConfig`、`TrainingResult`、`train_model`、`PlotConfig`、`PlotResult`、`plot_csv`、`plot_full_analysis`、`run_application`和`run_dual_application`。其中`TangentialSensor`是`TangentialSensorAPI`的推荐别名；两者当前指向同一个实现，修改导出时必须同步用户文档和API测试。
+
+新增或修改公共API时必须同步：
+
+1. 在唯一实现模块写完整类型标注与docstring，至少包含作用、参数、返回值、异常和副作用。
+2. 通过`api.py`或对应公共门面导出。
+3. 更新`__init__.py`导入与`__all__`。
+4. 编译模块同步更新同名`.pyi`签名。
+5. 更新`readme.md`公共API流程、输入和输出。
+6. 增加API导入、签名、行为和基础导入惰性测试。
+
+不要为了让用户“看到更多功能”把所有内部类都放进顶层。判断标准是：用户是否存在无需依赖内部会话即可稳定复用的场景。`TangentialSensor`适合硬件采集，`TangentialFrameProcessor`适合自定义数据源和离线84通道ADC；内部线程、会话辅助函数和协议解析私有方法不应公开。
+
+## 17. 常见扩展任务
+
+### 17.1 增加配置参数
+
+```text
+确定唯一消费者
+→ 在对应Config增加字段和默认值
+→ 增加环境变量解析与validate
+→ 从调用入口传到消费者
+→ 添加默认/显式/非法值测试
+→ 更新两份文档
+```
+
+### 17.2 修改压力或六维力协议
+
+只修改对应`sensors/*.py`，同时覆盖分包、粘包、噪声、错误长度、CRC或帧尾、超时、慢响应和恢复。不得把协议解析放入`runtime/session.py`。
+
+### 17.3 修改CoP、区域或滑移
+
+CoP与区域修改进入`processing/cop.py`，滑移修改进入`processing/slip.py`，`TangentialFrameProcessor`只负责编排。必须验证无接触、首次接触、精修、卸载、滑移进入、方向平滑、退出重锚定和多实例状态隔离。
+
+### 17.4 接入自定义ADC数据源
+
+自定义来源只需提供84通道数据并调用`TangentialFrameProcessor.process()`；如果要复用`TangentialSensor`生命周期，可注入实现`read_frame()`、`decode()`和`close()`的sensor对象。不要修改`PressureSensor`来适配与现有协议无关的数据源。
+
+### 17.5 增加第三只或更多传感器
+
+为每一路分别构造`FullApplicationConfig`、端口、输出目录、处理器和停止事件；复用现有单路会话，不共享`PRSensorAngle`或`SlipDetector`。在扩展运行器中统一校验所有物理端口和目录唯一性。
+
+### 17.6 增加新的编译模块
+
+```text
+新增唯一.py源码
+→ 增加同名.pyi
+→ 加入setup.py COMPILED_MODULES
+→ 确认wheel排除该内部.py
+→ 检查.so、.pyi、签名和docstring
+→ 更新分发测试
+```
+
+## 18. 测试结构与修改路由
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">修改内容</th>
+<th>首选源码</th>
+<th>最低联动测试</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="white-space:normal">压力协议、CRC、调度、进程和队列</td>
+<td style="white-space:normal"><code>sensors/pressure.py</code></td>
+<td style="white-space:normal"><code>test_data.py</code></td>
+</tr>
+<tr>
+<td style="white-space:normal">六维力协议、校零和进程</td>
+<td style="white-space:normal"><code>sensors/force.py</code></td>
+<td style="white-space:normal"><code>test_data.py</code></td>
+</tr>
+<tr>
+<td style="white-space:normal">seq、缓存和时间匹配</td>
+<td style="white-space:normal"><code>acquisition/buffer.py</code>、<code>runtime/synchronization.py</code></td>
+<td style="white-space:normal"><code>test_data.py</code>、<code>test_main_integration.py</code></td>
+</tr>
+<tr>
+<td style="white-space:normal">CoP、阈值、梯度和区域</td>
+<td style="white-space:normal"><code>processing/cop.py</code></td>
+<td style="white-space:normal"><code>test_tangential_api.py</code>、GUI与集成测试</td>
+</tr>
+<tr>
+<td style="white-space:normal">滑移状态和方向</td>
+<td style="white-space:normal"><code>processing/slip.py</code>、<code>runtime/sensor.py</code></td>
+<td style="white-space:normal"><code>test_slip.py</code>、<code>test_plot_and_gui.py</code></td>
+</tr>
+<tr>
+<td style="white-space:normal">模型读取与预测</td>
+<td style="white-space:normal"><code>processing/calibration.py</code></td>
+<td style="white-space:normal"><code>test_model_and_table.py</code>、<code>test_calibration_multidim.py</code></td>
+</tr>
+<tr>
+<td style="white-space:normal">最小API与示例</td>
+<td style="white-space:normal"><code>runtime/sensor.py</code>、<code>api.py</code>、<code>examples/minimal.py</code></td>
+<td style="white-space:normal"><code>test_tangential_api.py</code>、<code>test_stage2_structure.py</code></td>
+</tr>
+<tr>
+<td style="white-space:normal">完整采集、CSV、清理和Qt生命周期</td>
+<td style="white-space:normal"><code>runtime/session.py</code>、<code>application.py</code></td>
+<td style="white-space:normal"><code>test_main_integration.py</code>、<code>test_dual_sensor_example.py</code></td>
+</tr>
+<tr>
+<td style="white-space:normal">CSV结构</td>
+<td style="white-space:normal"><code>storage/csv.py</code></td>
+<td style="white-space:normal"><code>test_model_and_table.py</code>、绘图测试</td>
+</tr>
+<tr>
+<td style="white-space:normal">GUI</td>
+<td style="white-space:normal"><code>gui/realtime.py</code></td>
+<td style="white-space:normal"><code>test_plot_and_gui.py</code></td>
+</tr>
+<tr>
+<td style="white-space:normal">训练与绘图</td>
+<td style="white-space:normal"><code>tools/training.py</code>、<code>tools/plotting.py</code></td>
+<td style="white-space:normal"><code>test_training.py</code>、<code>test_plotting.py</code></td>
+</tr>
+<tr>
+<td style="white-space:normal">CLI</td>
+<td style="white-space:normal"><code>cli.py</code></td>
+<td style="white-space:normal"><code>test_cli.py</code></td>
+</tr>
+<tr>
+<td style="white-space:normal">wheel内容、资源和惰性导入</td>
+<td style="white-space:normal"><code>pyproject.toml</code>、<code>setup.py</code>、<code>MANIFEST.in</code></td>
+<td style="white-space:normal"><code>test_distribution.py</code>、<code>test_stage1_resources.py</code></td>
+</tr>
+</tbody>
+</table>
+
+## 19. 本地开发与测试
+
+安装完整环境：
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+基础语法检查：
+
+```bash
+PYTHONPATH=src python -m compileall -q src/tangential tests
+```
+
+完整测试：
+
+```bash
+PYTHONPATH=src \
+QT_QPA_PLATFORM=offscreen \
+MPLCONFIGDIR=/tmp/pzt-mplconfig \
+python -m unittest discover -s tests -q
+```
+
+只运行相关测试时使用模块名，例如：
+
+```bash
+PYTHONPATH=src python -m unittest tests.test_data -q
+PYTHONPATH=src python -m unittest tests.test_slip -q
+QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m unittest tests.test_plot_and_gui -q
+```
+
+提交前至少执行：
+
+```bash
+git diff --check
+PYTHONPATH=src python -m compileall -q src/tangential tests
+```
+
+如果工作树已有用户修改，测试失败时必须区分本次变更和预存变更，不能用`git reset --hard`或覆盖式恢复清除用户内容。
+
+## 20. Wheel构建与隔离验收
+
+构建依赖由`pyproject.toml`声明，开发环境可以直接执行：
+
+```bash
+python -m pip wheel . --no-deps --no-build-isolation -w dist
+```
+
+当前10个编译模块由`setup.py`的`COMPILED_MODULES`定义：`runtime/sensor`、`runtime/session`、`runtime/synchronization`、`acquisition/buffer`、`sensors/pressure`、`sensors/force`、`processing/cop`、`processing/calibration`、`processing/slip`和`storage/csv`。
+
+`setup.py`的Cython指令必须保持`language_level=3`、`annotation_typing=False`、`binding=True`、`embedsignature=True`和`always_allow_keywords=True`。其中`annotation_typing=False`保证源码中的类型注解不会被错误解释为运行时强类型约束，尤其不能破坏对`bytearray`、NumPy数组和测试注入对象的兼容输入。
+
+构建流程：
+
+```text
+.py唯一源码
+→ Cython生成并编译同名扩展
+→ BinaryWheelBuildPy清理旧build/lib*/tangential
+→ wheel保留公开Python层、配置、CLI、示例、GUI、tools、.pyi和资源
+→ wheel排除10个内部实现.py与生成的C源码
+```
+
+预期产物：
+
+```text
+dist/tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl
+```
+
+分发验收必须确认：
+
+- wheel包含10个内部`.so`和10个同名`.pyi`。
+- wheel包含`py.typed`与`tangential/resources/fit_coefs.bin`。
+- wheel不包含对应内部`.py`、生成的C源码或外部share模型目录。
+- 脱离源码目录后可以`import tangential`、加载内置模型并完成回归预测。
+- `help()`、函数签名和IDE类型提示在安装wheel后仍可用。
+- 基础`import tangential`不加载Qt、PyQtGraph或Matplotlib。
+- 源码模式和隔离安装模式都通过协议、CoP、同步、CSV和模型回归测试。
+
+当前`requirements.txt`锁定完整开发/GUI环境：Cython 3.2.9、NumPy 2.4.3、SciPy 1.17.1、pyserial 3.5、pyqtgraph 0.14.0、Matplotlib 3.10.8和PyQt5 5.15.11；`pyproject.toml`只声明核心运行依赖`numpy`、`scipy`、`pyserial`，GUI和离线绘图库属于`full`可选依赖，Cython只属于构建依赖。
+
+不要手工提交`build/`、`dist/`、生成的`.so`或C文件；它们是可重建产物。
+
+## 21. 常见故障定位
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">现象</th>
+<th>排查流程</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="white-space:normal">压力无数据</td>
+<td style="white-space:normal">端口存在与权限 → 端口占用 → startup握手 → requests/frames/timeout统计 → 协议响应</td>
+</tr>
+<tr>
+<td style="white-space:normal">实际频率低于200 Hz</td>
+<td style="white-space:normal">响应延迟P50/P95 → timeout → schedule_skips → USB与设备响应能力</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>delta_ms</code>抖动</td>
+<td style="white-space:normal">确认使用rx_t → 对照响应延迟 → 排除timeout/错误 → 再检查系统负载</td>
+</tr>
+<tr>
+<td style="white-space:normal">有压力但CSV行少</td>
+<td style="white-space:normal">确认力通道是否启用 → 检查15 ms匹配 → 检查力帧率与时间戳 → 检查pending超窗</td>
+</tr>
+<tr>
+<td style="white-space:normal">六维力降级</td>
+<td style="white-space:normal">端口与权限 → 普通帧数量 → zero_sample_count → zero_timeout_s → 子进程错误</td>
+</tr>
+<tr>
+<td style="white-space:normal">滑移误报或漏报</td>
+<td style="white-space:normal">接触与motion ready → CoP短窗 → patch相关性 → enter/exit滞回 → angle_deadband</td>
+</tr>
+<tr>
+<td style="white-space:normal">GUI仍在但采集停止</td>
+<td style="white-space:normal">消费线程error → check_errors → runner错误队列 → Qt错误定时器与退出事件</td>
+</tr>
+<tr>
+<td style="white-space:normal">wheel出现旧模块</td>
+<td style="white-space:normal">清理build输出 → 检查COMPILED_MODULES → 重建wheel → 运行分发内容测试</td>
+</tr>
+<tr>
+<td style="white-space:normal">双路相互影响</td>
+<td style="white-space:normal">物理端口唯一性 → 配置对象独立 → 处理器与状态机独立 → 输出目录独立</td>
+</tr>
+</tbody>
+</table>
+
+## 22. Git检查点与回退
+
+开始前：
+
+```bash
+git status --short
+git log --oneline -n 10
+```
+
+完成后：
+
+```bash
+git diff --check
+git diff --stat
+```
+
+每个独立阶段使用单独提交，提交前只暂存属于该阶段的文件。需要撤销已提交阶段时使用：
+
+```bash
+git revert <commit-hash>
+```
+
+不要使用`git reset --hard`覆盖用户修改。看到与当前任务无关的修改、数据文件删除或相邻目录未跟踪文件时，应保留并在交付报告中说明。
+
+## 23. 修改完成的定义
+
+一次修改只有同时满足以下条件才算完成：
+
+- 修改位于唯一职责模块，没有复制协议、算法或CSV实现。
+- 配置从`config.py`进入实际运行路径，没有散落第二套默认值。
+- 多传感器状态与资源仍然隔离。
+- 时间戳、seq、匹配窗口和CSV语义没有被GUI或循环节拍改变。
+- 异常路径可以关闭线程、进程、串口、队列、CSV和Qt资源。
+- 相关单元测试、集成测试和回归测试通过。
+- 公共签名、`.pyi`、用户文档与开发者文档同步。
+- `git diff --check`通过，提交只包含本阶段文件。

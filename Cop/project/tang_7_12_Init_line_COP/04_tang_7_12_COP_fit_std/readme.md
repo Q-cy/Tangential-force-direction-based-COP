@@ -4,6 +4,8 @@ Tangential Sensor SDK 用于采集 12×7 PZT 压力阵列和可选六维力传�
 
 本文面向安装和使用 SDK 的用户，介绍硬件连接、命令行、Python API、参数配置、滑移检测、CSV 行为和常见故障。用户可以安装 wheel，也可以在获得源码后直接运行。
 
+本文是用户与二次开发指南；需要阅读内部架构、修改采集或算法、运行完整测试以及构建 wheel 的项目维护者，请参阅 [开发者维护指南](readme_developer.md)。
+
 ## 系统要求与安装
 
 当前 wheel 适用于 Linux x86_64 和 CPython 3.11。压力传感器是必需设备，六维力传感器是可选设备；默认端口分别为 ``/dev/ttyUSB0`` 和 ``/dev/ttyUSB1``。
@@ -245,6 +247,8 @@ tangential app \
 
 压力传感器是必需设备；连接失败时程序退出且不创建空 CSV。六维力传感器是可选设备；连接或普通数据帧校零失败时降级为压力模式，力相关列写入 NaN。两路设备由独立采集进程读取，父进程按真实接收时间完成匹配和 CSV 保存。
 
+普通 ``app`` 命令使用 ``ForceConfig.enabled=True`` 的默认配置，因此没有提供 ``--force-port`` 时仍会尝试打开默认 ``/dev/ttyUSB1``；如果该设备不存在或校零失败，程序会关闭力通道并继续压力采集。需要明确只采集压力时，在 Python API 中传入 ``ForceConfig(enabled=False)``，或设置 ``TANGENTIAL_FORCE_ENABLED=false`` 后再启动。
+
 ### 双路完整采集
 
 ~~~bash
@@ -391,7 +395,7 @@ run_application(config)
 <tr>
 <td style="white-space:normal"><code>FitCalibrationModel</code></td>
 <td style="white-space:normal">fit_coefs.bin → dx/dy/ADC总和 → Fx/Fy/Fz</td>
-<td style="white-space:normal"><code>from_default()</code> 或 <code>from_path(path)</code>；<code>predict(dx, dy, total, dim)</code></td>
+<td style="white-space:normal"><code>from_default()</code> 或 <code>from_path(path)</code>；<code>predict(dx, dy, total, cal_dim="3D")</code></td>
 <td style="white-space:normal">三个标定力分量及模型状态</td>
 </tr>
 <tr>
@@ -592,7 +596,7 @@ run_application(config)
 <tr>
 <td style="white-space:normal"><code>plot_full_analysis</code></td>
 <td style="white-space:normal">完整CSV与绘图配置 → 综合分析 → PlotResult</td>
-<td style="white-space:normal"><code>PlotConfig</code> 或完整分析参数</td>
+<td style="white-space:normal"><code>PlotConfig</code> 或 CSV 路径</td>
 <td style="white-space:normal"><code>PlotResult</code></td>
 </tr>
 </tbody>
