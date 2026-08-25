@@ -6,40 +6,41 @@
 
 from __future__ import annotations
 
-import argparse
+import argparse                 # arg = argument（参数） + parse（解析）
 import json
 import sys
 from pathlib import Path
 
+from . import __version__
 
-VERSION = "0.4.0"
+VERSION = __version__
 
 
 def _build_parser() -> argparse.ArgumentParser:
     """创建完整的 ``tangential`` 命令行参数解析器。
 
     Returns:
-        argparse.ArgumentParser: 包含 ``example``、``app``、``dual``、
+        argparse.ArgumentParser（解析器实例对象）: 包含 ``example``、``app``、``dual``、
             ``plot`` 和 ``fit`` 五个必选子命令的解析器。
 
     Side Effects:
         仅在内存中构造解析器和参数定义，不读取硬件或文件。
     """
-    parser = argparse.ArgumentParser(
-        prog="tangential",
+    parser = argparse.ArgumentParser(                                       # 实例化一个顶层命令解析器对象
+        prog="tangential",                                                  # prog = program 
         description="12×7 PZT 压力阵列与六维力采集、分析和标定工具",
     )
-    parser.add_argument("--version", action="version", version=VERSION)
-    commands = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--version", action="version", version=VERSION)     # 顶层解析器实例.add_argument
+    commands = parser.add_subparsers(dest="command", required=True)         # 子命令，dest = destination，执行 tangential app → args.command = "app"
 
     example = commands.add_parser("example", help="运行最小压力采集示例")
-    example.add_argument("--pressure-port")
+    example.add_argument("--pressure-port")                                 # 选项，tangential example --pressure-port /dev/ttyUSB0
     example.add_argument("--model")
     example.add_argument("--timeout", type=float)
-    example.set_defaults(handler=_handle_example)
+    example.set_defaults(handler=_handle_example)                           # 任务处理函数
 
     app = commands.add_parser("app", help="运行完整采集和实时 GUI")
-    app.add_argument("--pressure-port")
+    app.add_argument("--pressure-port")                                     # argparse 自动规则：命令行选项名字里的横杠 -，自动转换为下划线 _，作为 Namespace(args) 对象的属性名。
     app.add_argument("--force-port")
     app.add_argument("--save-dir")
     app.add_argument("--model")
@@ -124,7 +125,7 @@ def _handle_example(args: argparse.Namespace) -> int:
     from .examples.minimal import run
 
     config = PressureConfig()
-    if args.pressure_port is not None:
+    if args.pressure_port is not None:                           # args.pressure_port 源于 example.add_argument("--pressure-port") 
         config.port = args.pressure_port
     return run(
         config,

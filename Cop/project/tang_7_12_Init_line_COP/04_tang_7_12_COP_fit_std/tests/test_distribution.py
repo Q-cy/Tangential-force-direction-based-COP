@@ -62,9 +62,14 @@ def _expected_package_modules() -> set[str]:
 
 def _isolated_import_command() -> str:
     return (
-        "import sys; "
-        "from tangential import FitCalibrationModel, TangentialSample, TangentialSensor; "
-        "assert TangentialSample is not None; "
+        "import sys; import tangential; import tangential.api; import tangential.runtime; "
+        "from dataclasses import fields; "
+        "from tangential import FitCalibrationModel, TangentialFrame, TangentialSensor; "
+        "assert [item.name for item in fields(TangentialFrame)] == ['raw', 'adc_sum', 'cop_x', 'cop_y', 'angle', 'dx', 'dy', 'motion_state']; "
+        "assert not hasattr(TangentialFrame, 'total'); "
+        "assert not hasattr(tangential, 'TangentialSample'); "
+        "assert not hasattr(tangential.api, 'TangentialSample'); "
+        "assert not hasattr(tangential.runtime, 'TangentialSample'); "
         "assert TangentialSensor is not None; "
         "model = FitCalibrationModel.from_default(); "
         "assert model.available; "
@@ -118,7 +123,7 @@ class DistributionConfigurationTests(unittest.TestCase):
 
         project = config["project"]
         self.assertEqual(project["name"], "tangential-sensor")
-        self.assertEqual(project["version"], "0.4.0")
+        self.assertEqual(project["version"], "0.5.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["scripts"], {"tangential": "tangential.cli:main"})
         self.assertEqual(set(project["dependencies"]), {"numpy", "scipy", "pyserial"})
@@ -146,7 +151,7 @@ class DistributionConfigurationTests(unittest.TestCase):
         from tangential import __version__
         from tangential.cli import VERSION
 
-        self.assertEqual(project_version, "0.4.0")
+        self.assertEqual(project_version, "0.5.0")
         self.assertEqual(__version__, project_version)
         self.assertEqual(VERSION, project_version)
 
@@ -208,7 +213,7 @@ class WheelDistributionTests(unittest.TestCase):
             )
             self.assertEqual(build.returncode, 0, msg=build.stderr or build.stdout)
 
-            wheels = sorted(wheel_dir.glob("tangential_sensor-0.4.0-*.whl"))
+            wheels = sorted(wheel_dir.glob("tangential_sensor-0.5.0-*.whl"))
             self.assertEqual(len(wheels), 1, msg=build.stdout)
             wheel_path = wheels[0]
             with zipfile.ZipFile(wheel_path) as archive:
@@ -226,6 +231,11 @@ class WheelDistributionTests(unittest.TestCase):
                 self.assertIn("tangential/py.typed", names)
                 self.assertFalse(any(name.endswith((".pyx", ".c", ".cpp")) for name in names))
                 self.assertIn("tangential/resources/fit_coefs.bin", names)
+                sensor_stub = archive.read(
+                    "tangential/runtime/sensor.pyi"
+                ).decode("utf-8")
+                self.assertNotIn("TangentialSample", sensor_stub)
+                self.assertNotIn("_process_sample", sensor_stub)
                 self.assertTrue(
                     any(name.endswith(".dist-info/entry_points.txt") for name in names)
                 )
@@ -242,7 +252,7 @@ class WheelDistributionTests(unittest.TestCase):
                 self.assertNotIn("tangential/examples/dual_pressure.py", names)
                 self.assertIn("tangential/examples/dual_sensor.py", names)
                 self.assertNotIn(
-                    "tangential_sensor-0.4.0.data/data/share/tangential/fit_coefs.bin",
+                    "tangential_sensor-0.5.0.data/data/share/tangential/fit_coefs.bin",
                     names,
                 )
 
@@ -287,7 +297,7 @@ class WheelDistributionTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(version.returncode, 0, msg=version.stderr)
-            self.assertEqual(version.stdout.strip(), "0.4.0")
+            self.assertEqual(version.stdout.strip(), "0.5.0")
 
             for command in ("example", "app", "dual", "plot", "fit"):
                 help_result = subprocess.run(

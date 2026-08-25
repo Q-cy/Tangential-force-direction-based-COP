@@ -11,7 +11,7 @@ PyQtGraph/Matplotlib；完整 GUI 应由 ``tangential app`` 按需启动。
 from .api import (
     FixedTerminalRenderer,
     TangentialFrameProcessor,
-    TangentialSample,
+    TangentialFrame,
     TangentialSensorAPI,
     angle_difference,
     compute_vector_angle,
@@ -43,9 +43,9 @@ from .tools.plotting import PlotResult, plot_csv, plot_full_analysis
 TangentialSensor = TangentialSensorAPI
 
 __all__ = [
-    "TangentialSensor",          # 高级采集 API 别名：读取完整 TangentialSample。
-    "TangentialSensorAPI",       # 底层压力采集 API：管理传感器并产生逐帧样本。
-    "TangentialSample",           # 单帧结果：保存 ADC、统计值、CoP、角度、梯度和标定值。
+    "TangentialSensor",          # 高级采集 API 别名：读取逐帧 TangentialFrame。
+    "TangentialSensorAPI",       # 底层压力采集 API：管理传感器并产生逐帧结果。
+    "TangentialFrame",           # 单帧结果：保存 raw、adc_sum、CoP、角度、偏移和运动状态。
     "TangentialFrameProcessor",   # 单帧处理器：调用既有 CoP、梯度和标定算法。
     "FixedTerminalRenderer",      # 终端渲染器：按固定布局显示一帧 12×7 数据和指标。
     "FitCalibrationModel",        # 标定模型 API：加载内置/外部模型并预测 Fx/Fy/Fz。
@@ -53,13 +53,13 @@ __all__ = [
     "PressureConfig",              # 压力设备和轮询配置。
     "ForceConfig",                 # 六维力设备和校零配置。
     "CopConfig",                   # CoP、阈值、区域和精修配置。
-    "ProcessingConfig",           # 单帧处理和标定维度配置。
-    "SlipConfig",                 # 滑移检测窗口、相关性和滞回配置。
-    "CalibrationConfig",          # 外部/内置模型路径配置。
+    "ProcessingConfig",            # 单帧处理和标定维度配置。
+    "SlipConfig",                  # 滑移检测窗口、相关性和滞回配置。
+    "CalibrationConfig",           # 外部/内置模型路径配置。
     "SyncConfig",                  # 匹配窗口、主循环和缓存配置。
     "OutputConfig",                # CSV 输出目录配置。
     "GuiConfig",                   # GUI 显示配置。
-    "PRSensorAngle",              # CoP 处理器：阈值、接触状态、区域、梯度和角度计算。
+    "PRSensorAngle",               # CoP 处理器：阈值、接触状态、区域、梯度和角度计算。
     "PressureSensor",              # 底层压力驱动：负责 PZT 串口协议、帧解析和时序统计。
     "TangentialMotionState",       # 全局运动状态：NO_CONTACT、STICK 或 SLIP。
     "SlipResult",                  # 不可变的逐帧滑移距离、置信度和方向结果。
@@ -79,4 +79,4 @@ __all__ = [
 ]
 
 # SDK 发行版本号，供运行时检查兼容性和 CLI --version 使用。
-__version__ = "0.4.0"
+__version__ = "0.5.0"

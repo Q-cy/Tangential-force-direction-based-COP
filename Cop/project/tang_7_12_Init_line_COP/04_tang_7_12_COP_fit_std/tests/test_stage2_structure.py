@@ -81,8 +81,11 @@ class StructureAndConfigTests(unittest.TestCase):
         self.assertEqual(explicit.gui.history_size, 12)
 
     def test_public_api_exports_config_groups_and_application(self):
+        import tangential.api
+        import tangential.runtime
+
         expected = {
-            "TangentialSensor", "TangentialSensorAPI", "TangentialSample",
+            "TangentialSensor", "TangentialSensorAPI", "TangentialFrame",
             "TangentialFrameProcessor", "FixedTerminalRenderer",
             "FitCalibrationModel", "FullApplicationConfig", "PRSensorAngle",
             "PressureSensor", "compute_vector_angle", "angle_difference",
@@ -94,7 +97,18 @@ class StructureAndConfigTests(unittest.TestCase):
             "SlipDetector", "run_application", "run_dual_application",
         }
         self.assertTrue(expected <= set(tangential.__all__))
-        self.assertIs(tangential.TangentialSample, tangential.api.TangentialSample)
+        self.assertNotIn("TangentialSample", tangential.__all__)
+        self.assertFalse(hasattr(tangential, "TangentialSample"))
+        self.assertNotIn("TangentialSample", tangential.api.__all__)
+        self.assertFalse(hasattr(tangential.api, "TangentialSample"))
+        self.assertNotIn("TangentialSample", tangential.runtime.__all__)
+        self.assertFalse(hasattr(tangential.runtime, "TangentialSample"))
+        sensor_stub = (PACKAGE_ROOT / "runtime" / "sensor.pyi").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("TangentialSample", sensor_stub)
+        self.assertNotIn("_process_sample", sensor_stub)
+        self.assertIs(tangential.TangentialFrame, tangential.api.TangentialFrame)
 
     def test_base_import_does_not_load_optional_gui_or_plotting(self):
         source = "import sys; import tangential; assert 'pyqtgraph' not in sys.modules; assert 'matplotlib' not in sys.modules"
@@ -106,6 +120,43 @@ class StructureAndConfigTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_user_and_developer_documentation_boundaries(self):
+        user_guide = (PROJECT_ROOT / "readme.md").read_text(encoding="utf-8")
+        developer_guide = (PROJECT_ROOT / "readme_developer.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("TangentialSample", user_guide)
+        self.assertNotIn("PYTHONPATH=src", user_guide)
+        self.assertNotIn("requirements.txt", user_guide)
+        self.assertNotIn("python -m tangential.examples", user_guide)
+        self.assertNotIn("Cython", user_guide)
+
+        self.assertTrue(
+            developer_guide.startswith(
+                "# Tangential Sensor SDK 0.5.0 开发者维护指南"
+            )
+        )
+        self.assertIn("TangentialSample", developer_guide)
+        self.assertIn("_process_sample", developer_guide)
+        self.assertIn("PYTHONPATH=src", developer_guide)
+        self.assertIn("requirements.txt", developer_guide)
+        self.assertIn("## 1. 开发目标与不可破坏边界", developer_guide)
+        self.assertIn("## 23. 修改完成的定义", developer_guide)
+        self.assertNotIn("第一部分：", developer_guide)
+        self.assertNotIn("第二部分：", developer_guide)
+        self.assertNotIn("严格内容超集", developer_guide)
+
+        for document in (user_guide, developer_guide):
+            self.assertNotIn("Rust", document)
+            self.assertNotIn("rust", document)
+            self.assertNotIn("<td>", document)
+            self.assertEqual(
+                document.count("<td"),
+                document.count('<td style="white-space:normal">'),
+            )
+            for table in document.split("<table>")[1:]:
+                self.assertIn('<th style="min-width:180px">', table.split("</table>", 1)[0])
 
     def test_example_modules_are_importable_without_running_hardware(self):
         from tangential.examples import dual_sensor, full, minimal

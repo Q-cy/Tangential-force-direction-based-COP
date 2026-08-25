@@ -1,10 +1,8 @@
-# Tangential Sensor SDK 0.4.0
+# Tangential Sensor SDK 0.5.0
 
 Tangential Sensor SDK 用于采集 12×7 PZT 压力阵列和可选六维力传感器，提供 CoP、角度、梯度、切向力标定、实时 GUI、固定 108 列 CSV 和离线分析。
 
-本文面向安装和使用 SDK 的用户，介绍硬件连接、命令行、Python API、参数配置、滑移检测、CSV 行为和常见故障。用户可以安装 wheel，也可以在获得源码后直接运行。
-
-本文是用户与二次开发指南；需要阅读内部架构、修改采集或算法、运行完整测试以及构建 wheel 的项目维护者，请参阅 [开发者维护指南](readme_developer.md)。
+本文面向安装 wheel 后使用 SDK 和进行二次开发的用户，介绍硬件连接、命令行、Python API、参数配置、滑移检测、CSV 行为和常见故障。
 
 ## 系统要求与安装
 
@@ -13,13 +11,13 @@ Tangential Sensor SDK 用于采集 12×7 PZT 压力阵列和可选六维力传�
 完整功能包含实时 GUI 和离线绘图，推荐安装：
 
 ```bash
-python -m pip install "./dist/tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl[full]"
+python -m pip install "./dist/tangential_sensor-0.5.0-cp311-cp311-linux_x86_64.whl[full]"
 ```
 
 只使用压力采集、CoP、标定等核心 API 时，可以不安装 GUI 可选依赖：
 
 ```bash
-python -m pip install ./dist/tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl
+python -m pip install ./dist/tangential_sensor-0.5.0-cp311-cp311-linux_x86_64.whl
 ```
 
 安装后检查：
@@ -29,26 +27,7 @@ tangential --version
 python -c "import tangential; print(tangential.__version__)"
 ```
 
-## 从源码运行
-
-在项目根目录安装依赖并通过 ``PYTHONPATH=src`` 运行：
-
-~~~bash
-python -m pip install -r requirements.txt
-
-PYTHONPATH=src python -m tangential.examples.minimal
-PYTHONPATH=src python -m tangential.examples.full
-~~~
-
-也可以直接运行 CLI：
-
-~~~bash
-PYTHONPATH=src python -m tangential.cli --version
-PYTHONPATH=src python -m tangential.cli example --help
-PYTHONPATH=src python -m tangential.cli app --help
-~~~
-
-``minimal`` 需要压力传感器；``full`` 需要完整 GUI 依赖。安装 wheel 的用户不需要设置 ``PYTHONPATH``。
+用户代码只需从 ``tangential`` 顶层导入本指南列出的公共 API；Python 会自动加载 wheel 内的编译核心，不需要也不应直接导入某个 ``.so`` 文件。
 
 ## 同时连接两个压力传感器
 
@@ -102,18 +81,8 @@ fuser "$PORT_A" "$PORT_B"
 
 ### 第4步：启动双传感器示例
 
-从源码运行：
-
 ~~~bash
-PYTHONPATH=src python -m tangential.examples.dual_sensor \
-  --port-a "$PORT_A" \
-  --port-b "$PORT_B"
-~~~
-
-安装wheel后运行，不需要 ``PYTHONPATH``：
-
-~~~bash
-python -m tangential.examples.dual_sensor \
+tangential dual \
   --port-a "$PORT_A" \
   --port-b "$PORT_B"
 ~~~
@@ -121,7 +90,7 @@ python -m tangential.examples.dual_sensor \
 默认输出目录为 ``./data/sensor_a`` 和 ``./data/sensor_b``。指定父目录时：
 
 ~~~bash
-PYTHONPATH=src python -m tangential.examples.dual_sensor \
+tangential dual \
   --port-a "$PORT_A" --port-b "$PORT_B" \
   --save-dir ./data/dual
 ~~~
@@ -129,7 +98,7 @@ PYTHONPATH=src python -m tangential.examples.dual_sensor \
 如果两路都要连接六维力传感器，必须显式提供两个不同的力端口：
 
 ~~~bash
-PYTHONPATH=src python -m tangential.examples.dual_sensor \
+tangential dual \
   --port-a "$PORT_A" --port-b "$PORT_B" \
   --force-port-a /dev/serial/by-id/FORCE_A \
   --force-port-b /dev/serial/by-id/FORCE_B
@@ -140,7 +109,7 @@ PYTHONPATH=src python -m tangential.examples.dual_sensor \
 查看全部参数：
 
 ~~~bash
-PYTHONPATH=src python -m tangential.examples.dual_sensor --help
+tangential dual --help
 ~~~
 
 ### 第5步：确认输出并停止
@@ -152,11 +121,16 @@ PYTHONPATH=src python -m tangential.examples.dual_sensor --help
 Python调用：
 
 ~~~python
-from tangential import FullApplicationConfig
-from tangential.config import ForceConfig, GuiConfig, OutputConfig, PressureConfig
-from tangential.examples.dual_sensor import run
+from tangential import (
+    ForceConfig,
+    FullApplicationConfig,
+    GuiConfig,
+    OutputConfig,
+    PressureConfig,
+    run_dual_application,
+)
 
-run(
+run_dual_application(
     FullApplicationConfig(
         pressure=PressureConfig(port="/dev/serial/by-id/DEVICE_A_ID"),
         force=ForceConfig(enabled=False),
@@ -233,7 +207,7 @@ tangential example \
   --timeout 0.1
 ~~~
 
-终端每帧显示 12×7 原始 ADC、min、max、sum、mean、CoP X/Y 和角度。此路径不启动六维力、CSV 或 Qt GUI。
+终端每帧显示 12×7 原始 ADC、adc_sum、CoP X/Y、角度、dx、dy 和运动状态。此路径不启动六维力、CSV 或 Qt GUI。
 
 ### 完整采集
 
@@ -299,11 +273,11 @@ from tangential import PressureConfig, TangentialSensor
 pressure = PressureConfig(port="/dev/ttyUSB0")
 with TangentialSensor(config=pressure) as sensor:
     while True:
-        sample = sensor.read(timeout_s=0.1)
-        if sample is not None:
-            print(sample.matrix)
-            print(sample.minimum, sample.maximum, sample.total, sample.mean)
-            print(sample.cop_x, sample.cop_y, sample.angle)
+        frame = sensor.read(timeout_s=0.1)
+        if frame is not None:
+            print(frame.raw.reshape(12, 7))
+            print(frame.adc_sum)
+            print(frame.cop_x, frame.cop_y, frame.angle)
 ~~~
 
 ### 完整应用示例
@@ -343,38 +317,38 @@ run_application(config)
 <tbody>
 <tr>
 <td style="white-space:normal"><code>TangentialSensor</code></td>
-<td style="white-space:normal">串口采集 → 解码 → 单帧处理 → TangentialSample</td>
+<td style="white-space:normal">PressureSensor → decode → TangentialFrameProcessor → TangentialFrame</td>
 <td style="white-space:normal"><code>PressureConfig</code>、可选 <code>ProcessingConfig</code>、模型路径</td>
-<td style="white-space:normal"><code>read(timeout_s)</code> 返回 <code>TangentialSample</code> 或 <code>None</code></td>
+<td style="white-space:normal"><code>read(timeout_s)</code> 返回 <code>TangentialFrame</code> 或 <code>None</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>TangentialSensorAPI</code></td>
-<td style="white-space:normal">压力设备生命周期 → 调用 TangentialFrameProcessor → TangentialSample</td>
+<td style="white-space:normal">压力设备生命周期 → 调用 TangentialFrameProcessor → TangentialFrame</td>
 <td style="white-space:normal">传感器/工厂注入、压力配置、处理配置</td>
-<td style="white-space:normal">逐帧<code>TangentialSample</code>；<code>close()</code> 释放设备</td>
+<td style="white-space:normal">逐帧<code>TangentialFrame</code>；<code>close()</code> 释放设备</td>
 </tr>
 <tr>
-<td style="white-space:normal"><code>TangentialSample</code></td>
-<td style="white-space:normal">原始帧与处理结果 → 统一封装 → 单帧数据对象</td>
+<td style="white-space:normal"><code>TangentialFrame</code></td>
+<td style="white-space:normal">84通道ADC与处理结果 → 八字段公开帧</td>
 <td style="white-space:normal">通常由处理器创建，不建议用户手工构造</td>
-<td style="white-space:normal">ADC、CoP、角度、标定、时间戳、区域和滑移字段</td>
+<td style="white-space:normal"><code>raw</code>、<code>adc_sum</code>、CoP、角度、dx/dy和运动状态</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>TangentialFrameProcessor</code></td>
-<td style="white-space:normal">84通道 ADC → CoP/梯度/滑移/标定 → TangentialSample</td>
+<td style="white-space:normal">84通道ADC → CoP/梯度/滑移/标定 → TangentialFrame</td>
 <td style="white-space:normal"><code>raw</code>、<code>ProcessingConfig</code>、可选标定模型</td>
-<td style="white-space:normal"><code>process()</code> 返回 <code>TangentialSample</code></td>
+<td style="white-space:normal"><code>process()</code> 返回 <code>TangentialFrame</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>FixedTerminalRenderer</code></td>
-<td style="white-space:normal">TangentialSample → 固定布局文本 → 原位刷新终端</td>
-<td style="white-space:normal">输出流、<code>TangentialSample</code></td>
+<td style="white-space:normal">TangentialFrame → 固定布局文本 → 原位刷新终端</td>
+<td style="white-space:normal">输出流、<code>TangentialFrame</code></td>
 <td style="white-space:normal"><code>render()</code> 写入并刷新终端，同时返回文本</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>format_terminal_sample</code></td>
-<td style="white-space:normal">TangentialSample → 12×7矩阵与指标 → str</td>
-<td style="white-space:normal"><code>TangentialSample</code></td>
+<td style="white-space:normal">TangentialFrame → 12×7矩阵与指标 → str</td>
+<td style="white-space:normal"><code>TangentialFrame</code></td>
 <td style="white-space:normal"><code>str</code></td>
 </tr>
 </tbody>
@@ -394,8 +368,8 @@ run_application(config)
 <tbody>
 <tr>
 <td style="white-space:normal"><code>FitCalibrationModel</code></td>
-<td style="white-space:normal">fit_coefs.bin → dx/dy/ADC总和 → Fx/Fy/Fz</td>
-<td style="white-space:normal"><code>from_default()</code> 或 <code>from_path(path)</code>；<code>predict(dx, dy, total, cal_dim="3D")</code></td>
+<td style="white-space:normal">fit_coefs.bin → dx/dy/adc_sum → Fx/Fy/Fz</td>
+<td style="white-space:normal"><code>from_default()</code> 或 <code>from_path(path)</code>；<code>predict(dx, dy, adc_sum, cal_dim="3D")</code></td>
 <td style="white-space:normal">三个标定力分量及模型状态</td>
 </tr>
 <tr>
@@ -602,7 +576,7 @@ run_application(config)
 </tbody>
 </table>
 
-### TangentialSample 字段
+### TangentialFrame 字段
 
 <table>
 <thead>
@@ -616,45 +590,20 @@ run_application(config)
 <tr>
 <td style="white-space:normal"><code>raw</code></td>
 <td style="white-space:normal">ndarray，84</td>
-<td style="white-space:normal">原始一维 ADC 数据副本</td>
+<td style="white-space:normal">原始一维 ADC 数据；终端显示时可 reshape 为12×7</td>
 </tr>
 <tr>
-<td style="white-space:normal"><code>matrix</code> / <code>raw_2d</code></td>
-<td style="white-space:normal">ndarray，12×7</td>
-<td style="white-space:normal">按阵列布局排列的 ADC</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>gradient</code></td>
-<td style="white-space:normal">ndarray，12×7×2</td>
-<td style="white-space:normal">每个压力单元的二维梯度</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>minimum</code> / <code>min</code></td>
+<td style="white-space:normal"><code>adc_sum</code></td>
 <td style="white-space:normal">float，ADC</td>
-<td style="white-space:normal">当前帧最小值</td>
+<td style="white-space:normal">84通道 ADC 之和；对象中唯一的 ADC 总和名称，CSV 也使用同名列</td>
 </tr>
 <tr>
-<td style="white-space:normal"><code>maximum</code> / <code>max</code></td>
-<td style="white-space:normal">float，ADC</td>
-<td style="white-space:normal">当前帧最大值</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>total</code> / <code>sum</code> / <code>adc_sum</code></td>
-<td style="white-space:normal">float，ADC</td>
-<td style="white-space:normal">84通道总和</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>mean</code></td>
-<td style="white-space:normal">float，ADC</td>
-<td style="white-space:normal">84通道均值</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>cop_x</code> / <code>copX</code></td>
+<td style="white-space:normal"><code>cop_x</code></td>
 <td style="white-space:normal">float，cell</td>
 <td style="white-space:normal">CoP列坐标；无效时可能为NaN</td>
 </tr>
 <tr>
-<td style="white-space:normal"><code>cop_y</code> / <code>copY</code></td>
+<td style="white-space:normal"><code>cop_y</code></td>
 <td style="white-space:normal">float，cell</td>
 <td style="white-space:normal">CoP行坐标；无效时可能为NaN</td>
 </tr>
@@ -664,109 +613,24 @@ run_application(config)
 <td style="white-space:normal">当前静态切向或滑移方向角</td>
 </tr>
 <tr>
-<td style="white-space:normal"><code>dx</code>、<code>dy</code></td>
+<td style="white-space:normal"><code>dx</code></td>
 <td style="white-space:normal">float，cell</td>
-<td style="white-space:normal">中值滤波后的CoP相对origin偏移</td>
+<td style="white-space:normal">中值滤波后的 CoP X 相对 origin 偏移</td>
 </tr>
 <tr>
-<td style="white-space:normal"><code>state</code></td>
-<td style="white-space:normal">int</td>
-<td style="white-space:normal">CoP状态：0未接触、1粗略、2精修完成</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>calibrated_fx</code>、<code>calibrated_fy</code>、<code>calibrated_fz</code></td>
-<td style="white-space:normal">float</td>
-<td style="white-space:normal">模型预测的三轴力；模型不可用时为NaN</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>calibrated_angle</code></td>
-<td style="white-space:normal">float，度</td>
-<td style="white-space:normal">标定Fx/Fy方向角；不可用时为NaN</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>request_seq</code></td>
-<td style="white-space:normal">int</td>
-<td style="white-space:normal">压力请求序号；无元数据时为-1</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>tx_t</code>、<code>rx_t</code></td>
-<td style="white-space:normal">float，秒</td>
-<td style="white-space:normal"><code>perf_counter</code> 发送/合法响应接收时间</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>latency_s</code></td>
-<td style="white-space:normal">float，秒</td>
-<td style="white-space:normal">单次压力请求响应延迟</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>rel_ms</code></td>
-<td style="white-space:normal">int，毫秒</td>
-<td style="white-space:normal">相对首个合法压力帧的真实接收时间</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>origin_x</code>、<code>origin_y</code></td>
-<td style="white-space:normal">float或None，cell</td>
-<td style="white-space:normal">当前静态CoP基准</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>contact</code></td>
-<td style="white-space:normal">bool</td>
-<td style="white-space:normal">全局CoP状态机是否接触</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>display_contact</code></td>
-<td style="white-space:normal">bool</td>
-<td style="white-space:normal">GUI是否应显示接触；region模式可与contact不同</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>refined</code></td>
-<td style="white-space:normal">bool</td>
-<td style="white-space:normal">全局CoP二次精修是否完成</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>region_mask</code></td>
-<td style="white-space:normal">ndarray或None</td>
-<td style="white-space:normal">每个cell对应的区域编号</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>regions</code></td>
-<td style="white-space:normal">list[dict]</td>
-<td style="white-space:normal">每个区域的CoP、delta、坐标和状态</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>centroid</code></td>
-<td style="white-space:normal">(x, y)或None</td>
-<td style="white-space:normal">当前压力区域形心</td>
+<td style="white-space:normal"><code>dy</code></td>
+<td style="white-space:normal">float，cell</td>
+<td style="white-space:normal">中值滤波后的 CoP Y 相对 origin 偏移</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>motion_state</code></td>
 <td style="white-space:normal"><code>TangentialMotionState</code></td>
-<td style="white-space:normal">NO_CONTACT、STICK或SLIP</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>is_slipping</code></td>
-<td style="white-space:normal">bool</td>
-<td style="white-space:normal">当前帧是否正在滑移</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>slip_motion_distance</code></td>
-<td style="white-space:normal">float，cell</td>
-<td style="white-space:normal">滑移短窗首尾CoP位移</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>slip_confidence</code></td>
-<td style="white-space:normal">float，0..1</td>
-<td style="white-space:normal">斑块平移确认后的余弦相关置信度</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>angle_vector_magnitude</code></td>
-<td style="white-space:normal">float，cell</td>
-<td style="white-space:normal">angle所用向量模长；STICK为静态delta，SLIP为EMA滑移向量</td>
+<td style="white-space:normal">NO_CONTACT、STICK 或 SLIP</td>
 </tr>
 </tbody>
 </table>
 
-不要用 ``rel_ms`` 反推请求发送时间；需要分析设备延迟时使用 ``tx_t``、``rx_t`` 和 ``latency_s``。
+完整应用保存的 108 列 CSV 中包含 ``rel_ms``、``delta_ms``、``press_t``、``force_t`` 等时序列；这些列不属于 ``TangentialFrame``。分析设备时序时应读取 CSV 对应列并结合采集日志。
 
 ### 按功能分类配置
 
@@ -926,7 +790,7 @@ export TANGENTIAL_MODEL_PATH=/path/to/fit_coefs.bin
 
 ## 滑移检测
 
-0.4.0 增加了可复用的 ``SlipDetector``。它不改变 108 列 CSV，不修改 ``fit_coefs.bin``，也不改变标定模型输入；结果只出现在 ``TangentialSample``、终端输出和实时 GUI 中。每个处理器/传感器实例拥有独立 detector，双传感器不会共享滑移历史。
+当前版本提供可复用的 ``SlipDetector``。它不改变 108 列 CSV，不修改 ``fit_coefs.bin``，也不改变标定模型输入；公开 ``TangentialFrame`` 只暴露 ``motion_state`` 和 ``angle``，滑移距离、置信度和方向向量等详细结果仅供完整 GUI 内部使用。每个处理器/传感器实例拥有独立 detector，双传感器不会共享滑移历史。
 
 ### SlipConfig全部可调参数
 

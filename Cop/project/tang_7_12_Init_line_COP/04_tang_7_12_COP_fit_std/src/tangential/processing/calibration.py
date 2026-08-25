@@ -334,14 +334,14 @@ class FitCalibrationModel:
         except Exception as exc:
             return cls(path=resource_name, error=exc)
 
-    def predict(self, dx, dy, total, cal_dim="3D"):
-        """根据 CoP 位移和压力总量预测 Fx、Fy、Fz。
+    def predict(self, dx, dy, adc_sum, cal_dim="3D"):
+        """根据 CoP 位移和 84 通道 ADC 总和预测 Fx、Fy、Fz。
 
         Args:
             dx: CoP X 位移，单位为传感器 cell。
             dy: CoP Y 位移，单位为传感器 cell。
-            total: 压力阵列总 ADC 值；``cal_dim="3D"`` 时作为第三输入。
-            cal_dim: 标定维度；``"3D"`` 使用 dx/dy/total，否则只使用 dx/dy。
+            adc_sum: 84 通道 ADC 总和；``cal_dim="3D"`` 时作为第三输入。
+            cal_dim: 标定维度；``"3D"`` 使用 dx/dy/adc_sum，否则只使用 dx/dy。
 
         Returns:
             tuple[float, float, float]：按 Fx、Fy、Fz 顺序的预测值；模型不可用
@@ -355,7 +355,7 @@ class FitCalibrationModel:
             return (float("nan"),) * 3
         inputs = [dx, dy]
         if cal_dim == "3D":
-            inputs.append(total)
+            inputs.append(adc_sum)
         resolved_entries = [
             _resolve_entry(entry, self.fit_type, self.split_sign)
             for entry in self.params_list

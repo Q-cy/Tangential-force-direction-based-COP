@@ -49,47 +49,37 @@ def angle_difference(a: float, b: float) -> float:
 
 
 @dataclass
-class TangentialSample:
-    """一个合法压力帧及其全部最小 API 计算结果。
+class TangentialFrame:
+    """公开的单帧压力结果。
 
-    Attributes:
-        raw (np.ndarray): 原始 84 通道 ADC 一维数组。
-        matrix (np.ndarray): 形状为 ``(12, 7)`` 的 ADC 矩阵。
-        gradient (np.ndarray): 压力梯度数组，通常形状为 ``(12, 7, 2)``。
-        minimum/maximum/total/mean (float): ADC 最小值、最大值、总和和均值。
-        cop_x/cop_y (float): CoP 坐标；未计算或无效时可能为 ``NaN``。
-        angle (float): 压力阵列方向角，单位为度。
-        dx/dy (float): 平滑后的 CoP 偏移分量。
-        state (int): CoP 状态机状态。
-        calibrated_fx/calibrated_fy/calibrated_fz (float): 标定力分量，单位
-            由模型定义；没有模型时为 ``NaN``。
-        calibrated_angle (float): 标定 Fx/Fy 的方向角，单位为度。
-        request_seq (int): 传感器请求序号，默认 ``-1`` 表示无元数据。
-        tx_t/rx_t (float): 发送和接收时间，使用 ``perf_counter`` 的秒数；
-            无元数据时为 ``NaN``。
-        latency_s (float): 请求到响应的延迟，单位为秒。
-        origin_x/origin_y (float | None): 接触 origin 坐标。
-        contact/display_contact/refined (bool): 接触、显示接触和精修状态。
-        region_mask (np.ndarray | None): 区域编号矩阵。
-        regions (list[dict]): 区域信息列表。
-        centroid (tuple[float, float] | None): 压力质心坐标。
-        rel_ms (int): 相对首帧时间，单位为毫秒；默认值为 0。
-        motion_state (TangentialMotionState): 当前全局运动状态，包括无接触、
-            静摩擦和滑移。
-        is_slipping (bool): 当前是否已经进入滑移状态。
-        slip_motion_distance (float): CoP 短窗首尾位移，单位为阵列 cell。
-        slip_confidence (float): 压力斑块平移确认后的余弦相关置信度；未确认
-            时为 0。
-        angle_vector_magnitude (float): 当前方向向量模长，单位为阵列 cell。
+    公开采集 API 只返回这八个字段。``raw`` 保持为 84 通道的一维数组；
+    需要终端显示或自定义矩阵计算时，调用方可以自行 ``reshape(12, 7)``。
+    ``adc_sum`` 是对象中唯一的 84 通道 ADC 总和字段；108 列 CSV 使用同名
+    ``adc_sum`` 列，二者语义一致。
     """
 
     raw: np.ndarray
-    matrix: np.ndarray
+    adc_sum: float
+    cop_x: float
+    cop_y: float
+    angle: float
+    dx: float
+    dy: float
+    motion_state: TangentialMotionState
+
+
+@dataclass
+class TangentialSample:
+    """完整应用内部使用的单帧结果。
+
+    该类型不是公共 API。它保留 GUI、CSV、同步和滑移显示所需的 canonical
+    字段；公开处理器会从同一次计算结果投影出 ``TangentialFrame``，不会再次
+    执行 CoP、梯度、滑移或标定算法。
+    """
+
+    raw: np.ndarray
     gradient: np.ndarray
-    minimum: float
-    maximum: float
-    total: float
-    mean: float
+    adc_sum: float
     cop_x: float
     cop_y: float
     angle: float
@@ -119,68 +109,30 @@ class TangentialSample:
     slip_confidence: float = 0.0
     angle_vector_magnitude: float = 0.0
 
-    @property
-    def raw_2d(self) -> np.ndarray:
-        """返回 12×7 ADC 矩阵的直观别名。
 
-        Returns:
-            np.ndarray: 与 ``matrix`` 相同的 12×7 数组引用。
-        """
-        return self.matrix
+def _select_tangential_frame(sample: TangentialSample) -> TangentialFrame:
+    """从完整内部结果中挑选八个稳定公开字段。
 
-    @property
-    def adc_sum(self) -> float:
-        """返回 84 个 ADC 通道的总和。
+    Args:
+        sample (TangentialSample): 当前处理器刚刚计算出的内部详细结果。
 
-        Returns:
-            float: ``total`` 字段的值。
-        """
-        return self.total
+    Returns:
+        TangentialFrame: 只包含 raw、adc_sum、CoP、角度、偏移和运动状态。
 
-    @property
-    def min(self) -> float:
-        """返回 ADC 通道最小值。
-
-        Returns:
-            float: ``minimum`` 字段的值。
-        """
-        return self.minimum
-
-    @property
-    def max(self) -> float:
-        """返回 ADC 通道最大值。
-
-        Returns:
-            float: ``maximum`` 字段的值。
-        """
-        return self.maximum
-
-    @property
-    def sum(self) -> float:
-        """返回 ADC 通道总和的别名。
-
-        Returns:
-            float: ``total`` 字段的值。
-        """
-        return self.total
-
-    @property
-    def copX(self) -> float:
-        """返回 CoP 的 X 坐标。
-
-        Returns:
-            float: ``cop_x`` 字段的值，可能为 ``NaN``。
-        """
-        return self.cop_x
-
-    @property
-    def copY(self) -> float:
-        """返回 CoP 的 Y 坐标。
-
-        Returns:
-            float: ``cop_y`` 字段的值，可能为 ``NaN``。
-        """
-        return self.cop_y
+    Notes:
+        本函数只复制已经算出的字段，不调用 CoP、滑移或标定算法，也不属于
+        SDK 公共导出。
+    """
+    return TangentialFrame(
+        raw=sample.raw.copy(),
+        adc_sum=sample.adc_sum,
+        cop_x=sample.cop_x,
+        cop_y=sample.cop_y,
+        angle=sample.angle,
+        dx=sample.dx,
+        dy=sample.dy,
+        motion_state=sample.motion_state,
+    )
 
 
 class TangentialFrameProcessor:
@@ -245,13 +197,13 @@ class TangentialFrameProcessor:
         self._dx_values = deque(maxlen=median_window)
         self._dy_values = deque(maxlen=median_window)
 
-    def _predict(self, dx, dy, total):
+    def _predict(self, dx, dy, adc_sum):
         """调用注入的标定模型并规范化为三个力分量。
 
         Args:
             dx (float): 平滑后的 CoP X 偏移。
             dy (float): 平滑后的 CoP Y 偏移。
-            total (float): 84 通道 ADC 总和。
+            adc_sum (float): 84 通道 ADC 总和。
 
         Returns:
             tuple[float, float, float]: Fx、Fy、Fz 预测值；没有模型或模型
@@ -264,24 +216,24 @@ class TangentialFrameProcessor:
         if self.calibration is None:
             return (float("nan"),) * 3
         if isinstance(self.calibration, FitCalibrationModel):
-            return self.calibration.predict(dx, dy, total, self.cal_dim)
-        values = list(self.calibration.predict([dx, dy, total]))
+            return self.calibration.predict(dx, dy, adc_sum, self.cal_dim)
+        values = list(self.calibration.predict([dx, dy, adc_sum]))
         values.extend([float("nan")] * (3 - len(values)))
         return tuple(float(value) for value in values[:3])
 
-    def process(self, raw, frame=None) -> TangentialSample:
-        """处理一帧原始压力数据并生成 ``TangentialSample``。
+    def _process_sample(self, raw, frame=None) -> TangentialSample:
+        """处理一帧原始压力数据并生成完整内部结果。
 
         Args:
             raw (array-like): 原始 ADC 通道序列；长度必须等于
                 ``cop_sensor.rows * cop_sensor.cols``，当前为 84。
             frame (Mapping | None): 可选传感器元数据，读取其中的
                 ``request_seq``、``tx_t``、``rx_t`` 和 ``latency_s``；默认
-                ``None`` 表示使用 ``TangentialSample`` 的缺省值。
+                ``None`` 表示使用内部结果的缺省元数据。
 
         Returns:
-            TangentialSample: 包含原始矩阵、统计值、CoP、角度、梯度、区域和
-                标定结果的单帧结果。
+            TangentialSample: 包含完整应用所需的 ADC、CoP、角度、梯度、区域、
+                滑移、标定和时间元数据。
 
         Raises:
             ValueError: ``raw`` 通道数不是处理器期望的数量。
@@ -381,8 +333,10 @@ class TangentialFrameProcessor:
         self._dy_values.append(dy)
         filtered_dx = float(np.median(self._dx_values))
         filtered_dy = float(np.median(self._dy_values))
-        total = float(np.sum(values))
-        cal_fx, cal_fy, cal_fz = self._predict(filtered_dx, filtered_dy, total)
+        adc_sum = float(np.sum(values))
+        cal_fx, cal_fy, cal_fz = self._predict(
+            filtered_dx, filtered_dy, adc_sum
+        )
         cal_angle = (
             compute_vector_angle(cal_fx, cal_fy)
             if np.isfinite(cal_fx) and np.isfinite(cal_fy)
@@ -398,12 +352,8 @@ class TangentialFrameProcessor:
         metadata = frame or {}
         sample = TangentialSample(
             raw=values.copy(),
-            matrix=matrix.copy(),
             gradient=gradient,
-            minimum=float(np.min(values)),
-            maximum=float(np.max(values)),
-            total=total,
-            mean=float(np.mean(values)),
+            adc_sum=adc_sum,
             cop_x=float(cop_x),
             cop_y=float(cop_y),
             angle=float(angle),
@@ -434,9 +384,29 @@ class TangentialFrameProcessor:
         )
         return sample
 
+    def process(self, raw, frame=None) -> TangentialFrame:
+        """处理一帧原始压力数据并返回简化公开结果。
+
+        Args:
+            raw (array-like): 原始 ADC 通道序列；当前必须包含 84 个通道。
+            frame (Mapping | None): 可选压力帧元数据；完整应用使用它保存
+                真实时间和请求序号，公开结果不暴露这些元数据。
+
+        Returns:
+            TangentialFrame: 只有八个稳定公开字段的单帧结果。
+
+        Raises:
+            ValueError: ``raw`` 通道数不是处理器期望的数量。
+            Exception: CoP、滑移或标定实现内部发生错误时向上传播。
+
+        Side Effects:
+            更新既有 CoP 状态机、滑移检测器和 dx/dy 中值滤波状态。
+        """
+        return _select_tangential_frame(self._process_sample(raw, frame))
+
 
 class TangentialSensorAPI:
-    """最小压力采集 API；管理压力设备并返回 ``TangentialSample``。
+    """最小压力采集 API；管理压力设备并返回 ``TangentialFrame``。
 
     Attributes:
         sensor: 提供 ``read_frame``、``decode`` 和可选 ``close`` 的压力传感器。
@@ -513,7 +483,7 @@ class TangentialSensorAPI:
         self.processor = processor
         self._closed = False
 
-    def read(self, timeout_s=0.1) -> TangentialSample | None:
+    def read(self, timeout_s=0.1) -> TangentialFrame | None:
         """读取并处理下一帧压力数据。
 
         Args:
@@ -521,7 +491,7 @@ class TangentialSensorAPI:
                 0.1；传给传感器的 ``read_frame``。
 
         Returns:
-            TangentialSample | None: 收到合法帧时返回处理结果；传感器在超时
+            TangentialFrame | None: 收到合法帧时返回八字段处理结果；传感器在超时
                 或无帧时返回 ``None``。
 
         Raises:
@@ -583,33 +553,29 @@ class TangentialSensorAPI:
         return False
 
 
-def format_terminal_sample(sample: TangentialSample) -> str:
-    """把样本格式化为固定布局的终端文本。
+def format_terminal_sample(sample: TangentialFrame) -> str:
+    """把公开帧格式化为固定布局的终端文本。
 
     Args:
-        sample (TangentialSample): 要显示的单帧结果，必须包含 12×7
-            ``matrix`` 和统计/CoP/角度/标定字段。
+        sample (TangentialFrame): 要显示的单帧结果；``raw`` 必须包含 84
+            个 ADC 通道，并会在此处 reshape 为 12×7。
 
     Returns:
-        str: 包含 12 行 ADC 和统计、CoP/角度、标定结果的换行文本；不会
-        写入终端。
+        str: 包含 12 行 ADC 以及 adc_sum、CoP、角度、dx/dy 和运动状态的
+        换行文本；不会写入终端。
 
     Raises:
         AttributeError: ``sample`` 缺少所需字段时抛出。
         ValueError: 格式化字段不是可格式化数值时抛出。
     """
-    rows = [" ".join(f"{value:7.0f}" for value in row) for row in sample.matrix]
+    matrix = np.asarray(sample.raw).reshape(12, 7)
+    rows = [" ".join(f"{value:7.0f}" for value in row) for row in matrix]
     rows.extend([
-        f"min={sample.minimum:12.3f} max={sample.maximum:12.3f} "
-        f"sum={sample.total:14.3f} mean={sample.mean:12.3f}",
-        f"copX={sample.cop_x:11.4f} copY={sample.cop_y:11.4f} "
+        f"adc_sum={sample.adc_sum:14.3f}",
+        f"cop_x={sample.cop_x:11.4f} cop_y={sample.cop_y:11.4f} "
         f"angle={sample.angle:10.3f}",
-        f"motion={sample.motion_state.name:<10} slipping={str(sample.is_slipping):<5} "
-        f"slip_distance={sample.slip_motion_distance:9.4f} "
-        f"confidence={sample.slip_confidence:7.4f}",
-        f"Fx_cal={sample.calibrated_fx:10.4f} "
-        f"Fy_cal={sample.calibrated_fy:10.4f} "
-        f"Fz_cal={sample.calibrated_fz:10.4f}",
+        f"dx={sample.dx:11.4f} dy={sample.dy:11.4f} "
+        f"motion_state={sample.motion_state.name}",
     ])
     return "\n".join(rows)
 
@@ -638,11 +604,11 @@ class FixedTerminalRenderer:
         self.stream = stream or sys.stdout
         self._first_frame = True
 
-    def render(self, sample: TangentialSample) -> str:
+    def render(self, sample: TangentialFrame) -> str:
         """格式化并立即刷新一帧终端输出。
 
         Args:
-            sample (TangentialSample): 要渲染的压力样本。
+            sample (TangentialFrame): 要渲染的公开压力帧。
 
         Returns:
             str: 不含 ANSI 光标控制前缀的格式化样本文本。

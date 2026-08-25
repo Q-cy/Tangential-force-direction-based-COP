@@ -493,8 +493,8 @@ class FullAcquisitionSession:
                 ``request_seq``、``tx_t``、``latency_s``。
 
         Returns:
-            TangentialSample: 经过 CoP、梯度、状态机、平滑和标定处理的样本；
-                ``rel_ms`` 会基于真实接收时间设置为单调不减毫秒值。
+            TangentialSample: 经过 CoP、梯度、状态机、平滑和标定处理的内部
+                结果；``rel_ms`` 会基于真实接收时间设置为单调不减毫秒值。
 
         Raises:
             Exception: 单帧处理器或归零调度相关错误向上传播。
@@ -509,7 +509,9 @@ class FullAcquisitionSession:
             "rx_t": press_item["t"],
             "latency_s": press_item.get("latency_s", float("nan")),
         }
-        sample = self.processor.process(press_item["data"], metadata)
+        # 完整应用需要内部 canonical 字段；公开 process() 只返回八字段帧。
+        # 这里直接使用同一次计算的内部结果，避免重复推进 CoP/滑移状态机。
+        sample = self.processor._process_sample(press_item["data"], metadata)
         actual_contact = sample.state > 0
         if (
             self.config.refine_rezero_force
@@ -561,7 +563,7 @@ class FullAcquisitionSession:
         """把压力样本和可选匹配力帧写成一行 108 列 CSV。
 
         Args:
-            sample (TangentialSample): 要保存的压力样本，使用其真实 ``rx_t``、
+            sample (TangentialSample): 要保存的内部压力结果，使用其真实 ``rx_t``、
                 ADC、CoP、角度和标定结果。
             force_item (dict | None): 已匹配六维力帧，需含 ``t`` 和长度至少为
                 6 的 ``data``；为 ``None`` 时六维力及其派生字段写为 ``NaN``。
@@ -637,7 +639,7 @@ class FullAcquisitionSession:
             fy_cal=sample.calibrated_fy,
             force_cal_angle=sample.calibrated_angle,
             cop_state=sample.state,
-            adc_sum=sample.total,
+            adc_sum=sample.adc_sum,
             valid=1 if sample.state > 0 else 0,
         ))
         self.csv_file_obj.flush()
@@ -816,7 +818,7 @@ class FullAcquisitionSession:
             sample.angle,
             self.force_angle_deg,
             sample.raw,
-            sample.total,
+            sample.adc_sum,
             sample.cop_x,
             sample.cop_y,
             sample.origin_x,
@@ -847,7 +849,7 @@ class FullAcquisitionSession:
             self.plot.append_full_data(
                 sample.rel_ms,
                 sample.angle,
-                sample.total,
+                sample.adc_sum,
                 sample.dx,
                 sample.dy,
                 self.force_angle_deg,

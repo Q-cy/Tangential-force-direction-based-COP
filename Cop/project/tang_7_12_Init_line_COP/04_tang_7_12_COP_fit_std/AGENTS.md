@@ -1,6 +1,6 @@
 # 04_tang_7_12_COP_fit_std：Agent 工作手册
 
-本文对应 Tangential SDK 0.4.0 的实际架构。修改前必须读取并核对源码；不得恢复旧入口，不得复制协议、CoP、标定或 108 列 CSV 实现。
+本文对应 Tangential SDK 0.5.0 的实际架构。修改前必须读取并核对源码；不得恢复旧入口，不得复制协议、CoP、标定或 108 列 CSV 实现。
 
 ## 1. 项目定位和交付边界
 
@@ -8,7 +8,7 @@
 
 - 正式源码目录是 src/tangential/。
 - 源码仓库完整保留所有 Python .py；源码模式可通过 PYTHONPATH=src 直接运行，不要求预编译 .so。
-- 发布 wheel 目标是 Linux x86_64、CPython 3.11，名称为 tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl。
+- 发布 wheel 目标是 Linux x86_64、CPython 3.11，名称为 tangential_sensor-0.5.0-cp311-cp311-linux_x86_64.whl。
 - wheel 内部 runtime、acquisition、sensors、processing、storage 是多个 CPython 扩展 .so；公开 API、config、CLI、examples、gui、tools 和类型声明保留可读 Python。
 - .so 只是 Python 扩展，不提供稳定 C++/Rust ABI；不得把它描述为原生跨语言 SDK。
 - 保密用户不要发布 sdist，因为 sdist 包含 Python 源码。源码仓库是内部维护源。
@@ -19,9 +19,9 @@
 ~~~text
 04_tang_7_12_COP_fit_std/
 ├── AGENTS.md                         # Agent 架构、不变量、修改路由和验收约束
-├── readme.md                         # 对外安装、源码运行、API、CLI 和保密说明
+├── readme.md                         # wheel用户安装、API、CLI 和二次开发说明
 ├── requirements.txt                  # Python 3.11 完整开发/GUI 依赖
-├── pyproject.toml                    # 包元数据、依赖、入口、资源和构建依赖
+├── pyproject.toml                    # 包元数据、依赖、入口、资源和构建依赖，关于
 ├── setup.py                          # Cython扩展清单、编译指令和wheel源码过滤
 ├── MANIFEST.in                       # 源码分发清单
 ├── src/tangential/
@@ -33,10 +33,10 @@
 │   ├── config.py                     # 分类配置、默认值、环境变量和校验
 │   ├── py.typed                      # 类型提示标记
 │   ├── runtime/
-│   │   ├── sensor.py                 # TangentialSensor、Sample、单帧处理、终端渲染
+│   │   ├── sensor.py                 # TangentialSensor、Frame/内部Sample、单帧处理、终端渲染
 │   │   ├── sensor.pyi                # 编译后模块的公开类型签名
 │   │   ├── session.py                # 完整采集会话、消费线程、CSV、GUI 和清理
-│   │   └── synchronization.py         # 压力—六维力匹配薄适配层
+│   │   └── synchronization.py        # 压力—六维力匹配薄适配层
 │   ├── acquisition/
 │   │   └── buffer.py                 # TimestampedBuffer、seq、顺序消费和匹配
 │   ├── sensors/
@@ -62,13 +62,18 @@
 └── tests/                             # 协议、API、GUI、分发和回归测试
 ~~~
 
+用户代码 / CLI / examples -> application.py -> runtime/session.py -> 采集进程、CSV、GUI、同步和资源清理
+
 runtime、acquisition、sensors、processing、storage 是运行时核心实现；api、config、application、cli、examples、gui、tools 是用户可读层或按需加载层。目录层级不是“重要/不重要”标记，而是按运行时、设备、算法、界面、离线工具和资源职责划分。所有被编译的 .py 在仓库中继续作为唯一源码，相应 .so 只由构建生成。
 
 ## 3. 公共 API 和示例边界
 
 稳定 API 从 tangential 顶层导入，包括：
 
-- TangentialSensor、TangentialSensorAPI、TangentialSample、TangentialFrameProcessor。
+- TangentialSensor、TangentialSensorAPI、TangentialFrame、TangentialFrameProcessor。
+- ``TangentialFrame`` 的字段严格为 ``raw``、``adc_sum``、``cop_x``、``cop_y``、
+  ``angle``、``dx``、``dy``、``motion_state``；其中 ``adc_sum`` 是 84 通道
+  ADC 之和，也是公开对象中唯一的 ADC 总和名称。
 - TangentialMotionState、SlipResult、SlipDetector、SlipConfig。
 - FixedTerminalRenderer、format_terminal_sample、compute_vector_angle、angle_difference。
 - FitCalibrationModel、PRSensorAngle、PressureSensor。
@@ -147,6 +152,8 @@ PYTHONPATH=src python -m tangential.cli dual \
 
 公开 API 的签名、输入、输出、异常和资源生命周期必须有文档字符串。新增用户可调用符号时同步更新 api.py、__init__.py 和测试。
 
+功能、API、命令或配置修改默认不改 ``readme.md``，但必须同步更新 ``readme_developer.md`` 中的架构、实现、修改路由和验收信息。``readme.md`` 只面向安装 wheel 后的用户和二次开发者；``readme_developer.md`` 只面向源码维护者，两者不得复制。只有用户明确要求更新wheel用户文档时才修改 ``readme.md``。
+
 ## 4. 配置规则
 
 所有用户可调参数集中在 config.py，按功能使用 dataclass：
@@ -179,11 +186,14 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
 - 压力和六维力请求目标均为 200 Hz、5 ms 周期；单请求在途，设备响应慢时实际频率自然下降。
 - 压力合法帧解析完成后立即记录真实 rx_t；rel_ms/delta_ms 不得由 GUI、主循环 sleep 或重采样生成。
 - 压力帧按 seq 顺序驱动；每个合法压力帧最多处理和保存一次。
+- 最小 API 的数据流固定为 ``PressureSensor → decode → TangentialFrameProcessor._process_sample() → TangentialSample → 私有转换函数 → TangentialFrame``；``TangentialSample`` 只供完整应用内部直接消费，公开处理器和传感器始终只返回 ``TangentialFrame``，不得从顶层、``tangential.api``、``tangential.runtime.__all__`` 或公开 ``sensor.pyi`` 导出内部类型。
 - 每个力帧最多匹配一次；匹配窗口为 0.015 秒。
 - 力通道不可用时，压力帧保存为NaN力字段；双传感器模式下，超过窗口仍未匹配的压力帧不写CSV，但必须继续推进状态机和GUI。
 - 压力设备必需；六维力连接或普通帧校零失败时降级为压力模式。
 - 启动校零和运行期重新归零只使用普通力数据帧，不发送额外置零命令；串口只能有一个消费者。
 - CSV 只能由 storage/csv.py 的 TABLE_CSV_HEADER 和 build_csv_row 生成。
+- CSV 固定列 ``adc_sum`` 表示同一帧 84 通道 ADC 之和；对象字段与 CSV 列均
+  使用 ``adc_sum``，不得重新引入 ``total``、``sum`` 或其它别名。
 - fit_coefs.bin 通过 package resource 加载，模型格式和预测输出不得改变。
 - 滑移检测是运行时状态，不增加或删除 CSV 列；算法使用短窗 CoP、零填充斑块
   平移相关性、相对 anchor 大位移兜底和连续帧滞回。SLIP 期间 sample.angle
@@ -207,20 +217,21 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
 
 ## 6. 修改路由
 
-| 需求 | 首选位置 | 联动测试 |
-| --- | --- | --- |
-| 压力协议、CRC、调度和队列 | sensors/pressure.py | test_data.py、分发和集成测试 |
-| 六维力协议、校零和进程 | sensors/force.py | test_data.py、集成测试 |
-| seq、缓存和时间匹配 | acquisition/buffer.py、runtime/synchronization.py | test_data.py、集成测试 |
-| CoP、阈值、状态机、梯度、区域 | processing/cop.py | API、GUI、集成测试 |
-| 模型读取和预测 | processing/calibration.py | 模型回归测试 |
-| 最小 API 和示例 | api.py、runtime/sensor.py、examples/minimal.py | test_tangential_api.py、结构测试 |
-| 完整采集和清理 | runtime/session.py、application.py | test_main_integration.py |
-| CSV 格式 | storage/csv.py | test_model_and_table.py、绘图测试 |
-| GUI | gui/realtime.py | test_plot_and_gui.py |
-| 训练和绘图 | tools/training.py、tools/plotting.py | test_training.py、test_plotting.py |
-| CLI | cli.py | test_cli.py |
-| 公共导出和配置 | __init__.py、config.py | API、资源和分发测试 |
+
+| 需求                          | 首选位置                                          | 联动测试                           |
+| ----------------------------- | ------------------------------------------------- | ---------------------------------- |
+| 压力协议、CRC、调度和队列     | sensors/pressure.py                               | test_data.py、分发和集成测试       |
+| 六维力协议、校零和进程        | sensors/force.py                                  | test_data.py、集成测试             |
+| seq、缓存和时间匹配           | acquisition/buffer.py、runtime/synchronization.py | test_data.py、集成测试             |
+| CoP、阈值、状态机、梯度、区域 | processing/cop.py                                 | API、GUI、集成测试                 |
+| 模型读取和预测                | processing/calibration.py                         | 模型回归测试                       |
+| 最小 API 和示例               | api.py、runtime/sensor.py、examples/minimal.py    | test_tangential_api.py、结构测试   |
+| 完整采集和清理                | runtime/session.py、application.py                | test_main_integration.py           |
+| CSV 格式                      | storage/csv.py                                    | test_model_and_table.py、绘图测试  |
+| GUI                           | gui/realtime.py                                   | test_plot_and_gui.py               |
+| 训练和绘图                    | tools/training.py、tools/plotting.py              | test_training.py、test_plotting.py |
+| CLI                           | cli.py                                            | test_cli.py                        |
+| 公共导出和配置                | __init__.py、config.py                            | API、资源和分发测试                |
 
 修改时先定位唯一实现，再复用已有函数/类；不得在调用方复制串口解析、CoP 公式、标定预测或 CSV 行格式。
 
@@ -253,7 +264,7 @@ python -m pip wheel . --no-deps --no-build-isolation -w dist
 构建结果应为：
 
 ~~~text
-dist/tangential_sensor-0.4.0-cp311-cp311-linux_x86_64.whl
+dist/tangential_sensor-0.5.0-cp311-cp311-linux_x86_64.whl
 ~~~
 
 完整测试：
@@ -269,33 +280,14 @@ python -m unittest discover -s tests -q
 
 ~~~bash
 PYTHONPATH=src python -m compileall -q src/tangential tests
-git diff --check
 ~~~
 
 分发验收应检查 wheel 中存在10个内部 .so、10个同名 .pyi、py.typed、资源文件和CLI入口，同时不存在对应内部 .py、生成的 C/C++ 文件或 share/ 模型目录。确认模型可在脱离源码目录加载，函数签名和文档可查看；源码模式和隔离安装模式都要运行完整测试。不要生成或向保密用户发布 sdist。
 
-dist/中的wheel和build/中的中间产物被Git忽略，不属于提交内容。最终交付时必须在报告中给出wheel绝对路径、平台标签和测试结果。
+dist/中的wheel和build/中的中间产物不属于源码修改内容。最终交付时必须在报告中给出wheel绝对路径、平台标签和测试结果。
 
-## 8. Git 安全
+## 8. 版本控制限制
 
-修改前检查：
+除非用户之后明确重新授权，否则不得执行Git写操作，包括 ``add``、``commit``、``revert``、``restore`` 和 ``reset``，也不得创建提交。只读状态检查仅在用户明确要求或任务确有必要且当前指令允许时进行；当前任务明确禁止Git命令时，不得运行任何Git命令。
 
-~~~bash
-git status --short
-~~~
-
-修改后检查：
-
-~~~bash
-git diff --check
-git diff -- readme.md AGENTS.md requirements.txt
-~~~
-
-需要回退已提交阶段时使用：
-
-~~~bash
-git log --oneline -n 10
-git revert <commit-hash>
-~~~
-
-不要使用 git reset --hard 覆盖用户修改。用户明确要求不提交时，保留工作区修改并在最终报告列出文件、测试和未处理的预存变更。
+用户未来明确授权回退已经提交的阶段时，应先核对精确目标，并优先使用 ``git revert <commit-hash>`` 保留历史；不得使用 ``git reset --hard`` 覆盖用户修改。无论是否允许版本控制操作，都必须保留与当前任务无关的预存修改。

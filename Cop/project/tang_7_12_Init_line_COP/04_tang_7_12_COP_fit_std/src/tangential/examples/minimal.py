@@ -36,9 +36,9 @@ def run(
     ) as sensor:
         renderer = FixedTerminalRenderer()
         while True:
-            sample = sensor.read(timeout_s=timeout_s)
-            if sample is not None:
-                renderer.render(sample)
+            frame = sensor.read(timeout_s=timeout_s)
+            if frame is not None:
+                renderer.render(frame)
     return 0
 
 

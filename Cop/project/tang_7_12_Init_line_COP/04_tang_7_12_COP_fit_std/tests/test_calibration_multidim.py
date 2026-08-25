@@ -1,3 +1,4 @@
+import inspect
 import unittest
 
 import numpy as np
@@ -6,8 +7,13 @@ from tangential.processing.calibration import FitCalibrationModel
 
 
 class MultiInputCalibrationTests(unittest.TestCase):
+    def test_predict_names_the_adc_sum_argument(self):
+        parameters = inspect.signature(FitCalibrationModel.predict).parameters
+        self.assertIn("adc_sum", parameters)
+        self.assertNotIn("total", parameters)
+
     def test_multivariable_poly_uses_training_basis_order(self):
-        # order 2, inputs [dx, dy, total]:
+        # order 2, inputs [dx, dy, adc_sum]:
         # 1, x0, x1, x2, x0*x0, x0*x1, x0*x2, x1*x1, x1*x2, x2*x2
         coefficients = np.arange(1.0, 11.0)
         model = FitCalibrationModel(

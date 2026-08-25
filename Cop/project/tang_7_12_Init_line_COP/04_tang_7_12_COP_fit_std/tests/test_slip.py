@@ -171,7 +171,7 @@ class SlipDetectorTests(unittest.TestCase):
         refined.reanchor_origin(2.0, 2.0)
         self.assertEqual(refined.get_state(), 2)
 
-    def test_sample_exposes_motion_fields_and_applies_angle_deadband(self):
+    def test_frame_exposes_motion_state_and_applies_angle_deadband(self):
         processing = ProcessingConfig(
             cop=CopConfig(rows=5, cols=5, collect_frames=1, refine_cnt=0),
             slip=SlipConfig(angle_deadband=0.1),
@@ -187,9 +187,8 @@ class SlipDetectorTests(unittest.TestCase):
         first = processor.process(center.reshape(-1))
         second = processor.process(slight.reshape(-1))
         self.assertEqual(first.motion_state, TangentialMotionState.STICK)
-        self.assertFalse(second.is_slipping)
+        self.assertEqual(second.motion_state, TangentialMotionState.STICK)
         self.assertEqual(second.angle, 0.0)
-        self.assertGreaterEqual(second.angle_vector_magnitude, 0.0)
 
 
 if __name__ == "__main__":

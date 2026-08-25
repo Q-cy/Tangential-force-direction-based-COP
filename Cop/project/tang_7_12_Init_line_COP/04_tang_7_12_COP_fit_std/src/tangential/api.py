@@ -7,7 +7,7 @@
 from .runtime.sensor import (
     FixedTerminalRenderer,
     TangentialFrameProcessor,
-    TangentialSample,
+    TangentialFrame,
     TangentialSensorAPI,
     angle_difference,
     compute_vector_angle,
@@ -18,11 +18,12 @@ from .processing.slip import SlipDetector, SlipResult, TangentialMotionState
 # 面向用户的推荐名称；实现类仍保留 TangentialSensorAPI 这个完整名称。
 TangentialSensor = TangentialSensorAPI
 
+# 控制 from tangential import * 会导入哪些
 __all__ = [
     "TangentialSensor",
     "FixedTerminalRenderer",
+    "TangentialFrame",
     "TangentialFrameProcessor",
-    "TangentialSample",
     "TangentialSensorAPI",
     "angle_difference",
     "compute_vector_angle",

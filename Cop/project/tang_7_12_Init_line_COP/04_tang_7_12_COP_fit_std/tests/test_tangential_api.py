@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 import sys
 import unittest
+from dataclasses import fields
 from importlib import resources
 from unittest import mock
 
@@ -11,6 +12,7 @@ import numpy as np
 
 import tangential as package
 from tangential.processing.calibration import apply_fit_predict_multi, load_fit_coefs
+from tangential.runtime import sensor as runtime_sensor
 
 
 class FakePressureSensor:
@@ -86,13 +88,6 @@ class FakeCalibrator:
         return [1.0, 2.0, 3.0]
 
 
-def _sample_field(sample, name):
-    """读取约定的 TangentialSample 字段，并给出清晰的契约错误。"""
-    if not hasattr(sample, name):
-        raise AssertionError(f"TangentialSample 缺少公共字段 {name!r}")
-    return getattr(sample, name)
-
-
 def _read_sample(api):
     reader = getattr(api, "read", None)
     if reader is None:
@@ -105,7 +100,7 @@ class TangentialApiTests(unittest.TestCase):
         missing = [
             name
             for name in (
-                "TangentialSample",
+                "TangentialFrame",
                 "TangentialFrameProcessor",
                 "TangentialSensorAPI",
                 "FixedTerminalRenderer",
@@ -117,6 +112,7 @@ class TangentialApiTests(unittest.TestCase):
                 "正式 tangential API 缺少计划中的 API: "
                 + ", ".join(missing)
             )
+        self.assertFalse(hasattr(package, "TangentialSample"))
 
     def make_processor(self):
         cop = FakeCopProcessor()
@@ -127,36 +123,31 @@ class TangentialApiTests(unittest.TestCase):
         )
         return processor, cop, calibrator
 
-    def test_sample_and_processor_preserve_shape_statistics_and_delegation(self):
+    def test_frame_has_exact_public_fields_and_processor_delegates_once(self):
         processor, cop, calibrator = self.make_processor()
         values = np.arange(84, dtype=np.float64)
 
-        sample = processor.process(values, frame={"rx_t": 12.5})
+        with mock.patch.object(
+            processor, "_process_sample", wraps=processor._process_sample
+        ) as process_sample:
+            frame = processor.process(values, frame={"rx_t": 12.5})
+        process_sample.assert_called_once()
 
-        self.assertIsInstance(sample, package.TangentialSample)
-        matrix = np.asarray(_sample_field(sample, "matrix"))
-        self.assertEqual(matrix.shape, (12, 7))
-        self.assertEqual(float(_sample_field(sample, "minimum")), 0.0)
-        self.assertEqual(float(_sample_field(sample, "maximum")), 83.0)
-        self.assertEqual(float(_sample_field(sample, "total")), 3486.0)
-        self.assertAlmostEqual(float(_sample_field(sample, "mean")), 41.5)
-        self.assertEqual(sample.min, sample.minimum)
-        self.assertEqual(sample.max, sample.maximum)
-        self.assertEqual(sample.sum, sample.total)
-        self.assertEqual(_sample_field(sample, "rx_t"), 12.5)
-
-        self.assertEqual(_sample_field(sample, "cop_x"), 3.5)
-        self.assertEqual(_sample_field(sample, "cop_y"), 4.5)
-        self.assertEqual(_sample_field(sample, "angle"), 12.5)
-        self.assertEqual(_sample_field(sample, "gradient").shape, (12, 7, 2))
-        self.assertEqual(_sample_field(sample, "calibrated_fx"), 1.0)
-        self.assertEqual(_sample_field(sample, "calibrated_fy"), 2.0)
-        self.assertEqual(_sample_field(sample, "calibrated_fz"), 3.0)
-        self.assertAlmostEqual(
-            _sample_field(sample, "calibrated_angle"),
-            63.434948,
-            places=5,
+        self.assertIsInstance(frame, package.TangentialFrame)
+        self.assertEqual(
+            [item.name for item in fields(package.TangentialFrame)],
+            ["raw", "adc_sum", "cop_x", "cop_y", "angle", "dx", "dy", "motion_state"],
         )
+        self.assertEqual(np.asarray(frame.raw).shape, (84,))
+        self.assertEqual(float(frame.adc_sum), 3486.0)
+        self.assertEqual(frame.cop_x, 3.5)
+        self.assertEqual(frame.cop_y, 4.5)
+        self.assertEqual(frame.angle, 12.5)
+        for name in (
+            "total", "sum", "minimum", "maximum", "mean", "matrix",
+            "raw_2d", "copX", "copY", "gradient", "calibrated_fx",
+        ):
+            self.assertFalse(hasattr(frame, name), name)
         self.assertEqual(len(cop.threshold_frames), 1)
         self.assertEqual(len(cop.all_frames), 1)
         self.assertEqual(len(cop.gradient_frames), 1)
@@ -167,12 +158,60 @@ class TangentialApiTests(unittest.TestCase):
         sensor = FakePressureSensor([np.arange(84, dtype=np.uint16)])
 
         with package.TangentialSensorAPI(sensor=sensor, processor=processor) as api:
-            sample = _read_sample(api)
+            frame = _read_sample(api)
 
-        self.assertIsInstance(sample, package.TangentialSample)
-        self.assertEqual(np.asarray(_sample_field(sample, "matrix")).shape, (12, 7))
+        self.assertIsInstance(frame, package.TangentialFrame)
+        self.assertEqual(np.asarray(frame.raw).shape, (84,))
+        self.assertEqual(frame.adc_sum, float(np.sum(np.arange(84))))
         self.assertEqual(sensor.read_count, 1)
         self.assertTrue(sensor.closed)
+
+    def test_internal_sample_has_only_canonical_detailed_fields(self):
+        processor, _, _ = self.make_processor()
+        internal = processor._process_sample(np.arange(84, dtype=np.float64))
+
+        self.assertIsInstance(internal, runtime_sensor.TangentialSample)
+        self.assertEqual(
+            [item.name for item in fields(runtime_sensor.TangentialSample)],
+            [
+                "raw", "gradient", "adc_sum", "cop_x", "cop_y", "angle",
+                "dx", "dy", "state", "calibrated_fx", "calibrated_fy",
+                "calibrated_fz", "calibrated_angle", "request_seq", "tx_t",
+                "rx_t", "latency_s", "origin_x", "origin_y", "contact",
+                "display_contact", "refined", "region_mask", "regions",
+                "centroid", "rel_ms", "motion_state", "is_slipping",
+                "slip_motion_distance", "slip_confidence",
+                "angle_vector_magnitude",
+            ],
+        )
+        self.assertEqual(internal.adc_sum, 3486.0)
+        for name in (
+            "total", "sum", "minimum", "maximum", "mean", "matrix",
+            "raw_2d", "copX", "copY",
+        ):
+            self.assertFalse(hasattr(internal, name), name)
+
+        algorithm_call_counts = (
+            len(processor.cop_sensor.threshold_frames),
+            len(processor.cop_sensor.all_frames),
+            len(processor.cop_sensor.gradient_frames),
+        )
+        frame = runtime_sensor._select_tangential_frame(internal)
+        self.assertIsInstance(frame, package.TangentialFrame)
+        self.assertEqual(
+            [item.name for item in fields(frame)],
+            ["raw", "adc_sum", "cop_x", "cop_y", "angle", "dx", "dy", "motion_state"],
+        )
+        np.testing.assert_array_equal(frame.raw, internal.raw)
+        self.assertIsNot(frame.raw, internal.raw)
+        self.assertEqual(
+            algorithm_call_counts,
+            (
+                len(processor.cop_sensor.threshold_frames),
+                len(processor.cop_sensor.all_frames),
+                len(processor.cop_sensor.gradient_frames),
+            ),
+        )
 
     def test_sensor_api_passes_pressure_port_to_factory(self):
         calls = []
@@ -226,6 +265,8 @@ class TangentialApiTests(unittest.TestCase):
         stream.flush.assert_called_once_with()
         written = stream.write.call_args.args[0]
         self.assertIn(rendered, written)
+        self.assertIn("adc_sum=", rendered)
+        self.assertIn("motion_state=", rendered)
         matrix_lines = rendered.splitlines()[:12]
         self.assertEqual(len(matrix_lines), 12)
         widths = {len(line) for line in matrix_lines}
