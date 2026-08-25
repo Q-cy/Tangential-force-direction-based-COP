@@ -1,4 +1,5 @@
 import io
+import inspect
 import os
 import pathlib
 import subprocess
@@ -11,7 +12,11 @@ from unittest import mock
 import numpy as np
 
 import tangential as package
-from tangential.processing.calibration import apply_fit_predict_multi, load_fit_coefs
+from tangential.processing.calibration import (
+    FitCalibrationModel,
+    apply_fit_predict_multi,
+    load_fit_coefs,
+)
 from tangential.runtime import sensor as runtime_sensor
 
 
@@ -123,14 +128,19 @@ class TangentialApiTests(unittest.TestCase):
         )
         return processor, cop, calibrator
 
-    def test_frame_has_exact_public_fields_and_processor_delegates_once(self):
+    def test_frame_has_exact_public_fields_and_process_frame_delegates_once(self):
         processor, cop, calibrator = self.make_processor()
+        sample_processor = processor._sample_processor
         values = np.arange(84, dtype=np.float64)
 
+        self.assertTrue(hasattr(processor, "process_frame"))
+        self.assertFalse(hasattr(processor, "process"))
+        self.assertFalse(hasattr(processor, "_process_sample"))
+        self.assertFalse(hasattr(processor, "sample_processor"))
         with mock.patch.object(
-            processor, "_process_sample", wraps=processor._process_sample
+            sample_processor, "_process_sample", wraps=sample_processor._process_sample
         ) as process_sample:
-            frame = processor.process(values, frame={"rx_t": 12.5})
+            frame = processor.process_frame(values, frame={"rx_t": 12.5})
         process_sample.assert_called_once()
 
         self.assertIsInstance(frame, package.TangentialFrame)
@@ -153,6 +163,16 @@ class TangentialApiTests(unittest.TestCase):
         self.assertEqual(len(cop.gradient_frames), 1)
         self.assertEqual(len(calibrator.calls), 1)
 
+    def test_frame_processors_own_distinct_sample_processors(self):
+        first, _, _ = self.make_processor()
+        second, _, _ = self.make_processor()
+
+        self.assertIsNot(first._sample_processor, second._sample_processor)
+        self.assertIsNot(
+            first._sample_processor.slip_detector,
+            second._sample_processor.slip_detector,
+        )
+
     def test_sensor_api_reads_decodes_and_closes_in_context(self):
         processor, _, _ = self.make_processor()
         sensor = FakePressureSensor([np.arange(84, dtype=np.uint16)])
@@ -166,9 +186,18 @@ class TangentialApiTests(unittest.TestCase):
         self.assertEqual(sensor.read_count, 1)
         self.assertTrue(sensor.closed)
 
+    def test_sensor_api_rejects_internal_sample_processor_injection(self):
+        processor, _, _ = self.make_processor()
+        with self.assertRaises(TypeError):
+            package.TangentialSensorAPI(
+                sensor=FakePressureSensor([]),
+                processor=processor._sample_processor,
+            )
+
     def test_internal_sample_has_only_canonical_detailed_fields(self):
         processor, _, _ = self.make_processor()
-        internal = processor._process_sample(np.arange(84, dtype=np.float64))
+        sample_processor = processor._sample_processor
+        internal = sample_processor._process_sample(np.arange(84, dtype=np.float64))
 
         self.assertIsInstance(internal, runtime_sensor.TangentialSample)
         self.assertEqual(
@@ -192,11 +221,19 @@ class TangentialApiTests(unittest.TestCase):
             self.assertFalse(hasattr(internal, name), name)
 
         algorithm_call_counts = (
-            len(processor.cop_sensor.threshold_frames),
-            len(processor.cop_sensor.all_frames),
-            len(processor.cop_sensor.gradient_frames),
+            len(sample_processor.cop_sensor.threshold_frames),
+            len(sample_processor.cop_sensor.all_frames),
+            len(sample_processor.cop_sensor.gradient_frames),
         )
-        frame = runtime_sensor._select_tangential_frame(internal)
+        self.assertIsInstance(
+            inspect.getattr_static(
+                package.TangentialFrameProcessor, "_to_tangential_frame"
+            ),
+            staticmethod,
+        )
+        legacy_projection_name = "to_" + "tangential_" + "frame"
+        self.assertFalse(hasattr(runtime_sensor, legacy_projection_name))
+        frame = processor._to_tangential_frame(internal)
         self.assertIsInstance(frame, package.TangentialFrame)
         self.assertEqual(
             [item.name for item in fields(frame)],
@@ -207,9 +244,9 @@ class TangentialApiTests(unittest.TestCase):
         self.assertEqual(
             algorithm_call_counts,
             (
-                len(processor.cop_sensor.threshold_frames),
-                len(processor.cop_sensor.all_frames),
-                len(processor.cop_sensor.gradient_frames),
+                len(sample_processor.cop_sensor.threshold_frames),
+                len(sample_processor.cop_sensor.all_frames),
+                len(sample_processor.cop_sensor.gradient_frames),
             ),
         )
 
@@ -239,7 +276,7 @@ class TangentialApiTests(unittest.TestCase):
             pressure_port="/dev/bundled-model-test",
             model_path=None,
         )
-        self.assertTrue(api.processor.calibration.available)
+        self.assertTrue(api.processor._sample_processor.calibration.available)
         api.close()
 
     def test_sensor_api_close_is_idempotent(self):
@@ -255,7 +292,7 @@ class TangentialApiTests(unittest.TestCase):
     def test_fixed_terminal_renderer_writes_and_flushes_once(self):
         processor, _, _ = self.make_processor()
         values = np.arange(84, dtype=np.float64)
-        sample = processor.process(values, frame={"rx_t": 1.0})
+        sample = processor.process_frame(values, frame={"rx_t": 1.0})
         stream = mock.Mock(spec=io.StringIO)
 
         renderer = package.FixedTerminalRenderer(stream=stream)
@@ -293,11 +330,12 @@ class TangentialApiTests(unittest.TestCase):
 class PublicApiStructureTests(unittest.TestCase):
     def test_public_exports_and_no_gui_import(self):
         required = {
-            "TangentialSensor", "angle_difference", "TrainingConfig",
+            "TangentialSensorAPI", "angle_difference", "TrainingConfig",
             "TrainingResult", "train_model", "PlotConfig", "PlotResult",
             "plot_csv", "plot_full_analysis",
         }
         self.assertTrue(required.issubset(set(package.__all__)))
+        self.assertFalse(hasattr(package, "TangentialSensor"))
         env = os.environ.copy()
         env["PYTHONPATH"] = str(pathlib.Path(__file__).resolve().parents[1] / "src")
         result = subprocess.run(

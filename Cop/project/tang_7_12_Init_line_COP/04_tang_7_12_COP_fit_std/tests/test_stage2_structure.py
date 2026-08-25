@@ -85,7 +85,7 @@ class StructureAndConfigTests(unittest.TestCase):
         import tangential.runtime
 
         expected = {
-            "TangentialSensor", "TangentialSensorAPI", "TangentialFrame",
+            "TangentialSensorAPI", "TangentialFrame",
             "TangentialFrameProcessor", "FixedTerminalRenderer",
             "FitCalibrationModel", "FullApplicationConfig", "PRSensorAngle",
             "PressureSensor", "compute_vector_angle", "angle_difference",
@@ -96,18 +96,43 @@ class StructureAndConfigTests(unittest.TestCase):
             "GuiConfig", "SlipConfig", "TangentialMotionState", "SlipResult",
             "SlipDetector", "run_application", "run_dual_application",
         }
-        self.assertTrue(expected <= set(tangential.__all__))
+        self.assertEqual(set(tangential.__all__), expected)
+        self.assertIn("TangentialSensorAPI", tangential.__all__)
+        self.assertFalse(hasattr(tangential, "TangentialSensor"))
+        self.assertNotIn("TangentialSensor", tangential.api.__all__)
+        self.assertFalse(hasattr(tangential.api, "TangentialSensor"))
+        self.assertNotIn("TangentialSensor", tangential.runtime.__all__)
+        self.assertFalse(hasattr(tangential.runtime, "TangentialSensor"))
         self.assertNotIn("TangentialSample", tangential.__all__)
         self.assertFalse(hasattr(tangential, "TangentialSample"))
+        self.assertNotIn("TangentialSampleProcessor", tangential.__all__)
+        self.assertFalse(hasattr(tangential, "TangentialSampleProcessor"))
+        legacy_projection_name = "to_" + "tangential_" + "frame"
+        self.assertNotIn(legacy_projection_name, tangential.__all__)
+        self.assertFalse(hasattr(tangential, legacy_projection_name))
         self.assertNotIn("TangentialSample", tangential.api.__all__)
         self.assertFalse(hasattr(tangential.api, "TangentialSample"))
+        self.assertNotIn("TangentialSampleProcessor", tangential.api.__all__)
+        self.assertFalse(hasattr(tangential.api, "TangentialSampleProcessor"))
+        self.assertFalse(hasattr(tangential.api, legacy_projection_name))
         self.assertNotIn("TangentialSample", tangential.runtime.__all__)
         self.assertFalse(hasattr(tangential.runtime, "TangentialSample"))
+        self.assertNotIn("TangentialSampleProcessor", tangential.runtime.__all__)
+        self.assertFalse(hasattr(tangential.runtime, "TangentialSampleProcessor"))
+        self.assertNotIn(
+            "sample_processor",
+            inspect.signature(tangential.TangentialFrameProcessor).parameters,
+        )
+        self.assertFalse(hasattr(tangential.runtime, legacy_projection_name))
         sensor_stub = (PACKAGE_ROOT / "runtime" / "sensor.pyi").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("TangentialSample", sensor_stub)
+        self.assertNotIn("TangentialSampleProcessor", sensor_stub)
+        self.assertNotIn("sample_processor", sensor_stub)
         self.assertNotIn("_process_sample", sensor_stub)
+        self.assertIn("def process_frame(", sensor_stub)
+        self.assertNotIn("def process(", sensor_stub)
         self.assertIs(tangential.TangentialFrame, tangential.api.TangentialFrame)
 
     def test_base_import_does_not_load_optional_gui_or_plotting(self):
@@ -131,6 +156,14 @@ class StructureAndConfigTests(unittest.TestCase):
         self.assertNotIn("requirements.txt", user_guide)
         self.assertNotIn("python -m tangential.examples", user_guide)
         self.assertNotIn("Cython", user_guide)
+        for name in (
+            "FitCalibrationModel", "PRSensorAngle", "PressureSensor",
+            "SlipDetector", "SlipResult", "compute_vector_angle",
+            "angle_difference", "FixedTerminalRenderer",
+            "format_terminal_sample",
+        ):
+            self.assertNotIn(name, user_guide)
+            self.assertIn(name, developer_guide)
 
         self.assertTrue(
             developer_guide.startswith(

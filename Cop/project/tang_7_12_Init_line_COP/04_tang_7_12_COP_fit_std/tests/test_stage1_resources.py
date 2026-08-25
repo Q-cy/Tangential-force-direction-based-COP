@@ -9,6 +9,7 @@ from tangential.config import (
     default_save_dir,
 )
 from tangential.runtime.session import FullAcquisitionSession
+from tangential.runtime.sensor import TangentialSampleProcessor
 from tangential.processing.calibration import FitCalibrationModel
 
 
@@ -75,6 +76,21 @@ class Stage1ResourceTests(unittest.TestCase):
             session.start()
         self.assertEqual(pressure_calls, ["pressure-test"])
         self.assertEqual(force_calls, [])
+
+    def test_full_session_uses_sample_processor_and_accepts_test_injection(self):
+        class InjectedSampleProcessor:
+            def _process_sample(self, raw, frame=None):
+                del raw, frame
+                return None
+
+        injected = InjectedSampleProcessor()
+        session = FullAcquisitionSession(mock.Mock(), sample_processor=injected)
+        self.assertIs(session.sample_processor, injected)
+        self.assertFalse(hasattr(session, "processor"))
+
+        default_session = FullAcquisitionSession(mock.Mock())
+        self.assertIsNone(default_session.sample_processor)
+        self.assertTrue(callable(TangentialSampleProcessor._process_sample))
 
 
 if __name__ == "__main__":

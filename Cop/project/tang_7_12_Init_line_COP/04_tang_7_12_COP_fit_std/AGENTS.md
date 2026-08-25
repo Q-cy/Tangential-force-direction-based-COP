@@ -33,7 +33,7 @@
 │   ├── config.py                     # 分类配置、默认值、环境变量和校验
 │   ├── py.typed                      # 类型提示标记
 │   ├── runtime/
-│   │   ├── sensor.py                 # TangentialSensor、Frame/内部Sample、单帧处理、终端渲染
+│   │   ├── sensor.py                 # TangentialSensorAPI、Frame/内部Sample、单帧处理和终端渲染
 │   │   ├── sensor.pyi                # 编译后模块的公开类型签名
 │   │   ├── session.py                # 完整采集会话、消费线程、CSV、GUI 和清理
 │   │   └── synchronization.py        # 压力—六维力匹配薄适配层
@@ -68,18 +68,19 @@ runtime、acquisition、sensors、processing、storage 是运行时核心实现�
 
 ## 3. 公共 API 和示例边界
 
-稳定 API 从 tangential 顶层导入，包括：
+稳定源码 API 从 tangential 顶层导入，包括以下 32 个名称；普通用户推荐其中 3 个：TangentialSensorAPI、TangentialFrameProcessor、TangentialFrame。配置、应用、工具和高级/底层名称仍保留在源码与顶层导出中，供完整程序和维护者使用：
 
-- TangentialSensor、TangentialSensorAPI、TangentialFrame、TangentialFrameProcessor。
+- TangentialSensorAPI、TangentialFrame、TangentialFrameProcessor。
 - ``TangentialFrame`` 的字段严格为 ``raw``、``adc_sum``、``cop_x``、``cop_y``、
   ``angle``、``dx``、``dy``、``motion_state``；其中 ``adc_sum`` 是 84 通道
   ADC 之和，也是公开对象中唯一的 ADC 总和名称。
-- TangentialMotionState、SlipResult、SlipDetector、SlipConfig。
 - FixedTerminalRenderer、format_terminal_sample、compute_vector_angle、angle_difference。
-- FitCalibrationModel、PRSensorAngle、PressureSensor。
+- FitCalibrationModel、PRSensorAngle、PressureSensor、TangentialMotionState、SlipResult、SlipDetector、SlipConfig。
 - PressureConfig、ForceConfig、CopConfig、ProcessingConfig、CalibrationConfig、SyncConfig、OutputConfig、GuiConfig、TrainingConfig、PlotConfig、FullApplicationConfig。
 - train_model、TrainingResult、plot_csv、plot_full_analysis、PlotResult、run_application。
 - run_dual_application：在一个 QApplication 中启动两路完整、相互隔离的 GUI 会话。
+
+上述列表中的其余 29 个名称继续保留源码、顶层导出、runtime 导出和类型声明，但不放入面向普通用户的 readme.md 三项推荐 API 表；它们由完整会话、离线工具或维护者场景使用。TangentialSensor 别名已删除，TangentialSensorAPI 是唯一正式压力采集类名称。minimal.py 继续使用 FixedTerminalRenderer 输出固定终端布局；format_terminal_sample 保持为终端文本格式化函数。
 
 examples/minimal.py 是唯一最小循环；CLI example 必须调用它，不得在 cli.py 复制 while 循环。examples/full.py 只调用公开 run_application；CLI app 必须复用该入口。plot 和 fit 必须惰性导入 tools，基础 import tangential 不得加载 Qt、PyQtGraph 或 Matplotlib。
 
@@ -186,7 +187,7 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
 - 压力和六维力请求目标均为 200 Hz、5 ms 周期；单请求在途，设备响应慢时实际频率自然下降。
 - 压力合法帧解析完成后立即记录真实 rx_t；rel_ms/delta_ms 不得由 GUI、主循环 sleep 或重采样生成。
 - 压力帧按 seq 顺序驱动；每个合法压力帧最多处理和保存一次。
-- 最小 API 的数据流固定为 ``PressureSensor → decode → TangentialFrameProcessor._process_sample() → TangentialSample → 私有转换函数 → TangentialFrame``；``TangentialSample`` 只供完整应用内部直接消费，公开处理器和传感器始终只返回 ``TangentialFrame``，不得从顶层、``tangential.api``、``tangential.runtime.__all__`` 或公开 ``sensor.pyi`` 导出内部类型。
+- 最小 API 的数据流固定为 ``TangentialSensorAPI → PressureSensor/decode → TangentialSampleProcessor._process_sample() → TangentialSample → TangentialFrameProcessor._to_tangential_frame() → TangentialFrame``；``TangentialSample`` 只供完整应用内部直接消费，公开处理器和传感器始终只返回 ``TangentialFrame``，不得从顶层、``tangential.api``、``tangential.runtime.__all__`` 或公开 ``sensor.pyi`` 导出内部类型。
 - 每个力帧最多匹配一次；匹配窗口为 0.015 秒。
 - 力通道不可用时，压力帧保存为NaN力字段；双传感器模式下，超过窗口仍未匹配的压力帧不写CSV，但必须继续推进状态机和GUI。
 - 压力设备必需；六维力连接或普通帧校零失败时降级为压力模式。

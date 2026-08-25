@@ -59,11 +59,11 @@
 压力串口
 → PressureSensor请求、收包、校验、时间戳
 → decode得到84通道ADC
-→ TangentialFrameProcessor._process_sample()计算CoP、梯度、滑移和标定
+→ TangentialSampleProcessor._process_sample()计算CoP、梯度、滑移和标定
 → TangentialSample（内部详细结果）
-→ _select_tangential_frame()挑选八个公开字段
+→ TangentialFrameProcessor._to_tangential_frame()挑选八个公开字段
 → TangentialFrame
-→ 用户循环或FixedTerminalRenderer
+→ 用户循环自行决定终端或其他输出
 ```
 
 完整应用的数据流：
@@ -172,7 +172,7 @@
 │       │   ├── __init__.py
 │       │   │   └── 运行时子包边界和导出；区分用户可见 Frame 与完整应用内部编排对象。
 │       │   ├── sensor.py
-│       │   │   └── PressureSensor 帧 → decode → 内部 TangentialSample → 私有字段筛选 → 公开 TangentialFrame；负责最小单帧 API 和终端渲染。
+│       │   │   └── PressureSensor 帧 → decode → TangentialSampleProcessor._process_sample() → TangentialSample → TangentialFrameProcessor._to_tangential_frame() → 公开 TangentialFrame；每个 TangentialFrameProcessor 门面独占一个样本处理器。
 │       │   ├── sensor.pyi
 │       │   │   └── sensor.py 对应 Cython .so 的公开静态类型和签名；只声明 TangentialFrame 等公开接口，不声明内部 TangentialSample。
 │       │   ├── session.py
@@ -206,7 +206,7 @@
 │       │   ├── __init__.py
 │       │   │   └── 示例子包边界；不增加第二套内部业务实现。
 │       │   ├── minimal.py
-│       │   │   └── PressureConfig → TangentialSensor → 逐帧读取 TangentialFrame → 终端摘要；最小 API 示例唯一循环。
+│       │   │   └── PressureConfig → TangentialSensorAPI → 逐帧读取 TangentialFrame → 终端摘要；最小 API 示例唯一循环。
 │       │   ├── full.py
 │       │   │   └── FullApplicationConfig → run_application；完整示例只展示公共入口，不复制完整循环。
 │       │   └── dual_sensor.py
@@ -224,6 +224,281 @@
 
 使用这棵树定位修改时，协议采集只改 `src/tangential/sensors/pressure.py` 或 `force.py`；公开 `TangentialFrame` 与内部 `TangentialSample` 的边界只改 `src/tangential/runtime/sensor.py`；CoP、滑移和标定分别改 `processing/cop.py`、`slip.py` 和 `calibration.py`；压力—力同步只改 `acquisition/buffer.py` 与 `runtime/synchronization.py`；108 列 CSV 只改 `storage/csv.py`；实时窗口只改 `gui/realtime.py`；CLI 与示例入口分别改 `cli.py`、`examples/minimal.py`、`full.py` 和 `dual_sensor.py`；训练和离线绘图只改 `tools/training.py` 与 `tools/plotting.py`；构建、扩展过滤和 wheel 内容只改 `pyproject.toml`、`setup.py` 与 `MANIFEST.in`。每类功能先定位这里列出的唯一实现，再更新对应测试和本维护者文档，禁止在调用方复制协议、算法或 CSV 映射。
 
+## 4.1 公共 API 与内部实现边界
+
+`src/tangential/__init__.py`当前真实导出 32 个名称。`readme.md`只向普通用户推荐其中 3 个：`TangentialSensorAPI`、`TangentialFrameProcessor`和`TangentialFrame`。配置、完整应用、训练和绘图名称属于可选的维护者/命令实现边界；高级协议、算法和终端输出名称仍保留源码与顶层导出，但不作为普通用户的首选接口。`TangentialSensor`别名已删除，`TangentialSensorAPI`是唯一正式压力采集类名称。
+
+### 用户推荐 API
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">公共 API 名称</th>
+<th>用户用途/流程</th>
+<th>实现入口</th>
+<th>返回类型或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="white-space:normal"><code>TangentialSensorAPI</code></td>
+<td style="white-space:normal">管理压力读取生命周期 → 解码 → 调用公开单帧处理门面</td>
+<td style="white-space:normal"><code>runtime/sensor.py:TangentialSensorAPI</code></td>
+<td style="white-space:normal">逐帧<code>TangentialFrame</code>；<code>close()</code>释放资源</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>TangentialFrame</code></td>
+<td style="white-space:normal">保存用户可消费的单帧压力结果</td>
+<td style="white-space:normal"><code>runtime/sensor.py:TangentialFrame</code></td>
+<td style="white-space:normal">固定八字段的数据类</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>TangentialFrameProcessor</code></td>
+<td style="white-space:normal">已有84通道ADC → 单帧处理 → <code>TangentialFrame</code></td>
+<td style="white-space:normal"><code>runtime/sensor.py:TangentialFrameProcessor.process_frame</code></td>
+<td style="white-space:normal"><code>TangentialFrame</code></td>
+</tr>
+</tbody>
+</table>
+
+### 配置 API
+
+下列名称是真实顶层导出，负责完整应用的设备、处理、同步、输出和 GUI 参数；普通用户运行示例时不需要把它们当作单帧采集 API。
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">公共 API 名称</th>
+<th>用户用途/流程</th>
+<th>实现入口</th>
+<th>返回类型或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="white-space:normal"><code>FullApplicationConfig</code></td>
+<td style="white-space:normal">组合设备、处理、同步、输出和GUI配置</td>
+<td style="white-space:normal"><code>config.py:FullApplicationConfig</code></td>
+<td style="white-space:normal">完整应用配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>PressureConfig</code></td>
+<td style="white-space:normal">配置压力端口、波特率、频率、超时和队列</td>
+<td style="white-space:normal"><code>config.py:PressureConfig</code></td>
+<td style="white-space:normal">压力配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>ForceConfig</code></td>
+<td style="white-space:normal">配置六维力开关、端口、频率、超时和校零</td>
+<td style="white-space:normal"><code>config.py:ForceConfig</code></td>
+<td style="white-space:normal">六维力配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>CopConfig</code></td>
+<td style="white-space:normal">配置CoP相关阈值、稳定和精修参数</td>
+<td style="white-space:normal"><code>config.py:CopConfig</code></td>
+<td style="white-space:normal">CoP配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>ProcessingConfig</code></td>
+<td style="white-space:normal">组合维度、区域模式、滤波和单帧处理策略</td>
+<td style="white-space:normal"><code>config.py:ProcessingConfig</code></td>
+<td style="white-space:normal">处理配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>SlipConfig</code></td>
+<td style="white-space:normal">配置滑移窗口、阈值、平滑和滞回参数</td>
+<td style="white-space:normal"><code>config.py:SlipConfig</code></td>
+<td style="white-space:normal">滑移配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>CalibrationConfig</code></td>
+<td style="white-space:normal">选择默认或外部标定配置</td>
+<td style="white-space:normal"><code>config.py:CalibrationConfig</code></td>
+<td style="white-space:normal">标定配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>SyncConfig</code></td>
+<td style="white-space:normal">配置主循环、GUI、匹配窗口和缓存</td>
+<td style="white-space:normal"><code>config.py:SyncConfig</code></td>
+<td style="white-space:normal">同步配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>OutputConfig</code></td>
+<td style="white-space:normal">配置CSV和分析图的保存目录</td>
+<td style="white-space:normal"><code>config.py:OutputConfig</code></td>
+<td style="white-space:normal">输出配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>GuiConfig</code></td>
+<td style="white-space:normal">配置窗口、历史数据、色阶和显示参数</td>
+<td style="white-space:normal"><code>config.py:GuiConfig</code></td>
+<td style="white-space:normal">GUI配置对象</td>
+</tr>
+</tbody>
+</table>
+
+### 公共支撑类型
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">公共 API 名称</th>
+<th>用户用途/流程</th>
+<th>实现入口</th>
+<th>返回类型或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="white-space:normal"><code>TangentialMotionState</code></td>
+<td style="white-space:normal">读取<code>frame.motion_state</code>并判断接触运动状态</td>
+<td style="white-space:normal"><code>processing/slip.py:TangentialMotionState</code></td>
+<td style="white-space:normal"><code>NO_CONTACT</code>、<code>STICK</code>或<code>SLIP</code></td>
+</tr>
+</tbody>
+</table>
+
+### 应用与工具 API
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">公共 API 名称</th>
+<th>用户用途/流程</th>
+<th>实现入口</th>
+<th>返回类型或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="white-space:normal"><code>TrainingConfig</code></td>
+<td style="white-space:normal">配置离线训练数据、拟合和输出选项</td>
+<td style="white-space:normal"><code>config.py:TrainingConfig</code></td>
+<td style="white-space:normal">训练配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>TrainingResult</code></td>
+<td style="white-space:normal">读取训练入口返回的模型和评估信息</td>
+<td style="white-space:normal"><code>tools/training.py:TrainingResult</code></td>
+<td style="white-space:normal">训练结果对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>train_model</code></td>
+<td style="white-space:normal">训练数据 → 标定结果和评估信息</td>
+<td style="white-space:normal"><code>tools/training.py:train_model</code></td>
+<td style="white-space:normal"><code>TrainingResult</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>PlotConfig</code></td>
+<td style="white-space:normal">配置CSV、列、行范围、模式和输出路径</td>
+<td style="white-space:normal"><code>config.py:PlotConfig</code></td>
+<td style="white-space:normal">绘图配置对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>PlotResult</code></td>
+<td style="white-space:normal">读取绘图入口生成的图像和分析路径</td>
+<td style="white-space:normal"><code>tools/plotting.py:PlotResult</code></td>
+<td style="white-space:normal">绘图结果对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>plot_csv</code></td>
+<td style="white-space:normal">CSV表头和绘图配置 → 指定列图像</td>
+<td style="white-space:normal"><code>tools/plotting.py:plot_csv</code></td>
+<td style="white-space:normal"><code>PlotResult</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>plot_full_analysis</code></td>
+<td style="white-space:normal">完整CSV → 全部分析图和统计结果</td>
+<td style="white-space:normal"><code>tools/plotting.py:plot_full_analysis</code></td>
+<td style="white-space:normal"><code>PlotResult</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>run_application</code></td>
+<td style="white-space:normal">完整配置 → 单路会话、GUI、CSV和清理</td>
+<td style="white-space:normal"><code>application.py:run_application</code></td>
+<td style="white-space:normal">正常退出返回<code>int 0</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>run_dual_application</code></td>
+<td style="white-space:normal">两份独立配置 → 两路隔离会话、GUI和CSV</td>
+<td style="white-space:normal"><code>application.py:run_dual_application</code></td>
+<td style="white-space:normal">正常退出返回<code>int 0</code></td>
+</tr>
+</tbody>
+</table>
+
+### 高级/底层公共 API
+
+下表 9 个名称仍保留在源码、顶层导出、运行时导出和类型声明中，主要由高层采集、完整会话、离线工具或维护者代码使用；它们不是普通用户的首选入口。它们的实现入口和内部用途必须保持稳定，新增调用应优先复用前三项推荐 API。
+
+<table>
+<thead>
+<tr>
+<th style="min-width:180px">公共 API 名称</th>
+<th>用户用途/流程</th>
+<th>实现入口</th>
+<th>返回类型或输出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="white-space:normal"><code>FitCalibrationModel</code></td>
+<td style="white-space:normal">加载内置或外部标定模型 → 对压力结果预测切向力</td>
+<td style="white-space:normal"><code>processing/calibration.py:FitCalibrationModel</code></td>
+<td style="white-space:normal">模型对象；<code>predict()</code>输出标定值</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>PRSensorAngle</code></td>
+<td style="white-space:normal">压力矩阵 → CoP、接触状态、区域、梯度和角度</td>
+<td style="white-space:normal"><code>processing/cop.py:PRSensorAngle</code></td>
+<td style="white-space:normal">有状态 CoP 处理器及其计算结果</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>PressureSensor</code></td>
+<td style="white-space:normal">压力串口 → CRC/状态校验 → 合法压力帧</td>
+<td style="white-space:normal"><code>sensors/pressure.py:PressureSensor</code></td>
+<td style="white-space:normal">原始帧、时间戳和时序统计</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>SlipDetector</code></td>
+<td style="white-space:normal">压力斑块短窗 → 滑移距离、方向、置信度和状态</td>
+<td style="white-space:normal"><code>processing/slip.py:SlipDetector</code></td>
+<td style="white-space:normal"><code>SlipResult</code></td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>SlipResult</code></td>
+<td style="white-space:normal">保存一次滑移检测的距离、方向、置信度和状态</td>
+<td style="white-space:normal"><code>processing/slip.py:SlipResult</code></td>
+<td style="white-space:normal">不可变滑移结果对象</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>compute_vector_angle</code></td>
+<td style="white-space:normal">二维向量 → 方向角</td>
+<td style="white-space:normal"><code>runtime/sensor.py:compute_vector_angle</code></td>
+<td style="white-space:normal">角度 <code>float</code>，单位为度</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>angle_difference</code></td>
+<td style="white-space:normal">两个方向角 → 最小环绕差值</td>
+<td style="white-space:normal"><code>runtime/sensor.py:angle_difference</code></td>
+<td style="white-space:normal">角度差 <code>float</code>，单位为度</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>FixedTerminalRenderer</code></td>
+<td style="white-space:normal"><code>TangentialFrame</code> → 固定终端布局</td>
+<td style="white-space:normal"><code>runtime/sensor.py:FixedTerminalRenderer</code></td>
+<td style="white-space:normal"><code>render()</code>输出文本并刷新终端</td>
+</tr>
+<tr>
+<td style="white-space:normal"><code>format_terminal_sample</code></td>
+<td style="white-space:normal"><code>TangentialFrame</code> → 固定布局文本</td>
+<td style="white-space:normal"><code>runtime/sensor.py:format_terminal_sample</code></td>
+<td style="white-space:normal">格式化后的 <code>str</code></td>
+</tr>
+</tbody>
+</table>
+
 ## 5. 推荐源码阅读顺序
 
 第一次阅读不要从最长的`runtime/session.py`或`processing/cop.py`开始，建议按以下顺序建立心智模型：
@@ -231,7 +506,7 @@
 1. `src/tangential/__init__.py`：先确认稳定公共名称。
 2. `src/tangential/config.py`：理解设备、处理、同步、输出和GUI有哪些可调边界。
 3. `src/tangential/examples/minimal.py`：观察最小用户循环。
-4. `src/tangential/runtime/sensor.py`：理解`TangentialFrame`、单帧处理器和高级传感器API。
+4. `src/tangential/runtime/sensor.py`：理解`TangentialSampleProcessor`的完整处理、`TangentialFrameProcessor`的公开薄门面、`TangentialFrame`和高级传感器API。
 5. `src/tangential/sensors/pressure.py`：理解压力请求、收包、校验、时间戳和独立进程。
 6. `src/tangential/processing/cop.py`、`slip.py`、`calibration.py`：分别阅读CoP状态、滑移状态和模型预测。
 7. `src/tangential/storage/csv.py`：确认完整应用最终写出的108列语义。
@@ -289,7 +564,7 @@
 </tr>
 <tr>
 <td style="white-space:normal"><code>runtime/sensor.py</code></td>
-<td style="white-space:normal">PressureSensor帧 → TangentialFrameProcessor → TangentialFrame</td>
+<td style="white-space:normal">PressureSensor帧 → TangentialSampleProcessor → TangentialSample → TangentialFrameProcessor → TangentialFrame</td>
 <td style="white-space:normal">完整Qt生命周期、六维力匹配和CSV</td>
 </tr>
 <tr>
@@ -365,7 +640,7 @@ CLI显式参数 > 显式配置对象 > TANGENTIAL_*环境默认 > dataclass内�
 <tr>
 <td style="white-space:normal"><code>ProcessingConfig</code></td>
 <td style="white-space:normal">维度/区域模式/滤波/CoP/滑移 → 单帧处理配置</td>
-<td style="white-space:normal"><code>TangentialFrameProcessor</code></td>
+<td style="white-space:normal"><code>TangentialFrameProcessor</code>、<code>TangentialSampleProcessor</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>CalibrationConfig</code></td>
@@ -459,7 +734,7 @@ CLI显式参数 > 显式配置对象 > TANGENTIAL_*环境默认 > dataclass内�
 
 ## 10. 单帧处理、CoP与滑移
 
-`TangentialFrameProcessor`是脱离串口也能使用的处理入口，适合回放CSV、自定义采集源或算法测试。每个实例都持有自己的`PRSensorAngle`、`SlipDetector`和dx/dy中值窗口，因此一个实例不能跨物理传感器共享。
+`TangentialSampleProcessor`是完整算法处理器，负责把84通道ADC变成内部`TangentialSample`，并独占自己的`PRSensorAngle`、`SlipDetector`和dx/dy中值窗口。`TangentialFrameProcessor`是面向用户的薄门面，适合回放CSV、自定义采集源或算法测试；它根据自己的CoP、标定和处理配置创建并持有一个独立样本处理器，公开构造函数不提供内部处理器注入点，因此不同门面不会共享算法状态。
 
 单帧处理流程：
 
@@ -472,11 +747,11 @@ CLI显式参数 > 显式配置对象 > TANGENTIAL_*环境默认 > dataclass内�
 → 必要时同步重锚定PRSensorAngle
 → dx/dy中值滤波
 → FitCalibrationModel预测Fx/Fy/Fz
-→ TangentialFrameProcessor._process_sample()
+→ TangentialSampleProcessor._process_sample()
 → TangentialSample
 ```
 
-``TangentialSample`` 是完整应用内部详细结果，ADC 总和的 canonical 字段仍只叫 ``adc_sum``，不提供 ``total``、``sum``、``raw_2d``、``min``、``max``、``copX`` 或 ``copY`` 等别名。公开 ``process()`` 只调用一次私有 ``_process_sample()``，再经唯一私有 ``_select_tangential_frame()`` 挑选八个字段并返回 ``TangentialFrame``；完整会话直接消费同一次生成的 ``TangentialSample``，用于真实时间戳、梯度、区域、标定、GUI、同步和 108 列 CSV，不会再次执行 CoP、滑移或标定算法。``TangentialSample`` 不进入顶层、``tangential.api``、``tangential.runtime.__all__`` 或公开 ``sensor.pyi``，安装 wheel 的用户始终只通过正式 API 得到 ``TangentialFrame``。
+``TangentialSample`` 是完整应用内部详细结果，ADC 总和的 canonical 字段仍只叫 ``adc_sum``，不提供 ``total``、``sum``、``raw_2d``、``min``、``max``、``copX`` 或 ``copY`` 等别名。公开 ``TangentialFrameProcessor.process_frame(raw, frame=None)`` 只调用其内部独占的 ``_sample_processor._process_sample()`` 一次，再经 ``TangentialFrameProcessor._to_tangential_frame()`` 私有静态方法挑选八个字段并返回 ``TangentialFrame``；完整会话直接使用 ``TangentialSampleProcessor`` 生成的同一次 ``TangentialSample``，用于真实时间戳、梯度、区域、标定、GUI、同步和 108 列 CSV，不会再次执行 CoP、滑移或标定算法。``TangentialSampleProcessor``、``TangentialSample`` 和 ``TangentialFrameProcessor._to_tangential_frame()`` 仅属于内部实现，不进入顶层、``tangential.api``、``tangential.runtime.__all__`` 或公开 ``sensor.pyi``；``sensor.pyi`` 也不声明内部 ``_sample_processor`` 属性；安装 wheel 的用户始终只通过正式 API 得到 ``TangentialFrame``；``TangentialFrameProcessor`` 不再提供 ``_process_sample()`` 或旧的 ``process()``。
 
 `PRSensorAngle`维护接触状态、origin、二次精修和区域历史。首次接触建立粗origin，满足稳定与精修条件后进入状态2；卸载会重置接触相关状态。调用`reanchor_origin()`时必须保留已经完成的精修状态，只更新全局参考位置。
 
@@ -504,7 +779,7 @@ CLI显式参数 > 显式配置对象 > TANGENTIAL_*环境默认 > dataclass内�
 
 ```text
 get_after(last_press_seq)
-→ 按seq逐帧调用TangentialFrameProcessor
+→ 按seq逐帧调用TangentialSampleProcessor
 → 每帧推进阈值、CoP、滑移、标定和GUI状态
 → 无力通道时立即写NaN力字段
 → 有力通道时进入pending_press队列
@@ -609,7 +884,7 @@ CLI app → examples/full.main(config) ──────┘
 
 `tangential.__all__`定义稳定顶层公共边界。用户通过`from tangential import ...`、`help()`、IDE类型提示和`py.typed/.pyi`了解API；内部模块路径不承诺稳定。
 
-当前顶层共有33个导出名称：`TangentialSensor`、`TangentialSensorAPI`、`TangentialFrame`、`TangentialFrameProcessor`、`FixedTerminalRenderer`、`FitCalibrationModel`、`FullApplicationConfig`、`PressureConfig`、`ForceConfig`、`CopConfig`、`ProcessingConfig`、`SlipConfig`、`CalibrationConfig`、`SyncConfig`、`OutputConfig`、`GuiConfig`、`PRSensorAngle`、`PressureSensor`、`TangentialMotionState`、`SlipResult`、`SlipDetector`、`compute_vector_angle`、`angle_difference`、`format_terminal_sample`、`TrainingConfig`、`TrainingResult`、`train_model`、`PlotConfig`、`PlotResult`、`plot_csv`、`plot_full_analysis`、`run_application`和`run_dual_application`。其中`TangentialSensor`是`TangentialSensorAPI`的推荐别名；两者当前指向同一个实现，修改导出时必须同步本文的公共边界说明和API测试，默认不修改`readme.md`。
+当前顶层共有32个导出名称：`TangentialSensorAPI`、`TangentialFrame`、`TangentialFrameProcessor`、`FixedTerminalRenderer`、`FitCalibrationModel`、`FullApplicationConfig`、`PressureConfig`、`ForceConfig`、`CopConfig`、`ProcessingConfig`、`SlipConfig`、`CalibrationConfig`、`SyncConfig`、`OutputConfig`、`GuiConfig`、`PRSensorAngle`、`PressureSensor`、`TangentialMotionState`、`SlipResult`、`SlipDetector`、`compute_vector_angle`、`angle_difference`、`format_terminal_sample`、`TrainingConfig`、`TrainingResult`、`train_model`、`PlotConfig`、`PlotResult`、`plot_csv`、`plot_full_analysis`、`run_application`和`run_dual_application`。`TangentialSensor`别名不再导出；`TangentialSensorAPI`是唯一正式压力采集类名称。上方公共边界表按用户推荐、配置/应用/工具和高级/底层三类列出全部32个名称，`readme.md`只保留前三项的普通用户介绍；修改导出时必须同步本文、`readme.md`和API测试。
 
 新增或修改公共API时必须同步：
 
@@ -617,10 +892,10 @@ CLI app → examples/full.main(config) ──────┘
 2. 通过`api.py`或对应公共门面导出。
 3. 更新`__init__.py`导入与`__all__`。
 4. 编译模块同步更新同名`.pyi`签名。
-5. 更新本文中的公共边界、内部调用链、修改路由和验收说明；默认不修改`readme.md`，只有用户明确要求更新wheel用户文档时才同步其公共API说明。
+5. 更新本文中的公共边界、内部调用链、修改路由和验收说明；用户明确要求时同步更新`readme.md`，并确保两份文档的公共名称集合一致。
 6. 增加API导入、签名、行为和基础导入惰性测试。
 
-不要为了让用户“看到更多功能”把所有内部类都放进顶层。判断标准是：用户是否存在无需依赖内部会话即可稳定复用的场景。`TangentialSensor`适合硬件采集，`TangentialFrameProcessor`适合自定义数据源和离线84通道ADC；内部线程、会话辅助函数和协议解析私有方法不应公开。
+不要为了让用户“看到更多功能”把所有内部类都放进顶层。判断标准是：用户是否存在无需依赖内部会话即可稳定复用的场景。`TangentialSensorAPI`适合硬件采集，`TangentialFrameProcessor`适合自定义数据源和离线84通道ADC；`TangentialSampleProcessor`只供完整会话维护内部详细结果，内部线程、会话辅助函数和协议解析私有方法不应公开。
 
 ## 17. 常见扩展任务
 
@@ -641,11 +916,11 @@ CLI app → examples/full.main(config) ──────┘
 
 ### 17.3 修改CoP、区域或滑移
 
-CoP与区域修改进入`processing/cop.py`，滑移修改进入`processing/slip.py`，`TangentialFrameProcessor`只负责编排。必须验证无接触、首次接触、精修、卸载、滑移进入、方向平滑、退出重锚定和多实例状态隔离。
+CoP与区域修改进入`processing/cop.py`，滑移修改进入`processing/slip.py`，`TangentialSampleProcessor`负责编排完整算法，`TangentialFrameProcessor`只负责公开结果投影。必须验证无接触、首次接触、精修、卸载、滑移进入、方向平滑、退出重锚定和多实例状态隔离。
 
 ### 17.4 接入自定义ADC数据源
 
-自定义来源只需提供84通道数据并调用`TangentialFrameProcessor.process()`；如果要复用`TangentialSensor`生命周期，可注入实现`read_frame()`、`decode()`和`close()`的sensor对象。不要修改`PressureSensor`来适配与现有协议无关的数据源。
+自定义来源只需提供84通道数据并调用`TangentialFrameProcessor.process_frame(raw, frame=None)`；如果要复用`TangentialSensorAPI`生命周期，可注入实现`read_frame()`、`decode()`和`close()`的sensor对象。完整应用测试若需要检查详细结果，应直接注入或构造提供`_process_sample()`的`TangentialSampleProcessor`对象。不要修改`PressureSensor`来适配与现有协议无关的数据源。
 
 ### 17.5 增加第三只或更多传感器
 

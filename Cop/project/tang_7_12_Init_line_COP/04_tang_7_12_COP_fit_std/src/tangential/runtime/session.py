@@ -16,7 +16,7 @@ import numpy as np
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from ..acquisition.buffer import TimestampedBuffer
-from .sensor import TangentialFrameProcessor, compute_vector_angle
+from .sensor import TangentialSampleProcessor, compute_vector_angle
 from ..config import FullApplicationConfig
 from ..gui.realtime import RealTimePlot
 from ..processing.calibration import FitCalibrationModel
@@ -200,6 +200,7 @@ class FullAcquisitionSession:
         csv_writer/csv_file_obj/csv_path: 当前 CSV 输出资源。
         has_force (bool): 是否已启用六维力通道。
         pending_press (deque): 等待六维力一对一匹配的压力样本队列。
+        sample_processor (TangentialSampleProcessor): 生成内部详细样本的处理器。
         latest_sample: 最近处理的压力样本，供 GUI 使用。
     """
 
@@ -210,6 +211,7 @@ class FullAcquisitionSession:
         stop_event=None,
         pressure_factory=PressureSensor,
         force_factory=SixAxisForceSensor,
+        sample_processor=None,
     ):
         """初始化完整采集会话及其运行时状态。
 
@@ -223,6 +225,9 @@ class FullAcquisitionSession:
                 ``PressureSensor``。
             force_factory (callable): 六维力传感器工厂，默认
                 ``SixAxisForceSensor``。
+            sample_processor (object | None): 可选的测试注入对象；必须提供
+                ``_process_sample(raw, frame=None)``。未注入时，``start`` 会创建
+                独立的 ``TangentialSampleProcessor``。
 
         Returns:
             None: 只建立会话状态，不连接设备、不创建 CSV。
@@ -248,7 +253,13 @@ class FullAcquisitionSession:
         self.csv_path = None
         self.row_count = 0
         self.has_force = False
-        self.processor = None
+        if sample_processor is not None and not callable(
+            getattr(sample_processor, "_process_sample", None)
+        ):
+            raise TypeError(
+                "sample_processor 必须提供 _process_sample(raw, frame=None)"
+            )
+        self.sample_processor = sample_processor
         self.pending_press = deque()
         self.rezero_guard = threading.Lock()
         self.rezero_threads = []
@@ -357,30 +368,31 @@ class FullAcquisitionSession:
         self.csv_path = auto_get_csv_path(self.config.save_dir)
         self.csv_writer, self.csv_file_obj = init_csv_file(self.csv_path)
 
-        calibration = (
-            FitCalibrationModel.from_default()
-            if self.config.model_path is None
-            else FitCalibrationModel.from_path(self.config.model_path)
-        )
-        if calibration.available:
-            summary = ", ".join(
-                f"{entry[1]}{'(split)' if entry[2] else ''}"
-                for entry in calibration.params_list
+        if self.sample_processor is None:
+            calibration = (
+                FitCalibrationModel.from_default()
+                if self.config.model_path is None
+                else FitCalibrationModel.from_path(self.config.model_path)
             )
-            print(
-                f"📐 fit模型已加载: "
-                f"{calibration.path or 'tangential.resources/fit_coefs.bin'} "
-                f"(outputs: {summary})"
+            if calibration.available:
+                summary = ", ".join(
+                    f"{entry[1]}{'(split)' if entry[2] else ''}"
+                    for entry in calibration.params_list
+                )
+                print(
+                    f"📐 fit模型已加载: "
+                    f"{calibration.path or 'tangential.resources/fit_coefs.bin'} "
+                    f"(outputs: {summary})"
+                )
+            elif calibration.error is not None:
+                print(f"⚠️ fit模型加载失败: {calibration.error}")
+            else:
+                print("💡 未找到 fit 模型文件")
+            self.sample_processor = TangentialSampleProcessor(
+                cop_sensor=PRSensorAngle(**self.config.processing.cop.as_kwargs()),
+                calibration=calibration,
+                processing_config=self.config.processing,
             )
-        elif calibration.error is not None:
-            print(f"⚠️ fit模型加载失败: {calibration.error}")
-        else:
-            print("💡 未找到 fit 模型文件")
-        self.processor = TangentialFrameProcessor(
-            cop_sensor=PRSensorAngle(**self.config.processing.cop.as_kwargs()),
-            calibration=calibration,
-            processing_config=self.config.processing,
-        )
 
         self.thread_press = PressureThread(
             self.sensor_press, self.buf_press, self.stop_event
@@ -509,9 +521,9 @@ class FullAcquisitionSession:
             "rx_t": press_item["t"],
             "latency_s": press_item.get("latency_s", float("nan")),
         }
-        # 完整应用需要内部 canonical 字段；公开 process() 只返回八字段帧。
-        # 这里直接使用同一次计算的内部结果，避免重复推进 CoP/滑移状态机。
-        sample = self.processor._process_sample(press_item["data"], metadata)
+        # 完整应用直接消费内部样本；公开 FrameProcessor 只负责对外投影，
+        # 这里不能再次执行 CoP、滑移或标定。
+        sample = self.sample_processor._process_sample(press_item["data"], metadata)
         actual_contact = sample.state > 0
         if (
             self.config.refine_rezero_force

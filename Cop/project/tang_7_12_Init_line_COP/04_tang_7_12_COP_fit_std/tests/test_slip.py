@@ -17,6 +17,7 @@ from tangential import (
     TangentialSensorAPI,
 )
 from tangential.processing.cop import PRSensorAngle
+from tangential.runtime.sensor import TangentialSampleProcessor
 
 
 def point_frame(row: int, col: int, rows: int = 5, cols: int = 5) -> np.ndarray:
@@ -131,8 +132,14 @@ class SlipDetectorTests(unittest.TestCase):
         ), slip=self.make_detector().config)
         first = TangentialFrameProcessor(processing_config=config, calibration=None)
         second = TangentialFrameProcessor(processing_config=config, calibration=None)
-        self.assertIsNot(first.slip_detector, second.slip_detector)
-        self.assertIsNot(first.slip_detector._history, second.slip_detector._history)
+        self.assertIsNot(
+            first._sample_processor.slip_detector,
+            second._sample_processor.slip_detector,
+        )
+        self.assertIsNot(
+            first._sample_processor.slip_detector._history,
+            second._sample_processor.slip_detector._history,
+        )
 
     def test_sensor_api_passes_custom_slip_config_to_processor(self):
         processing = ProcessingConfig(
@@ -143,9 +150,10 @@ class SlipDetectorTests(unittest.TestCase):
             sensor=object(),
             processing_config=processing,
         )
-        self.assertEqual(api.processor.slip_config.window_frames, 7)
-        self.assertEqual(api.processor.slip_config.angle_deadband, 0.42)
-        self.assertIs(api.processor.slip_config, processing.slip)
+        self.assertIsInstance(api.processor._sample_processor, TangentialSampleProcessor)
+        self.assertEqual(api.processor._sample_processor.slip_config.window_frames, 7)
+        self.assertEqual(api.processor._sample_processor.slip_config.angle_deadband, 0.42)
+        self.assertIs(api.processor._sample_processor.slip_config, processing.slip)
 
     def test_reanchor_preserves_cop_refinement_state(self):
         stick = PRSensorAngle(config=CopConfig(
@@ -183,9 +191,9 @@ class SlipDetectorTests(unittest.TestCase):
         center = point_frame(2, 2)
         slight = center.copy()
         slight[2, 3] = 5.0
-        processor.process(empty.reshape(-1))
-        first = processor.process(center.reshape(-1))
-        second = processor.process(slight.reshape(-1))
+        processor.process_frame(empty.reshape(-1))
+        first = processor.process_frame(center.reshape(-1))
+        second = processor.process_frame(slight.reshape(-1))
         self.assertEqual(first.motion_state, TangentialMotionState.STICK)
         self.assertEqual(second.motion_state, TangentialMotionState.STICK)
         self.assertEqual(second.angle, 0.0)

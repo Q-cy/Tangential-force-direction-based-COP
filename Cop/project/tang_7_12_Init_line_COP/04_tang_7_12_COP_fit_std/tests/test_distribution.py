@@ -64,13 +64,20 @@ def _isolated_import_command() -> str:
     return (
         "import sys; import tangential; import tangential.api; import tangential.runtime; "
         "from dataclasses import fields; "
-        "from tangential import FitCalibrationModel, TangentialFrame, TangentialSensor; "
+        "from tangential import FitCalibrationModel, TangentialFrame, TangentialSensorAPI; "
         "assert [item.name for item in fields(TangentialFrame)] == ['raw', 'adc_sum', 'cop_x', 'cop_y', 'angle', 'dx', 'dy', 'motion_state']; "
         "assert not hasattr(TangentialFrame, 'total'); "
         "assert not hasattr(tangential, 'TangentialSample'); "
         "assert not hasattr(tangential.api, 'TangentialSample'); "
         "assert not hasattr(tangential.runtime, 'TangentialSample'); "
-        "assert TangentialSensor is not None; "
+        "legacy_projection_name = 'to_' + 'tangential_' + 'frame'; "
+        "assert not hasattr(tangential, legacy_projection_name); "
+        "assert not hasattr(tangential.api, legacy_projection_name); "
+        "assert not hasattr(tangential.runtime, legacy_projection_name); "
+        "assert TangentialSensorAPI is not None; "
+        "assert not hasattr(tangential, 'TangentialSensor'); "
+        "assert not hasattr(tangential.api, 'TangentialSensor'); "
+        "assert not hasattr(tangential.runtime, 'TangentialSensor'); "
         "model = FitCalibrationModel.from_default(); "
         "assert model.available; "
         "assert abs(model.predict(0.1, 0.1, 100000)[0] - 1.4477653909084447) < 1e-12; "
@@ -235,6 +242,8 @@ class WheelDistributionTests(unittest.TestCase):
                     "tangential/runtime/sensor.pyi"
                 ).decode("utf-8")
                 self.assertNotIn("TangentialSample", sensor_stub)
+                self.assertNotIn("TangentialSampleProcessor", sensor_stub)
+                self.assertNotIn("sample_processor", sensor_stub)
                 self.assertNotIn("_process_sample", sensor_stub)
                 self.assertTrue(
                     any(name.endswith(".dist-info/entry_points.txt") for name in names)

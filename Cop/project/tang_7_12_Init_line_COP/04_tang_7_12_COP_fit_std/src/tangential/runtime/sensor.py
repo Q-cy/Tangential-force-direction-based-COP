@@ -1,7 +1,7 @@
 """面向用户的最小压力传感器 API。
 
 本模块把压力传感器帧解码、CoP/梯度计算和可选标定组合成一个不依赖
-Qt/Matplotlib 的 Python API，并提供固定布局的终端渲染器。
+Qt/Matplotlib 的 Python API。终端输出由示例或调用方自行决定。
 """
 
 import sys
@@ -110,36 +110,12 @@ class TangentialSample:
     angle_vector_magnitude: float = 0.0
 
 
-def _select_tangential_frame(sample: TangentialSample) -> TangentialFrame:
-    """从完整内部结果中挑选八个稳定公开字段。
+class TangentialSampleProcessor:
+    """把一个 84 通道压力帧处理为完整的内部 ``TangentialSample``。
 
-    Args:
-        sample (TangentialSample): 当前处理器刚刚计算出的内部详细结果。
-
-    Returns:
-        TangentialFrame: 只包含 raw、adc_sum、CoP、角度、偏移和运动状态。
-
-    Notes:
-        本函数只复制已经算出的字段，不调用 CoP、滑移或标定算法，也不属于
-        SDK 公共导出。
-    """
-    return TangentialFrame(
-        raw=sample.raw.copy(),
-        adc_sum=sample.adc_sum,
-        cop_x=sample.cop_x,
-        cop_y=sample.cop_y,
-        angle=sample.angle,
-        dx=sample.dx,
-        dy=sample.dy,
-        motion_state=sample.motion_state,
-    )
-
-
-class TangentialFrameProcessor:
-    """复用 CoP 和标定实现处理一个 84 通道压力帧。
-
-    该类只编排既有算法：动态阈值、CoP、梯度、区域和模型预测均委托给
-    ``PRSensorAngle`` 或 ``FitCalibrationModel``。
+    该类负责完整应用需要的动态阈值、CoP、梯度、区域、滑移和标定状态；
+    具体算法仍委托给 ``PRSensorAngle``、``SlipDetector`` 和
+    ``FitCalibrationModel``。它是运行时内部实现，不属于公开 API。
 
     Attributes:
         cop_sensor (PRSensorAngle): CoP、状态机和梯度计算器。
@@ -384,7 +360,80 @@ class TangentialFrameProcessor:
         )
         return sample
 
-    def process(self, raw, frame=None) -> TangentialFrame:
+
+class TangentialFrameProcessor:
+    """面向用户的 ``TangentialFrame`` 薄处理门面。
+
+    本类不持有 CoP、滑移或标定算法实现；它只调用一个
+    ``TangentialSampleProcessor`` 生成完整内部结果，再通过自身的私有静态方法
+    ``_to_tangential_frame`` 投影为八字段公开结果。每个门面都根据传入的
+    CoP、标定和处理配置参数创建并独占一个 ``TangentialSampleProcessor``，
+    不允许从公开构造函数注入或共享内部样本处理器。
+
+    Attributes:
+        _sample_processor (TangentialSampleProcessor): 本门面独占的内部样本处理器。
+    """
+
+    def __init__(self, cop_sensor=None, calibration=None, cal_dim=None,
+                 region_mode=None, median_window=None,
+                 processing_config: ProcessingConfig | None = None,
+                 slip_detector: SlipDetector | None = None):
+        """初始化公开门面及其内部样本处理器。
+
+        Args:
+            cop_sensor (PRSensorAngle | None): 传给内部
+                ``TangentialSampleProcessor`` 的 CoP 计算器；为 ``None`` 时
+                创建默认实例。
+            calibration (object | None): 内部样本处理器使用的标定模型。
+            cal_dim (str | None): 标定维度模式。
+            region_mode (str | None): ``full``、``region`` 或 ``both``。
+            median_window (int | None): dx/dy 中值滤波窗口长度。
+            processing_config (ProcessingConfig | None): CoP、区域、滤波和
+                滑移的集中配置。
+            slip_detector (SlipDetector | None): 可注入的独立滑移检测器。
+
+        Returns:
+            None: 创建门面并保存一个内部样本处理器。
+
+        Raises:
+            ValueError: 处理配置中的区域模式或滤波窗口非法。
+        """
+        self._sample_processor = TangentialSampleProcessor(
+            cop_sensor=cop_sensor,
+            calibration=calibration,
+            cal_dim=cal_dim,
+            region_mode=region_mode,
+            median_window=median_window,
+            processing_config=processing_config,
+            slip_detector=slip_detector,
+        )
+
+    @staticmethod
+    def _to_tangential_frame(sample: TangentialSample) -> TangentialFrame:
+        """从完整内部结果中挑选八个稳定公开字段。
+
+        Args:
+            sample (TangentialSample): 当前处理器刚刚计算出的内部详细结果。
+
+        Returns:
+            TangentialFrame: 只包含 raw、adc_sum、CoP、角度、偏移和运动状态。
+
+        Notes:
+            本函数只复制已经算出的字段，不调用 CoP、滑移或标定算法，也不属于
+            SDK 公共导出。
+        """
+        return TangentialFrame(
+            raw=sample.raw.copy(),
+            adc_sum=sample.adc_sum,
+            cop_x=sample.cop_x,
+            cop_y=sample.cop_y,
+            angle=sample.angle,
+            dx=sample.dx,
+            dy=sample.dy,
+            motion_state=sample.motion_state,
+        )
+
+    def process_frame(self, raw, frame=None) -> TangentialFrame:
         """处理一帧原始压力数据并返回简化公开结果。
 
         Args:
@@ -400,9 +449,10 @@ class TangentialFrameProcessor:
             Exception: CoP、滑移或标定实现内部发生错误时向上传播。
 
         Side Effects:
-            更新既有 CoP 状态机、滑移检测器和 dx/dy 中值滤波状态。
+            通过内部样本处理器更新 CoP 状态机、滑移检测器和 dx/dy 中值滤波状态。
         """
-        return _select_tangential_frame(self._process_sample(raw, frame))
+        sample = self._sample_processor._process_sample(raw, frame)
+        return self._to_tangential_frame(sample)
 
 
 class TangentialSensorAPI:
@@ -410,7 +460,8 @@ class TangentialSensorAPI:
 
     Attributes:
         sensor: 提供 ``read_frame``、``decode`` 和可选 ``close`` 的压力传感器。
-        processor (TangentialFrameProcessor): 单帧处理器。
+        processor (TangentialFrameProcessor): 只返回公开 ``TangentialFrame`` 的
+            单帧处理门面。
         _closed (bool): 是否已经关闭；关闭后不能继续读取。
     """
 
@@ -423,8 +474,9 @@ class TangentialSensorAPI:
         Args:
             sensor (object | None): 已创建的传感器对象；传入后不使用
                 ``sensor_factory`` 创建新对象。
-            processor (TangentialFrameProcessor | None): 已创建的处理器；为
-                ``None`` 时按 ``model_path`` 创建默认处理器。
+            processor (TangentialFrameProcessor | None): 已创建的公开处理门面；
+                为 ``None`` 时按 ``model_path`` 创建默认门面。不能注入内部
+                ``TangentialSampleProcessor``，以保证本 API 始终返回 ``Frame``。
             sensor_factory (callable | None): 接受 ``port=...`` 的传感器工厂；
                 仅在 ``sensor`` 为 ``None`` 时使用。
             model_path (str | os.PathLike | None): 外部模型路径；为 ``None``
@@ -440,6 +492,7 @@ class TangentialSensorAPI:
             None: 保存传感器、处理器和关闭状态。
 
         Raises:
+            TypeError: 注入的 ``processor`` 不是 ``TangentialFrameProcessor``。
             Exception: 传感器工厂、模型加载或处理器创建失败时向上传播。
 
         Side Effects:
@@ -479,6 +532,10 @@ class TangentialSensorAPI:
                 calibration=calibration,
                 processing_config=processing_config,
             )
+        elif not isinstance(processor, TangentialFrameProcessor):
+            raise TypeError(
+                "TangentialSensorAPI.processor 必须是 TangentialFrameProcessor"
+            )
         self.sensor = sensor
         self.processor = processor
         self._closed = False
@@ -508,7 +565,7 @@ class TangentialSensorAPI:
         if frame is None:
             return None
         raw = self.sensor.decode(frame["raw"])
-        return self.processor.process(raw, frame)
+        return self.processor.process_frame(raw, frame)
 
     def close(self):
         """幂等地关闭压力传感器。
@@ -581,12 +638,7 @@ def format_terminal_sample(sample: TangentialFrame) -> str:
 
 
 class FixedTerminalRenderer:
-    """每帧只执行一次 ``write``/``flush`` 的固定布局终端渲染器。
-
-    Attributes:
-        stream (TextIO): 输出文本流，默认是 ``sys.stdout``。
-        _first_frame (bool): 是否尚未渲染首帧，用于决定清屏控制序列。
-    """
+    """每帧只执行一次 ``write``/``flush`` 的固定布局终端渲染器。"""
 
     def __init__(self, stream=None):
         """初始化终端渲染器。
@@ -594,34 +646,12 @@ class FixedTerminalRenderer:
         Args:
             stream (TextIO | None): 可写文本流；为 ``None`` 时使用当前
                 ``sys.stdout``。
-
-        Returns:
-            None: 保存输出流并将首帧标志设为 ``True``。
-
-        Side Effects:
-            不写入输出流；真正的写入发生在 ``render`` 中。
         """
         self.stream = stream or sys.stdout
         self._first_frame = True
 
     def render(self, sample: TangentialFrame) -> str:
-        """格式化并立即刷新一帧终端输出。
-
-        Args:
-            sample (TangentialFrame): 要渲染的公开压力帧。
-
-        Returns:
-            str: 不含 ANSI 光标控制前缀的格式化样本文本。
-
-        Raises:
-            AttributeError/ValueError: ``format_terminal_sample`` 无法读取或
-                格式化样本字段时抛出。
-            OSError: 输出流写入或刷新失败时可能抛出。
-
-        Side Effects:
-            首帧写入清屏并回到左上角控制序列，后续帧写入回到左上角序列；
-            每次调用都会写入一次并调用一次 ``flush``，并清除首帧状态。
-        """
+        """格式化并立即刷新一帧终端输出。"""
         text = format_terminal_sample(sample)
         prefix = "\x1b[2J\x1b[H" if self._first_frame else "\x1b[H"
         self._first_frame = False

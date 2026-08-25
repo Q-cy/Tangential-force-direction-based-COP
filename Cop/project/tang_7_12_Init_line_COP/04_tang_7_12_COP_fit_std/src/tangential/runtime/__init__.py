@@ -6,8 +6,8 @@
 
 from .sensor import (
     FixedTerminalRenderer,
-    TangentialFrameProcessor,
     TangentialFrame,
+    TangentialFrameProcessor,
     TangentialSensorAPI,
     angle_difference,
     compute_vector_angle,
@@ -22,5 +22,7 @@ __all__ = [
     "angle_difference",
     "compute_vector_angle",
     "format_terminal_sample",
-    "TangentialMotionState", "SlipResult", "SlipDetector",
+    "TangentialMotionState",
+    "SlipResult",
+    "SlipDetector",
 ]

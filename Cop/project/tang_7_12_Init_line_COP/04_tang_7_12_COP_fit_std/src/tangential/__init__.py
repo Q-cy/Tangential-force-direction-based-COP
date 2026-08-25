@@ -39,14 +39,10 @@ from .sensors.pressure import PressureSensor
 from .tools.training import TrainingResult, train_model
 from .tools.plotting import PlotResult, plot_csv, plot_full_analysis
 
-# 高级采集别名：推荐用户使用，负责压力传感器生命周期和逐帧结果读取。
-TangentialSensor = TangentialSensorAPI
-
 __all__ = [
-    "TangentialSensor",          # 高级采集 API 别名：读取逐帧 TangentialFrame。
     "TangentialSensorAPI",       # 底层压力采集 API：管理传感器并产生逐帧结果。
     "TangentialFrame",           # 单帧结果：保存 raw、adc_sum、CoP、角度、偏移和运动状态。
-    "TangentialFrameProcessor",   # 单帧处理器：调用既有 CoP、梯度和标定算法。
+    "TangentialFrameProcessor",   # 公开薄门面：把完整样本结果投影为 TangentialFrame。
     "FixedTerminalRenderer",      # 终端渲染器：按固定布局显示一帧 12×7 数据和指标。
     "FitCalibrationModel",        # 标定模型 API：加载内置/外部模型并预测 Fx/Fy/Fz。
     "FullApplicationConfig",      # 完整应用配置：端口、保存目录、模型和采集参数。
