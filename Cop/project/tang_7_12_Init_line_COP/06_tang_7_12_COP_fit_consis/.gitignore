@@ -1,0 +1,17 @@
+# Python 原生
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+*.so
+*.pyd
+*.dylib
+
+# IDE
+.agents/
+.codex/
+agents.md/
+
+# Data
+data/

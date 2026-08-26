@@ -1,0 +1,19 @@
+from typing import Any, BinaryIO
+
+def load_fit_coefs(source: str | BinaryIO) -> tuple[Any, Any, Any, bool]: ...
+def apply_fit_predict_multi(x_values: Any, params_list: Any,
+                            fit_type: Any, split_sign: bool = ...) -> Any: ...
+
+class FitCalibrationModel:
+    available: bool
+    path: str | None
+    error: Exception | None
+    def __init__(self, fit_type: Any = ..., params_list: Any = ...,
+                 split_sign: bool = ..., path: str | None = ...,
+                 error: Exception | None = ..., n_inputs: int = ...) -> None: ...
+    @classmethod
+    def from_default(cls) -> FitCalibrationModel: ...
+    @classmethod
+    def from_path(cls, path: str) -> FitCalibrationModel: ...
+    def predict(self, dx: float, dy: float, adc_sum: float,
+                cal_dim: str = ...) -> tuple[float, float, float]: ...
