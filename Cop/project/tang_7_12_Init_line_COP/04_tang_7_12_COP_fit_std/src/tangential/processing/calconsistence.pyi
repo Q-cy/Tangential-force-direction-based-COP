@@ -3,13 +3,13 @@ from pathlib import Path
 
 from ..config import ConsistenceCalibrationConfig
 
-CHANNEL_COUNT: int
 DEFAULT_RESOURCE_NAME: str
 
 
 class ConsistenceCalibrator:
     scale: Any
     offset: Any
+    channel_count: int
     clip_min: float | None
     clip_max: float | None
     metadata: Mapping[str, Any]

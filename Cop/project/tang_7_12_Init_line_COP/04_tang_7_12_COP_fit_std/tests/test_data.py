@@ -28,13 +28,18 @@ from tangential.sensors.pressure import (
 
 
 def make_pressure_frame(values):
+    values = list(values)
     payload = b"".join(struct.pack("<H", value) for value in values)
-    frame = bytearray(PressureSensor.FRAME_LEN)
+    sensor_bytes = len(payload)
+    payload_len = PressureSensor.MIN_PAYLOAD_LEN + sensor_bytes
+    frame = bytearray(4 + payload_len + 1)
     frame[:2] = b"\xaa\x55"
-    frame[2:4] = struct.pack("<H", 178)
+    frame[2:4] = struct.pack("<H", payload_len)
+    # 正式应答协议：data[11:13] 是本帧返回的传感器字节数 N，不能省略。
+    frame[11:13] = struct.pack("<H", sensor_bytes)
     frame[13] = 0
-    frame[14:182] = payload
-    frame[182] = PressureSensor.crc8_itu(frame[:182])
+    frame[14:14 + sensor_bytes] = payload
+    frame[-1] = PressureSensor.crc8_itu(frame[:-1])
     return bytes(frame)
 
 
@@ -57,6 +62,8 @@ def pressure_parser():
         "status_errors": 0,
         "framing_bytes": 0,
     }
+    sensor.expected_sensor_bytes = PressureSensor.EXPECTED_SENSOR_BYTES
+    sensor.channel_count = sensor.expected_sensor_bytes // 2
     return sensor
 
 
@@ -367,11 +374,14 @@ class PressureTimingTests(unittest.TestCase):
         def fake_process_entry(
             port, period_s, timeout_s, queue_size,
             frame_queue, status_queue, startup_queue, stop_event,
+            baudrate, rows, cols,
         ):
             self.assertEqual(port, data_module.PRESSURE_SENSOR_PORT)
             self.assertEqual(period_s, data_module.PRESSURE_PERIOD_S)
             self.assertEqual(timeout_s, data_module.PRESSURE_RESPONSE_TIMEOUT_S)
             self.assertEqual(queue_size, data_module.PRESSURE_FRAME_QUEUE_SIZE)
+            self.assertEqual(baudrate, data_module.DATA_BAUDRATE_PRESS)
+            self.assertEqual((rows, cols), (12, 7))
             startup_queue.put(("ready", None))
             frame_queue.put(expected_frame)
             status_queue.put(("stats", {

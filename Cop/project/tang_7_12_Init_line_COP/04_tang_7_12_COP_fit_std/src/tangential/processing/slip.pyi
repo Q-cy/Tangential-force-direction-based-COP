@@ -1,7 +1,7 @@
 from enum import IntEnum
 from typing import Any
 import numpy as np
-from ..config import SlipConfig
+from ..config import ArrayConfig, SlipConfig
 
 class TangentialMotionState(IntEnum):
     NO_CONTACT: int
@@ -27,7 +27,8 @@ class SlipResult:
     def slip_confidence(self) -> float: ...
 
 class SlipDetector:
-    def __init__(self, config: SlipConfig | None = ..., rows: int = ..., cols: int = ...) -> None: ...
+    def __init__(self, config: SlipConfig | None = ...,
+                 array_config: ArrayConfig | None = ...) -> None: ...
     @property
     def motion_state(self) -> TangentialMotionState: ...
     @property

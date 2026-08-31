@@ -1,4 +1,4 @@
-"""12×7 压力阵列的 CoP、角度、梯度与区域状态算法。"""
+"""可配置压力阵列的 CoP、角度、梯度与区域状态算法。"""
 
 import heapq
 import threading
@@ -7,11 +7,11 @@ from collections import deque
 import numpy as np
 from scipy.ndimage import generate_binary_structure, label
 
-from ..config import CopConfig
+from ..config import ArrayConfig, CopConfig
 
 
 class PRSensorAngle:
-    """12×7（可配置尺寸）PZT 阵列的 CoP、角度、梯度和区域状态处理器。
+    """可配置尺寸 PZT 阵列的 CoP、角度、梯度和区域状态处理器。
 
     输入是按行优先展开的 ADC 压力帧，坐标约定为 x=列、y=行，位移单位为
     cell，角度单位为度。实例内部维护动态阈值、首次接触 origin、二次精修
@@ -19,7 +19,7 @@ class PRSensorAngle:
     处理方法会改变实例状态。
     """
 
-    def __init__(self, rows: int | None = None, cols: int | None = None,
+    def __init__(self, array_config: ArrayConfig | None = None,
                  total_threshold_factor: float | None = None,
                  pixel_threshold_factor: float | None = None,
                  collect_frames: int | None = None,
@@ -36,8 +36,8 @@ class PRSensorAngle:
         """构造一个带动态阈值和接触状态的阵列处理器。
 
         Args:
-            rows: 阵列行数；默认 12。
-            cols: 阵列列数；默认 7，输入长度必须为 ``rows*cols``。
+            array_config: 整个项目共用的阵列布局；省略时使用默认
+                ``ArrayConfig()``，输入长度必须为 ``rows*cols``。
             total_threshold_factor: 总压力动态阈值倍数，阈值为背景总压力均值
                 乘此值。
             pixel_threshold_factor: 逐像素动态阈值倍数，阈值为逐像素背景均值
@@ -61,8 +61,10 @@ class PRSensorAngle:
             帧处理会继续修改这些状态。
         """
         defaults = (config or CopConfig()).validate()
-        rows = defaults.rows if rows is None else rows
-        cols = defaults.cols if cols is None else cols
+        array_config = ArrayConfig() if array_config is None else array_config
+        if not isinstance(array_config, ArrayConfig):
+            raise TypeError("PRSensorAngle.array_config 必须是 ArrayConfig")
+        array_config.validate()
         total_threshold_factor = (
             defaults.total_threshold_factor
             if total_threshold_factor is None else total_threshold_factor
@@ -82,8 +84,9 @@ class PRSensorAngle:
         region_peak_ratio = defaults.region_peak_ratio if region_peak_ratio is None else region_peak_ratio
         region_peak_dist = defaults.region_peak_dist if region_peak_dist is None else region_peak_dist
 
-        self.rows = rows
-        self.cols = cols
+        self.array_config = array_config
+        # 仅作为布局对象的派生快捷属性；所有尺寸配置仍来自 array_config。
+        self.rows, self.cols = self.array_config.shape
         self.total_threshold_factor = total_threshold_factor
         self.pixel_threshold_factor = pixel_threshold_factor
         self.collect_frames = collect_frames
@@ -958,7 +961,7 @@ class PRSensorAngle:
                     hi['coords'] += reg['coords']
                     hi['area'] += reg['area']
                     hi['peak'] = max(hi['peak'], reg['peak'])
-                    # 对合并后 coords 重算特征（region ≤ 84 cells, 重算代价可忽略）
+                    # 对合并后 coords 重算特征；复杂度随实际阵列通道数增长。
                     rs = np.array([c[0] for c in hi['coords']])
                     cs = np.array([c[1] for c in hi['coords']])
                     pv = frame2d[rs, cs]

@@ -11,16 +11,23 @@ import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from ..acquisition.buffer import TimestampedBuffer
-from .sensor import TangentialSampleProcessor, compute_vector_angle
-from ..config import FullApplicationConfig
+from .sensor import (
+    TangentialSampleProcessor,
+    _construct_sensor_factory,
+    _validate_component_array_config,
+    compute_vector_angle,
+)
+from ..config import ArrayConfig, FullApplicationConfig
 from ..gui.realtime import RealTimePlot
 from ..processing.calibration import FitCalibrationModel
 from ..processing.cop import PRSensorAngle
+from ..processing.spectrum import CopSpectrumAnalyzer
 from ..sensors.force import SixAxisForceSensor
 from ..sensors.pressure import PressureSensor
 from ..storage.csv import auto_get_csv_path, build_csv_row, init_csv_file
@@ -30,13 +37,15 @@ from .synchronization import match_force_frame
 g_main_stop_flag = threading.Event()
 
 
-def _construct_sensor(factory, port):
-    """按工厂签名构造传感器并兼容无参测试工厂。
+def _construct_sensor(factory, port, **kwargs):
+    """按工厂签名构造传感器并兼容旧的端口工厂。
 
     Args:
         factory (callable): 传感器类或工厂；可能接受 ``port`` 关键字，或
             完全不接受端口参数。
         port (str): 要传给支持端口参数的工厂的串口路径。
+        **kwargs: 可选配置；仅在工厂签名明确支持时传入，例如压力阵列的
+            ``config`` 和共享的 ``array_config``。
 
     Returns:
         object: 工厂创建的传感器实例。
@@ -48,24 +57,30 @@ def _construct_sensor(factory, port):
     Side Effects:
         调用一次传感器工厂，可能打开串口或创建子进程；不修改工厂对象。
     """
+    return _construct_sensor_factory(factory, port=port, **kwargs)
+
+
+def _construct_plot(factory, config, array_config):
+    """按绘图工厂签名传递配置和共享阵列布局。
+
+    真实 ``RealTimePlot`` 接收 ``config/array_config``；测试图元可以只接收
+    ``config`` 或完全无参，适配器会只传递它声明的参数。尺寸只以
+    ``array_config`` 传递，不再向绘图工厂传入独立的 rows/cols。
+    """
     try:
         signature = inspect.signature(factory)
     except (TypeError, ValueError):
-        signature = None
-    if signature is not None:
-        parameters = signature.parameters.values()
-        accepts_port = (
-            "port" in signature.parameters
-            or any(parameter.kind == inspect.Parameter.VAR_KEYWORD
-                   for parameter in parameters)
-        )
-        if accepts_port:
-            return factory(port=port)
         return factory()
-    try:
-        return factory(port=port)
-    except TypeError:
-        return factory()
+    parameters = signature.parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    kwargs = {}
+    for name, value in (("config", config), ("array_config", array_config)):
+        if accepts_kwargs or name in parameters:
+            kwargs[name] = value
+    return factory(**kwargs)
 
 
 class PressureThread(threading.Thread):
@@ -212,6 +227,8 @@ class FullAcquisitionSession:
         pressure_factory=PressureSensor,
         force_factory=SixAxisForceSensor,
         sample_processor=None,
+        spectrum_sink=None,
+        enable_spectrum=True,
     ):
         """初始化完整采集会话及其运行时状态。
 
@@ -228,6 +245,12 @@ class FullAcquisitionSession:
             sample_processor (object | None): 可选的测试注入对象；必须提供
                 ``_process_sample(raw_data, frame=None)``。未注入时，``start`` 会创建
                 独立的 ``TangentialSampleProcessor``。
+            spectrum_sink (object | None): 可选的线程安全频谱提交对象；产生
+                ``SpectrumSnapshot`` 时调用其 ``submit(snapshot)``，没有产生
+                快照时调用 ``submit_progress(ready, required)`` 更新等待状态。
+                判定、GUI 和 NPZ 共用这一条快照通路。
+            enable_spectrum (bool): 是否允许本会话创建频谱分析器；双路运行
+                器传入 ``False``，确保双路不创建频谱资源。
 
         Returns:
             None: 只建立会话状态，不连接设备、不创建 CSV。
@@ -241,6 +264,8 @@ class FullAcquisitionSession:
         self.stop_event = stop_event or g_main_stop_flag
         self.pressure_factory = pressure_factory
         self.force_factory = force_factory
+        self.spectrum_sink = spectrum_sink
+        self.enable_spectrum = bool(enable_spectrum)
 
         self.sensor_press = None
         self.sensor_force = None
@@ -258,6 +283,12 @@ class FullAcquisitionSession:
         ):
             raise TypeError(
                 "sample_processor 必须提供 _process_sample(raw_data, frame=None)"
+            )
+        if sample_processor is not None:
+            _validate_component_array_config(
+                sample_processor,
+                self.config.array,
+                label="FullAcquisitionSession.sample_processor",
             )
         self.sample_processor = sample_processor
         self.pending_press = deque()
@@ -289,6 +320,8 @@ class FullAcquisitionSession:
         self.iteration_started_t = None
         self._started = False
         self._closed = False
+        self.spectrum_analyzer = None
+        self.spectrum_output_path = None
 
     def start(self):
         """连接设备、初始化模型/CSV并启动采集线程。
@@ -307,6 +340,7 @@ class FullAcquisitionSession:
         """
         if self._started:
             return self
+        self.config.validate()
         self.stop_event.clear()
         try:
             if self.pressure_factory is PressureSensor:
@@ -317,10 +351,14 @@ class FullAcquisitionSession:
                     queue_size=self.config.pressure.frame_queue_size,
                     baudrate=self.config.pressure.baudrate,
                     _startup_timeout_s=self.config.pressure.startup_timeout_s,
+                    array_config=self.config.array,
                 )
             else:
                 self.sensor_press = _construct_sensor(
-                    self.pressure_factory, self.config.pressure_port
+                    self.pressure_factory,
+                    self.config.pressure_port,
+                    config=self.config.pressure,
+                    array_config=self.config.array,
                 )
         except Exception as exc:
             raise RuntimeError(f"压力传感器未连接: {exc}") from exc
@@ -344,17 +382,17 @@ class FullAcquisitionSession:
                     self.sensor_force = _construct_sensor(
                         self.force_factory, self.config.force_port
                     )
-                if not self.sensor_force.calibrate_zero(
-                    sample_count=self.config.zero_sample_count,
-                    timeout_s=self.config.zero_timeout_s,
-                ):
-                    raise RuntimeError(
-                        f"{self.config.zero_timeout_s:.1f}s 内未收到 "
-                        f"{self.config.zero_sample_count} 个有效校零帧"
-                    )
-                self.buf_force = TimestampedBuffer(self.config.buffer_size)
-                self.has_force = True
-                print("✅ 六维力传感器就绪，启动零点校准完成")
+                    if not self.sensor_force.calibrate_zero(
+                        sample_count=self.config.zero_sample_count,
+                        timeout_s=self.config.zero_timeout_s,
+                    ):
+                        raise RuntimeError(
+                            f"{self.config.zero_timeout_s:.1f}s 内未收到 "
+                            f"{self.config.zero_sample_count} 个有效校零帧"
+                        )
+                    self.buf_force = TimestampedBuffer(self.config.buffer_size)
+                    self.has_force = True
+                    print("✅ 六维力传感器就绪，启动零点校准完成")
             except Exception as exc:
                 print(f"⚠️ 六维力传感器不可用，降级为压力模式: {exc}")
                 if self.sensor_force is not None:
@@ -372,6 +410,14 @@ class FullAcquisitionSession:
                     if self.config.model_path is None
                     else FitCalibrationModel.from_path(self.config.model_path)
                 )
+                if (self.config.model_path is None
+                        and self.config.array.shape != ArrayConfig.DEFAULT_SHAPE):
+                    print(
+                        f"⚠️ 当前使用非{ArrayConfig.DEFAULT_SHAPE[0]}×"
+                        f"{ArrayConfig.DEFAULT_SHAPE[1]}阵列；内置fit模型仅由原"
+                        f"{ArrayConfig.DEFAULT_SHAPE[0]}×{ArrayConfig.DEFAULT_SHAPE[1]}硬件训练，"
+                        "标定力不具备自动的物理有效性，请提供对应阵列模型"
+                    )
                 if calibration.available:
                     summary = ", ".join(
                         f"{entry[1]}{'(split)' if entry[2] else ''}"
@@ -387,15 +433,30 @@ class FullAcquisitionSession:
                 else:
                     print("💡 未找到 fit 模型文件")
                 self.sample_processor = TangentialSampleProcessor(
-                    cop_sensor=PRSensorAngle(**self.config.processing.cop.as_kwargs()),
+                    array_config=self.config.array,
+                    cop_sensor=PRSensorAngle(
+                        array_config=self.config.array,
+                        config=self.config.processing.cop,
+                    ),
                     calibration=calibration,
                     processing_config=self.config.processing,
                 )
 
+            if self.enable_spectrum and self.config.spectrum.enabled:
+                self.spectrum_analyzer = CopSpectrumAnalyzer(self.config.spectrum)
+
             # 先创建完整处理器并加载一致性系数，再创建 CSV。这样系数缺失、
             # 损坏或维度错误时不会留下一个看似有效的空记录文件。
             self.csv_path = auto_get_csv_path(self.config.save_dir)
-            self.csv_writer, self.csv_file_obj = init_csv_file(self.csv_path)
+            self.csv_writer, self.csv_file_obj = init_csv_file(
+                self.csv_path,
+                array_config=self.config.array,
+            )
+            set_analysis_csv_path = getattr(self.plot, "set_analysis_csv_path", None)
+            if callable(set_analysis_csv_path):
+                # 退出分析图必须使用本次会话实际创建的 CSV stem；不能依赖
+                # 输出目录中的“最新文件”猜测，尤其是多路/连续会话场景。
+                set_analysis_csv_path(self.csv_path)
         except Exception:
             self.close()
             raise
@@ -551,6 +612,50 @@ class FullAcquisitionSession:
         self.last_rel_ms = sample.rel_ms
         return sample
 
+    def _process_spectrum(self, sample):
+        """把未滤波绝对 CoP 提交给单路频谱分析器。
+
+        Args:
+            sample (TangentialSample): 已完成一次完整 CoP 处理的内部样本；
+                ``cop_x/cop_y`` 是未经过 ``dx/dy`` 中值滤波的绝对 CoP。
+
+        Returns:
+            None: 频谱未启用时不提交；产生新快照时调用线程安全 sink 的
+            ``submit(snapshot)``，否则提交当前速度窗积累进度。
+
+        Side Effects:
+            更新固定频率重采样缓存和频谱历史，不修改样本、CSV 或现有
+            中值滤波状态。
+        """
+        if self.spectrum_analyzer is None:
+            return
+        snapshot = self.spectrum_analyzer.process(
+            sample.rx_t,
+            sample.cop_x,
+            sample.cop_y,
+            sample.state,
+        )
+        if self.spectrum_sink is None:
+            return
+        if snapshot is not None:
+            submit = getattr(self.spectrum_sink, "submit", None)
+            if not callable(submit):
+                raise TypeError(
+                    "spectrum_sink 必须提供线程安全 submit(snapshot) 方法"
+                )
+            submit(snapshot)
+            return
+        submit_progress = getattr(self.spectrum_sink, "submit_progress", None)
+        if not callable(submit_progress):
+            raise TypeError(
+                "spectrum_sink 必须提供线程安全 "
+                "submit_progress(ready_samples, required_samples) 方法"
+            )
+        submit_progress(
+            self.spectrum_analyzer.ready_samples,
+            self.spectrum_analyzer.required_samples,
+        )
+
     def process_new_pressure_frames(self) -> int:
         """按缓存序号顺序处理所有尚未消费的压力帧。
 
@@ -570,6 +675,7 @@ class FullAcquisitionSession:
             self.last_press_seq = press_item["seq"]
             sample = self._process_pressure(press_item)
             self.latest_sample = sample
+            self._process_spectrum(sample)
             if self.has_force:
                 self.pending_press.append(sample)
             else:
@@ -578,7 +684,7 @@ class FullAcquisitionSession:
         return processed
 
     def write_snapshot(self, sample, force_item):
-        """把压力样本和可选匹配力帧写成一行 108 列 CSV。
+        """把压力样本和可选匹配力帧写成一行动态列数 CSV。
 
         Args:
             sample (TangentialSample): 要保存的内部压力结果，使用其真实 ``rx_t``、
@@ -659,6 +765,7 @@ class FullAcquisitionSession:
             cop_state=sample.state,
             adc_sum=sample.adc_sum,
             valid=1 if sample.state > 0 else 0,
+            array_config=self.config.array,
         ))
         self.csv_file_obj.flush()
         self.row_count += 1
@@ -895,6 +1002,37 @@ class FullAcquisitionSession:
         elapsed = time.perf_counter() - started
         time.sleep(max(0.001, 1.0 / self.config.target_fps - elapsed))
 
+    def _save_spectrum(self):
+        """把本次单路会话的完整频谱历史保存到 CSV 同目录。
+
+        Returns:
+            None: 频谱未启用、保存被禁用、没有 CSV 或没有有效快照时返回。
+
+        Raises:
+            OSError: NPZ 临时文件或目标文件不可写时向上传播。
+            ValueError: 频谱历史形状不一致时向上传播。
+
+        Side Effects:
+            使用分析器的原子 NPZ 写出方法生成 ``<csv stem>_spectrum.npz``；
+            写出失败不会吞掉异常，调用方会在所有采集资源关闭后报告它。
+        """
+        if (
+            self.spectrum_analyzer is None
+            or not self.config.spectrum.save_npz
+            or self.csv_path is None
+        ):
+            return
+        csv_path = Path(self.csv_path)
+        spectrum_path = csv_path.with_name(
+            f"{csv_path.stem}{self.config.spectrum.output_suffix}.npz"
+        )
+        self.spectrum_output_path = str(spectrum_path)
+        if self.spectrum_analyzer.save_npz(
+            spectrum_path,
+            csv_file_name=csv_path.name,
+        ):
+            print(f"📈 频谱已保存：{spectrum_path}")
+
     def close(self):
         """幂等地停止会话并释放线程、传感器、CSV 和空文件资源。
 
@@ -925,12 +1063,20 @@ class FullAcquisitionSession:
                     pass
         if self.csv_file_obj is not None:
             self.csv_file_obj.close()
+        spectrum_error = None
         if self.csv_path is not None:
             if self.row_count == 0 and os.path.exists(self.csv_path):
                 os.remove(self.csv_path)
                 print("⚠️ 无数据，CSV 已删除")
             elif self.row_count > 0:
                 print(f"✅ CSV已关闭（{self.row_count} 行）")
+        try:
+            self._save_spectrum()
+        except Exception as exc:
+            spectrum_error = exc
+            print(f"❌ 频谱保存失败：{exc}")
+        if spectrum_error is not None:
+            raise spectrum_error
 
 
 class FullApplicationRunner:
@@ -984,21 +1130,42 @@ class FullApplicationRunner:
         app = QtWidgets.QApplication.instance()
         if app is None:
             app = QtWidgets.QApplication(sys.argv)
-        plot = (
-            self.plot_factory(config=self.config.gui)
-            if self.plot_factory is RealTimePlot
-            else self.plot_factory()
+        plot = _construct_plot(
+            self.plot_factory,
+            self.config.gui,
+            self.config.array,
         )
+        spectrum_window = None
+        if self.config.spectrum.enabled:
+            from ..gui.spectrum import SpectrumWindow
+
+            spectrum_window = SpectrumWindow(self.config.spectrum)
+            if hasattr(plot, "win"):
+                # 主窗口关闭时删除窗口对象并联动关闭附属频谱窗口；频谱窗口
+                # 自己关闭不会触发 stop_event，因此后台会话仍可继续记录。
+                plot.win.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+                add_close_callback = getattr(plot, "add_close_callback", None)
+                if callable(add_close_callback):
+                    add_close_callback(spectrum_window.close)
+                else:
+                    plot.win.destroyed.connect(
+                        lambda *_args: spectrum_window.close()
+                    )
         errors = queue.Queue()
 
         def worker():
             """在线程中执行采集入口并把异常放入线程安全队列。"""
             try:
-                self.worker_target(
-                    plot,
-                    stop_event=g_main_stop_flag,
-                    config=self.config,
-                )
+                worker_kwargs = {
+                    "stop_event": g_main_stop_flag,
+                    "config": self.config,
+                }
+                if self.worker_target is acquisition_loop:
+                    worker_kwargs.update(
+                        spectrum_sink=spectrum_window,
+                        enable_spectrum=spectrum_window is not None,
+                    )
+                self.worker_target(plot, **worker_kwargs)
             except Exception as exc:
                 errors.put(exc)
                 g_main_stop_flag.set()
@@ -1033,6 +1200,14 @@ class FullApplicationRunner:
             error_timer.stop()
             g_main_stop_flag.set()
             data_thread.join(timeout=5)
+            if hasattr(plot, "win"):
+                try:
+                    plot.win.close()
+                except (RuntimeError, AttributeError):
+                    # 主窗口可能已经因为用户关闭而被 Qt 销毁。
+                    pass
+            if spectrum_window is not None:
+                spectrum_window.close()
             plot.plot_full_analysis(self.config.save_dir)
 
 
@@ -1093,10 +1268,11 @@ class DualApplicationRunner:
         labels = ["Sensor A", "Sensor B"]
         plots = []
         for config in configs:
-            if self.plot_factory is RealTimePlot:
-                plots.append(self.plot_factory(config=config.gui))
-            else:
-                plots.append(self.plot_factory(config=config.gui))
+            plots.append(_construct_plot(
+                self.plot_factory,
+                config.gui,
+                config.array,
+            ))
 
         errors = queue.Queue()
         worker_errors = []
@@ -1105,11 +1281,16 @@ class DualApplicationRunner:
         def worker(index: int) -> None:
             """运行一路完整循环，并把异常传给 Qt 主线程。"""
             try:
-                self.worker_target(
-                    plots[index],
-                    stop_event=stop_events[index],
-                    config=configs[index],
-                )
+                worker_kwargs = {
+                    "stop_event": stop_events[index],
+                    "config": configs[index],
+                }
+                if self.worker_target is acquisition_loop:
+                    worker_kwargs.update(
+                        spectrum_sink=None,
+                        enable_spectrum=False,
+                    )
+                self.worker_target(plots[index], **worker_kwargs)
             except Exception as exc:
                 with worker_errors_lock:
                     worker_errors.append((index, exc))
@@ -1159,6 +1340,11 @@ class DualApplicationRunner:
             for thread in threads:
                 thread.join(timeout=5)
             for plot, config in zip(plots, configs):
+                if hasattr(plot, "win"):
+                    try:
+                        plot.win.close()
+                    except (RuntimeError, AttributeError):
+                        pass
                 plot.plot_full_analysis(config.save_dir)
         if worker_errors:
             index, exc = worker_errors[0]
@@ -1208,6 +1394,8 @@ def acquisition_loop(
     stop_event=None,
     config=None,
     session_factory=FullAcquisitionSession,
+    spectrum_sink=None,
+    enable_spectrum=True,
     **kwargs,
 ):
     """运行完整采集循环并在退出时可靠关闭会话。
@@ -1220,6 +1408,11 @@ def acquisition_loop(
             创建默认配置。
         session_factory (callable): 会话工厂，默认 ``FullAcquisitionSession``；
             测试可注入替代实现。
+        spectrum_sink (object | None): 单路频谱窗口的线程安全提交对象；由
+            ``FullApplicationRunner`` 传入，需提供 ``submit`` 和
+            ``submit_progress``；双路运行时保持为 ``None``。
+        enable_spectrum (bool): 是否允许会话创建频谱分析器；双路运行器传入
+            ``False``。
         **kwargs: 继续传给会话工厂的其他构造参数，例如设备工厂。
 
     Returns:
@@ -1238,6 +1431,8 @@ def acquisition_loop(
         plot,
         config=config or FullApplicationConfig(),
         stop_event=active_stop_event,
+        spectrum_sink=spectrum_sink,
+        enable_spectrum=enable_spectrum,
         **kwargs,
     )
     try:

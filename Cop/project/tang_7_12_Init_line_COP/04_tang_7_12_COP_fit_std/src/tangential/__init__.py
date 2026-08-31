@@ -19,6 +19,7 @@ from .api import (
 )
 from .application import run_application, run_dual_application
 from .config import (
+    ArrayConfig,
     CalibrationConfig,
     CopConfig,
     ForceConfig,
@@ -43,7 +44,8 @@ __all__ = [
     "TangentialSensorAPI",       # 底层压力采集 API：管理传感器并产生逐帧结果。
     "TangentialFrame",           # 单帧结果：保存 base_data、adc_sum、CoP、角度、偏移和运动状态。
     "TangentialFrameProcessor",   # 公开薄门面：把完整样本结果投影为 TangentialFrame。
-    "FixedTerminalRenderer",      # 终端渲染器：按固定布局显示一帧 12×7 数据和指标。
+    "ArrayConfig",                 # 全项目共用的阵列行列、通道数和协议字节数配置。
+    "FixedTerminalRenderer",      # 终端渲染器：按配置布局显示一帧矩阵和指标。
     "FitCalibrationModel",        # 标定模型 API：加载内置/外部模型并预测 Fx/Fy/Fz。
     "FullApplicationConfig",      # 完整应用配置：端口、保存目录、模型和采集参数。
     "PressureConfig",              # 压力设备和轮询配置。
@@ -62,17 +64,17 @@ __all__ = [
     "SlipDetector",                # 独立可复用的压力斑块滑移检测器。
     "compute_vector_angle",        # 角度工具：计算二维向量方向角（单位为度）。
     "angle_difference",            # 角度工具：计算两个方向角的最小环绕差值。
-    "format_terminal_sample",      # 终端工具：把样本格式化为固定布局文本。
+    "format_terminal_sample",      # 终端工具：把样本格式化为配置布局文本。
     "TrainingConfig",              # 训练配置：定义数据筛选、拟合类型和输出选项。
     "TrainingResult",              # 训练结果：返回模型路径、评估指标和写回信息。
     "train_model",                 # 训练入口：读取 CSV、拟合模型并生成 fit_coefs.bin。
     "PlotConfig",                  # 绘图配置：定义 CSV、列、行范围和输出参数。
     "PlotResult",                  # 绘图结果：返回生成的图像、分析和误差文件信息。
     "plot_csv",                    # 绘图入口：按真实 CSV 表头绘制指定列和区间。
-    "plot_full_analysis",          # 绘图入口：生成完整 108 列采集数据分析图。
+    "plot_full_analysis",          # 绘图入口：生成完整采集数据分析图。
     "run_application",             # 完整应用入口：按配置启动采集和 GUI。
     "run_dual_application",        # 双完整应用入口：共用一个 Qt 应用、独立两路会话。
 ]
 
 # SDK 发行版本号，供运行时检查兼容性和 CLI --version 使用。
-__version__ = "0.5.0"
+__version__ = "0.6.0"

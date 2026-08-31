@@ -10,7 +10,7 @@ import threading
 import time
 from collections import deque
 
-from ..config import PressureConfig
+from ..config import ArrayConfig, PressureConfig
 
 _DEFAULT_CONFIG = PressureConfig()
 DATA_BAUDRATE_PRESS = _DEFAULT_CONFIG.baudrate
@@ -22,11 +22,11 @@ PRESSURE_FRAME_QUEUE_SIZE = _DEFAULT_CONFIG.frame_queue_size
 
 
 class PressureSensor:
-    """12×7 PZT 压力阵列的串口采集器。
+    """可配置行列数的 PZT 压力阵列串口采集器。
 
     设备使用 921600 baud 的请求—响应协议。每轮只发送一个 14 字节请求，
-    最多等待 ``response_timeout_s`` 秒，并将合法响应转换为 168 字节的
-    84 通道 ``uint16`` 小端 payload。生产模式使用 ``spawn`` 子进程承载
+    最多等待 ``response_timeout_s`` 秒，并将合法响应转换为
+    ``2 * rows * cols`` 字节的 ``rows * cols`` 通道 ``uint16`` 小端 payload。生产模式使用 ``spawn`` 子进程承载
     串口 I/O；注入串口实例时使用本地 I/O 线程，便于协议测试。
 
     ``read_frame`` 返回的 ``rx_t`` 和 ``latency_s`` 使用
@@ -35,10 +35,12 @@ class PressureSensor:
     """
     CMD_BYTES = bytes([0x55, 0xAA, 0x09, 0x00, 0x34, 0x00,
                        0xFB, 0x00, 0x1C, 0x00, 0x00, 0xA8, 0x00, 0x35])
+    # 以下常量保留为默认 12x7 设备的兼容参考；实例运行时使用由 rows/cols
+    # 计算出的 expected_* 字段，不依赖这些固定默认值。
     FRAME_LEN = 183              # 默认响应: 4B头 + 178B payload + 1B CRC
-    EXPECTED_SENSOR_BYTES = 168
+    EXPECTED_SENSOR_BYTES = 168  # 默认 12x7 的传感器字节数
     MIN_PAYLOAD_LEN = 10
-    MAX_PAYLOAD_LEN = 512
+    MAX_PAYLOAD_LEN = 0xFFFF
     MAX_RX_BUF = 8192
     RX_BUF_RETAIN = 4096
     READ_CHUNK_SIZE = 1024
@@ -49,7 +51,8 @@ class PressureSensor:
                  _use_process=None,
                  _mp_context=None, _process_factory=None, _startup_timeout_s=None,
                  _frame_sink=None, _status_sink=None,
-                 config: PressureConfig | None = None):
+                 config: PressureConfig | None = None,
+                 array_config: ArrayConfig | None = None):
         """创建压力采集器，并启动线程或独立采集进程。
 
         Args:
@@ -72,6 +75,8 @@ class PressureSensor:
             _startup_timeout_s: 等待采集子进程报告 ready 的秒数。
             _frame_sink: 可选的测试帧输出队列；有值时帧直接写入该队列。
             _status_sink: 可选的统计/错误输出队列。
+            array_config: 整个项目共用的阵列布局；省略时使用默认
+                ``ArrayConfig()``。该对象决定请求长度、应答长度和解码通道数。
 
         Raises:
             ValueError: ``period_s``、``response_timeout_s`` 或 ``queue_size``
@@ -94,9 +99,29 @@ class PressureSensor:
             _startup_timeout_s = defaults.startup_timeout_s
         if period_s <= 0 or response_timeout_s <= 0 or queue_size <= 0:
             raise ValueError("压力采集周期、响应超时和队列长度必须大于 0")
+        array_config = ArrayConfig() if array_config is None else array_config
+        if not isinstance(array_config, ArrayConfig):
+            raise TypeError("PressureSensor.array_config 必须是 ArrayConfig")
+        array_config.validate()
+        sensor_bytes = array_config.sensor_bytes
 
         self.ser = None
         self.port = port
+        self.array_config = array_config
+        # 这两个字段只是公共布局对象的派生快捷访问，不是独立配置来源。
+        self.rows, self.cols = self.array_config.shape
+        self.channel_count = self.array_config.channel_count
+        self.expected_sensor_bytes = sensor_bytes
+        self.expected_payload_len = sensor_bytes + self.MIN_PAYLOAD_LEN
+        self.expected_frame_len = 4 + self.expected_payload_len + 1
+        # 至少容纳一帧加下一次批量读入的数据；大阵列时随协议长度增长，
+        # 不使用只适合默认 12x7 的固定接收缓存。
+        self._max_rx_buf = max(
+            self.MAX_RX_BUF,
+            self.expected_frame_len + self.READ_CHUNK_SIZE,
+        )
+        self._rx_buf_retain = max(self.RX_BUF_RETAIN, self.expected_frame_len)
+        self.cmd_bytes = self.build_read_command(sensor_bytes)
         self._baudrate = int(baudrate)
         self._rx_buf = bytearray()
         self._rx_lock = threading.Lock()
@@ -189,9 +214,8 @@ class PressureSensor:
             self.port, self._period_s, self._response_timeout_s, queue_size,
             self._ipc_frame_queue, self._ipc_status_queue,
             self._ipc_startup_queue, self._mp_stop_event,
+            self._baudrate, self.rows, self.cols,
         )
-        if self._baudrate != DATA_BAUDRATE_PRESS:
-            process_args += (self._baudrate,)
         self._process = process_factory(target=_pressure_process_main, args=process_args)
         try:
             self._process.daemon = True
@@ -406,6 +430,23 @@ class PressureSensor:
                     crc = (crc << 1) & 0xFF
         return crc ^ 0x55
 
+    @classmethod
+    def build_read_command(cls, sensor_bytes: int) -> bytes:
+        """按协议生成读请求，并把读取字节数写入 data[11:13]。"""
+        if not 0 < sensor_bytes <= 0xFFFF:
+            raise ValueError("读取数据长度必须在 1..65535 字节内")
+        if sensor_bytes + cls.MIN_PAYLOAD_LEN > cls.MAX_PAYLOAD_LEN:
+            raise ValueError(
+                "响应 payload 长度溢出：传感器字节数加协议元数据必须不超过 65535"
+            )
+        command = bytearray([
+            0x55, 0xAA, 0x09, 0x00, 0x34, 0x00, 0xFB,
+            0x00, 0x1C, 0x00, 0x00,
+            sensor_bytes & 0xFF, (sensor_bytes >> 8) & 0xFF,
+        ])
+        command.append(cls.crc8_itu(command))
+        return bytes(command)
+
     def _add_stat(self, name, amount=1):
         """在线程安全地增加一个压力统计计数。
 
@@ -434,15 +475,17 @@ class PressureSensor:
             None。
 
         Side Effects:
-            在 ``_rx_lock`` 下追加到 ``_rx_buf``；超过 8192 字节时丢弃前部，
-            保留最近 4096 字节，并增加 ``framing_bytes`` 统计。
+            在 ``_rx_lock`` 下追加到 ``_rx_buf``；超过动态接收上限时丢弃前部，
+            至少保留完整的当前阵列响应，并增加 ``framing_bytes`` 统计。
         """
         if not chunk:
             return
         with self._rx_lock:
             self._rx_buf.extend(chunk)
-            if len(self._rx_buf) > self.MAX_RX_BUF:
-                drop_count = len(self._rx_buf) - self.RX_BUF_RETAIN
+            max_rx_buf = getattr(self, "_max_rx_buf", self.MAX_RX_BUF)
+            rx_buf_retain = getattr(self, "_rx_buf_retain", self.RX_BUF_RETAIN)
+            if len(self._rx_buf) > max_rx_buf:
+                drop_count = len(self._rx_buf) - rx_buf_retain
                 del self._rx_buf[:drop_count]
                 self._add_stat("framing_bytes", drop_count)
 
@@ -489,7 +532,7 @@ class PressureSensor:
 
         Args:
             frame: dict，至少包含 ``request_seq``、``tx_t``、``rx_t``、
-                ``latency_s`` 和 168 字节 ``payload``。
+                ``latency_s`` 和 ``2 * rows * cols`` 字节 ``payload``。
 
         Returns:
             None。
@@ -587,8 +630,8 @@ class PressureSensor:
                 self._request_seq += 1
                 self._record_tx(tx_t)
                 try:
-                    written = self.ser.write(self.CMD_BYTES)
-                    if written != len(self.CMD_BYTES):
+                    written = self.ser.write(self.cmd_bytes)
+                    if written != len(self.cmd_bytes):
                         self._add_stat("serial_write_errors")
                 except Exception:
                     self._add_stat("serial_write_errors")
@@ -637,17 +680,18 @@ class PressureSensor:
             self._stop_event.set()
 
     def read_data(self):
-        """从持久化接收缓存解析一个合法的 168 字节压力 payload。
+        """从持久化接收缓存解析一个合法的动态长度压力 payload。
 
         Returns:
-            bytes：去除 4 字节帧头、10 字节协议元数据后的 168 字节传感器数据。
+            bytes：去除 4 字节帧头、10 字节协议元数据后的
+            ``2 * rows * cols`` 字节传感器数据。
             ``None``：当前缓存不足以组成完整帧，或只包含噪声/残片。
 
         Side Effects:
             在 ``_rx_lock`` 下消费前导噪声、坏长度、CRC 错误、错误状态帧和
             成功帧；分别更新 framing、length、CRC、status 统计。支持分包、粘包、
-            前导噪声和错误帧恢复。合法帧要求头为 ``AA 55``、payload 长度
-            10..512、传感器数据长度 168、状态字节为 0。
+            前导噪声和错误帧恢复。合法帧要求头为 ``AA 55``、payload 长度在
+            协议范围内、返回字节数等于 ``2 * rows * cols``、状态字节为 0。
         """
         with self._rx_lock:
             while True:
@@ -682,7 +726,12 @@ class PressureSensor:
                     continue
 
                 sensor_len = payload_len - 10
-                if sensor_len != self.EXPECTED_SENSOR_BYTES:
+                returned_sensor_len = self._rx_buf[11] | (self._rx_buf[12] << 8)
+                expected_sensor_bytes = getattr(
+                    self, "expected_sensor_bytes", self.EXPECTED_SENSOR_BYTES
+                )
+                if (sensor_len != expected_sensor_bytes
+                        or returned_sensor_len != expected_sensor_bytes):
                     self._add_stat("length_errors")
                     del self._rx_buf[:total_len]
                     continue
@@ -705,7 +754,7 @@ class PressureSensor:
         Returns:
             dict：包含 ``request_seq``（请求序号）、``tx_t``（发送时刻）、
             ``rx_t``（完整帧解析完成时刻）、``latency_s``（秒）和 ``payload``
-            （168 字节传感器 payload）。
+            （长度为 ``2 * rows * cols`` 的传感器 payload）。
             ``None``：在超时、停止事件已设置或采集已结束时没有可用帧。
 
         Raises:
@@ -771,23 +820,30 @@ class PressureSensor:
             return result
 
     def decode(self, payload):
-        """将 168 字节原始 payload 解码为 84 个 ADC 整数。
+        """将动态长度原始 payload 解码为 ``rows * cols`` 个 ADC 整数。
 
         Args:
-            payload: 恰好 168 字节的传感器 payload；按 84 个 little-endian
-                ``uint16`` 解析，顺序保持设备原始线序，按 12 行×7 列展开。
+            payload: 恰好 ``2 * rows * cols`` 字节的传感器 payload；按
+                little-endian ``uint16`` 解析，顺序保持设备原始线序。
 
         Returns:
-            list[int]：长度为 84 的 ADC 值，未进行翻转、标定或归一化。
+            list[int]：长度为 ``rows * cols`` 的 ADC 值，未进行翻转、标定或归一化。
 
         Raises:
             struct.error: 输入长度不足以完整解码时由 ``struct.unpack`` 抛出。
         """
-        arr = [struct.unpack("<H", payload[i:i+2])[0] for i in range(0, 168, 2)]
-        out = []
-        for i in range(12):
-            out.extend(arr[i*7:(i+1)*7])
-        return out
+        expected_sensor_bytes = getattr(
+            self, "expected_sensor_bytes", self.EXPECTED_SENSOR_BYTES
+        )
+        channel_count = getattr(
+            self, "channel_count", expected_sensor_bytes // 2
+        )
+        if len(payload) != expected_sensor_bytes:
+            raise ValueError(
+                f"压力 payload 必须为 {expected_sensor_bytes} 字节，"
+                f"实际为 {len(payload)} 字节"
+            )
+        return list(struct.unpack(f"<{channel_count}H", payload))
 
     def close(self):
         """幂等停止压力采集并释放线程、进程、串口和 IPC 队列。
@@ -816,7 +872,7 @@ class PressureSensor:
 
 def _pressure_process_main(port, period_s, response_timeout_s, queue_size,
                            frame_queue, status_queue, startup_queue,
-                           stop_event, baudrate=DATA_BAUDRATE_PRESS):
+                           stop_event, baudrate, rows, cols):
     """运行压力采集 spawn 子进程，并转发帧、统计和错误消息。
 
     Args:
@@ -828,6 +884,9 @@ def _pressure_process_main(port, period_s, response_timeout_s, queue_size,
         status_queue: 父子进程共享的统计/错误队列。
         startup_queue: 用于发送 ``("ready", None)`` 或启动错误的队列。
         stop_event: 父进程控制的 multiprocessing 停止事件。
+        baudrate: 已校验的串口波特率。
+        rows: 已校验的阵列行数，由父进程的 ``ArrayConfig`` 传入。
+        cols: 已校验的阵列列数，由父进程的 ``ArrayConfig`` 传入。
 
     Returns:
         None。子进程退出前总会尝试发布最终统计并关闭本地传感器。
@@ -846,6 +905,7 @@ def _pressure_process_main(port, period_s, response_timeout_s, queue_size,
             _use_process=False,
             _status_sink=status_queue,
             baudrate=baudrate,
+            array_config=ArrayConfig(rows=rows, cols=cols),
         )
         startup_queue.put(("ready", None))
         while not stop_event.is_set():

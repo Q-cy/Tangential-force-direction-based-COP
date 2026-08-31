@@ -17,7 +17,7 @@ from tangential.tools.plotting import (
     plot_full_analysis,
     resolve_csvs,
 )
-from tangential.storage.csv import TABLE_CSV_HEADER
+from tangential.storage.csv import TABLE_CSV_HEADER, full_analysis_png_path
 
 
 class PlottingApiTests(unittest.TestCase):
@@ -46,6 +46,14 @@ class PlottingApiTests(unittest.TestCase):
             infos = list_files(directory)
             self.assertEqual(infos[0].path, path)
             self.assertEqual(infos[0].row_count, 2)
+
+    def test_full_analysis_png_path_uses_csv_stem(self):
+        with tempfile.TemporaryDirectory() as temp:
+            csv_path = Path(temp) / "foo.csv"
+            self.assertEqual(
+                full_analysis_png_path(csv_path),
+                Path(temp) / "foo.png",
+            )
 
     def test_empty_csv_and_bad_rows_have_explicit_errors(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -106,8 +114,8 @@ class PlottingApiTests(unittest.TestCase):
                 values[TABLE_CSV_HEADER.index("valid")] = 1
                 rows.append(values)
             self._write_csv(path, TABLE_CSV_HEADER, rows)
+            result = plot_full_analysis(PlotConfig(files=path, rows="0:4"))
             output = directory / "full.png"
-            result = plot_full_analysis(PlotConfig(files=path, save_path=output, rows="0:4"))
             self.assertEqual(result.save_path, output)
             self.assertTrue(output.is_file())
             self.assertEqual(len(result.files), 1)

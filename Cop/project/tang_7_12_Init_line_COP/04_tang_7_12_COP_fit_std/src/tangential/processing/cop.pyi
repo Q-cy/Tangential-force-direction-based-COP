@@ -1,9 +1,9 @@
 from typing import Any
 import numpy as np
-from ..config import CopConfig
+from ..config import ArrayConfig, CopConfig
 
 class PRSensorAngle:
-    def __init__(self, rows: int | None = ..., cols: int | None = ...,
+    def __init__(self, array_config: ArrayConfig | None = ...,
                  total_threshold_factor: float | None = ...,
                  pixel_threshold_factor: float | None = ...,
                  collect_frames: int | None = ...,

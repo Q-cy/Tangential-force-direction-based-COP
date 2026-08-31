@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 
 from tangential import (
+    ArrayConfig,
     CopConfig,
     ProcessingConfig,
     SlipConfig,
@@ -42,7 +43,9 @@ class SlipDetectorTests(unittest.TestCase):
             patch_min_improvement=0.1,
         )
         values.update(overrides)
-        return SlipDetector(SlipConfig(**values), rows=5, cols=5)
+        return SlipDetector(
+            SlipConfig(**values), array_config=ArrayConfig(rows=5, cols=5)
+        )
 
     def test_static_patch_stays_stick_and_no_contact_resets(self):
         detector = self.make_detector()
@@ -133,8 +136,13 @@ class SlipDetectorTests(unittest.TestCase):
         ), slip=self.make_detector().config,
             consistence=ConsistenceCalibrationConfig(enabled=False),
         )
-        first = TangentialFrameProcessor(processing_config=config, calibration=None)
-        second = TangentialFrameProcessor(processing_config=config, calibration=None)
+        array_config = ArrayConfig(rows=5, cols=5)
+        first = TangentialFrameProcessor(
+            array_config=array_config, processing_config=config, calibration=None
+        )
+        second = TangentialFrameProcessor(
+            array_config=array_config, processing_config=config, calibration=None
+        )
         self.assertIsNot(
             first._sample_processor.slip_detector,
             second._sample_processor.slip_detector,
@@ -146,11 +154,12 @@ class SlipDetectorTests(unittest.TestCase):
 
     def test_sensor_api_passes_custom_slip_config_to_processor(self):
         processing = ProcessingConfig(
-            cop=CopConfig(rows=5, cols=5, collect_frames=1, refine_cnt=0),
+            cop=CopConfig(collect_frames=1, refine_cnt=0),
             slip=SlipConfig(window_frames=7, angle_deadband=0.42),
             consistence=ConsistenceCalibrationConfig(enabled=False),
         )
         api = TangentialSensorAPI(
+            array_config=ArrayConfig(rows=5, cols=5),
             sensor=object(),
             processing_config=processing,
         )
@@ -160,9 +169,10 @@ class SlipDetectorTests(unittest.TestCase):
         self.assertIs(api.processor._sample_processor.slip_config, processing.slip)
 
     def test_reanchor_preserves_cop_refinement_state(self):
-        stick = PRSensorAngle(config=CopConfig(
-            rows=5, cols=5, collect_frames=1, refine_cnt=0
-        ))
+        stick = PRSensorAngle(
+            array_config=ArrayConfig(rows=5, cols=5),
+            config=CopConfig(collect_frames=1, refine_cnt=0),
+        )
         for frame in (np.zeros((5, 5)), point_frame(2, 2)):
             stick.dynamic_threshold(frame)
             stick.get_all(frame.reshape(-1))
@@ -170,9 +180,9 @@ class SlipDetectorTests(unittest.TestCase):
         self.assertEqual(stick.get_state(), 1)
 
         refined = PRSensorAngle(
+            array_config=ArrayConfig(rows=5, cols=5),
             config=CopConfig(
-                rows=5, cols=5, collect_frames=1,
-                refine_cnt=2, refine_distance=0.1,
+                collect_frames=1, refine_cnt=2, refine_distance=0.1,
             )
         )
         frame = point_frame(2, 2).reshape(-1)
@@ -185,11 +195,12 @@ class SlipDetectorTests(unittest.TestCase):
 
     def test_frame_exposes_motion_state_and_applies_angle_deadband(self):
         processing = ProcessingConfig(
-            cop=CopConfig(rows=5, cols=5, collect_frames=1, refine_cnt=0),
+            cop=CopConfig(collect_frames=1, refine_cnt=0),
             slip=SlipConfig(angle_deadband=0.1),
             consistence=ConsistenceCalibrationConfig(enabled=False),
         )
         processor = TangentialFrameProcessor(
+            array_config=ArrayConfig(rows=5, cols=5),
             processing_config=processing, calibration=None
         )
         empty = np.zeros((5, 5))

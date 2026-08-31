@@ -10,11 +10,12 @@ import numpy as np
 from collections import deque
 import threading
 import time
-import os
+from pathlib import Path
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui
 
-from ..config import GuiConfig
+from ..config import ArrayConfig, GuiConfig
+from ..storage.csv import full_analysis_png_path
 
 pg.setConfigOptions(antialias=True, background='w', foreground='k')
 
@@ -29,35 +30,52 @@ def _yrange(data, pad=0.1):
         ``(low, high)`` 浮点元组。有效值少于两个时返回 ``(-1, 1)``；
         所有值相等时使用跨度 1，避免 Qt 轴范围退化为零。
     """
-    clean = [v for v in data if v == v]  # filter NaN
+    clean = [float(v) for v in data if np.isfinite(v)]
     if len(clean) < 2: return -1, 1
     mn, mx = min(clean), max(clean)
     r = mx - mn if mx != mn else 1
     return mn - r * pad, mx + r * pad
 
 
+class _WindowCloseFilter(QtCore.QObject):
+    """将 Qt 窗口关闭事件转发给 ``RealTimePlot``。"""
+
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+
+    def eventFilter(self, watched, event):
+        window = getattr(self.owner, "win", None)
+        if window is not None and watched is window and event.type() == QtCore.QEvent.Close:
+            self.owner._handle_window_close()
+        return super().eventFilter(watched, event)
+
+
 class CellGridItem(pg.GraphicsObject):
-    """绘制 12×7 压力色块、网格和区域轮廓的 PyQtGraph 图元。
+    """绘制指定行列压力色块、网格和区域轮廓的 PyQtGraph 图元。
 
     坐标中 ``x`` 对应列、``y`` 对应行；每个单元以 ``(c, r)`` 为中心，
     边界位于半整数位置。数据和区域掩码由 :meth:`set_data` 与
     :meth:`set_regions` 更新，绘制请求由 Qt/pyqtgraph 自动触发。
     """
-    def __init__(self, rows=12, cols=7):
+    def __init__(self, array_config: ArrayConfig | None = None):
         """创建阵列图元并初始化零数据。
 
         Args:
-            rows: 阵列行数，默认 12。
-            cols: 阵列列数，默认 7。
+            array_config: 整个项目共用的阵列布局对象；省略时使用默认布局。
 
         Returns:
             ``None``。初始化 ``GraphicsObject``、数据数组、色阶和区域状态。
         """
         pg.GraphicsObject.__init__(self)
-        self.rows, self.cols = rows, cols
-        self.data = np.zeros((rows, cols))
+        self.array_config = ArrayConfig() if array_config is None else array_config
+        if not isinstance(self.array_config, ArrayConfig):
+            raise TypeError("CellGridItem.array_config 必须是 ArrayConfig")
+        self.array_config.validate()
+        self.rows, self.cols = self.array_config.shape
+        self.data = np.zeros(self.array_config.shape)
         self.vmax = 1.0
-        self.region_mask = np.zeros((rows, cols), dtype=np.int32)
+        self.region_mask = np.zeros(self.array_config.shape, dtype=np.int32)
         self.region_palette = []
         self.region_frames = {}
 
@@ -74,7 +92,13 @@ class CellGridItem(pg.GraphicsObject):
         Side Effects:
             更新内部数组和色阶，并调用 ``update()`` 让 Qt 安排重绘。
         """
-        self.data = data
+        values = np.asarray(data)
+        expected_shape = (self.rows, self.cols)
+        if values.shape != expected_shape:
+            raise ValueError(
+                f"压力图元数据形状必须为 {expected_shape}，实际为 {values.shape}"
+            )
+        self.data = values
         self.vmax = max(vmax, 1)
         self.update()
 
@@ -93,16 +117,22 @@ class CellGridItem(pg.GraphicsObject):
             覆盖 ``region_frames``，清除旧区域轮廓的逻辑状态，并请求 Qt
             重绘。公共边会由后绘制的区域颜色覆盖。
         """
-        self.region_mask = region_mask
+        region_values = np.asarray(region_mask)
+        expected_shape = (self.rows, self.cols)
+        if region_values.shape != expected_shape:
+            raise ValueError(
+                f"区域掩码形状必须为 {expected_shape}，实际为 {region_values.shape}"
+            )
+        self.region_mask = region_values
         self.region_palette = palette
         # 外框线段: region 与背景 0 / 阵列边缘 / 其他 region 相邻的边, 每个 region 一条闭合轮廓;
         # 公共边双方都描, paint 后画覆盖 → 接缝显示为后出现 region 的颜色
-        h, w = region_mask.shape
-        padded = np.pad(region_mask, 1, constant_values=0)
+        h, w = region_values.shape
+        padded = np.pad(region_values, 1, constant_values=0)
         frames = {}
         for r in range(h):
             for c in range(w):
-                k = region_mask[r, c]
+                k = region_values[r, c]
                 if k <= 0:
                     continue
                 if padded[r, c + 1] != k:      # 上
@@ -203,23 +233,26 @@ class CellGridItem(pg.GraphicsObject):
 
 
 class GridLinesItem(pg.GraphicsObject):
-    """只绘制 12×7 阵列网格线的 PyQtGraph 图元。
+    """只绘制指定行列阵列网格线的 PyQtGraph 图元。
 
     网格线位于半整数边界，独立于色块绘制，用于避免 ``addLine`` 在
     ``ViewBox`` 边界裁剪时造成外圈视觉尺寸偏差。
     """
-    def __init__(self, rows=12, cols=7):
+    def __init__(self, array_config: ArrayConfig | None = None):
         """创建网格图元。
 
         Args:
-            rows: 网格行数，默认 12。
-            cols: 网格列数，默认 7。
+            array_config: 整个项目共用的阵列布局对象；省略时使用默认布局。
 
         Returns:
             ``None``。
         """
         pg.GraphicsObject.__init__(self)
-        self.rows, self.cols = rows, cols
+        self.array_config = ArrayConfig() if array_config is None else array_config
+        if not isinstance(self.array_config, ArrayConfig):
+            raise TypeError("GridLinesItem.array_config 必须是 ArrayConfig")
+        self.array_config.validate()
+        self.rows, self.cols = self.array_config.shape
 
     def paint(self, p, opt, widget):
         """在 Qt painter 中绘制所有横向和纵向网格线。
@@ -253,7 +286,7 @@ class GridLinesItem(pg.GraphicsObject):
 
 
 class RealTimePlot:
-    """管理实时采集窗口、缓存曲线和 12×7 阵列可视化。
+    """管理实时采集窗口、缓存曲线和可配置阵列可视化。
 
     对外通过 :meth:`set_data` 接收最新状态，通过
     :meth:`append_full_data` 保存静态分析所需历史数据；内部 Qt 定时器以
@@ -261,7 +294,8 @@ class RealTimePlot:
     所有 Qt 图元、窗口和历史列表都由实例拥有，调用 :meth:`plot_full_analysis`
     时才按需导入 Matplotlib。
     """
-    def __init__(self, config: GuiConfig | None = None):
+    def __init__(self, config: GuiConfig | None = None,
+                 array_config: ArrayConfig | None = None):
         """创建实时窗口、绘图图元、定时器和历史缓存。
 
         Returns:
@@ -272,9 +306,15 @@ class RealTimePlot:
             可能抛出 Qt/PyQtGraph 相关异常。
         """
         self.config = (config or GuiConfig()).validate()
+        self.array_config = ArrayConfig() if array_config is None else array_config
+        if not isinstance(self.array_config, ArrayConfig):
+            raise TypeError("RealTimePlot.array_config 必须是 ArrayConfig")
+        self.array_config.validate()
         self._base_window_title = self.config.window_title
-        self.rows, self.cols = 12, 7
+        self.rows, self.cols = self.array_config.shape
         self.lock = threading.Lock()
+        self._close_callbacks = []
+        self._close_notified = False
         self._heat_vmax = self.config.heat_vmax
 
         # === 全程存储 ===
@@ -287,13 +327,51 @@ class RealTimePlot:
         self.full_cal_angle_list = []
         self.full_fx_cal_list, self.full_fy_cal_list = [], []
         self.full_fz_cal_list = []
+        self._analysis_csv_path: str | None = None
 
         self.init_defaults()
         self.init_history()
         self.build_layout()
+        self._close_filter = _WindowCloseFilter(self)
+        self.win.installEventFilter(self._close_filter)
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_all)
         self.timer.start(self.config.timer_interval_ms)
+
+    def add_close_callback(self, callback) -> None:
+        """注册主窗口关闭时调用的附属窗口清理回调。
+
+        Args:
+            callback: 无参数可调用对象，通常用于关闭属于当前主窗口的
+                附属窗口。
+
+        Returns:
+            ``None``。
+
+        Raises:
+            TypeError: ``callback`` 不是可调用对象。
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        if self._close_notified:
+            callback()
+        else:
+            self._close_callbacks.append(callback)
+
+    def _handle_window_close(self) -> None:
+        """在主窗口关闭前停止刷新并通知所有附属窗口。"""
+        if hasattr(self, "timer"):
+            self.timer.stop()
+        if self._close_notified:
+            return
+        self._close_notified = True
+        for callback in tuple(self._close_callbacks):
+            try:
+                callback()
+            except Exception:
+                # 附属窗口清理不应阻止主窗口关闭。
+                pass
+        self._close_callbacks.clear()
 
     def set_status(self, status: str | None = None) -> None:
         """更新窗口状态，同时保留配置中的传感器标签。
@@ -325,7 +403,7 @@ class RealTimePlot:
         """
         self._pzt_angle_deg = 0.0           # PZT方向角度(度)
         self._force_angle_deg = 0.0         # 六维力方向角度(度)
-        self._press_table_arr = np.zeros((12, 7))  # 压力表数据(12×7)
+        self._press_table_arr = np.zeros((self.rows, self.cols))
         self._cop_curr_x = 0.0              # 当前CoP X
         self._cop_curr_y = 0.0              # 当前CoP Y
         self._cop_base_x = 0.0              # 初始CoP X
@@ -342,10 +420,10 @@ class RealTimePlot:
         self._slip_motion_distance = 0.0
         self._slip_confidence = 0.0
         self._angle_vector_magnitude = 0.0  # 当前角度实际使用的向量模长(cell)
-        self._gradient_arr = np.zeros((12, 7, 2), dtype=np.float32)  # 压力梯度(每帧由 main 传入)
+        self._gradient_arr = np.zeros((self.rows, self.cols, 2), dtype=np.float32)
         self._contact_init = False
         self._pzt_table_angle_deg = None     # Pressure Table 专用角度（invertY 视图）
-        self._region_mask = np.zeros((12, 7), dtype=np.int32)   # per-region 着色掩码
+        self._region_mask = np.zeros((self.rows, self.cols), dtype=np.int32)
         self._regions = []                   # per-region 数据（cop/delta/id, 供点+箭头显示）
         self._centroid_xy = None             # 整帧形心（不加权, 品红菱形显示）
 
@@ -525,17 +603,20 @@ class RealTimePlot:
         self.p_table = self.win.addPlot(row=1, col=2, rowspan=3, title="Pressure Table")
         self.p_table.hideAxis('left'); self.p_table.hideAxis('bottom')
         self.p_table.setAspectLocked(); self.p_table.invertY(True)
-        self.p_table.setXRange(-0.5, 6.5); self.p_table.setYRange(-0.5, 11.5)
+        x_end = max(0.5, self.cols - 0.5)
+        y_end = max(0.5, self.rows - 0.5)
+        self.p_table.setXRange(-0.5, x_end)
+        self.p_table.setYRange(-0.5, y_end)
         self.p_table.getViewBox().setBackgroundColor('w')
         self.p_table.getViewBox().setBorder(pg.mkPen(width=0))
-        # CellGridItem — 84 个独立色块 + 网格线（网格线在 paint() 中绘制）
-        self._cell_grid = CellGridItem(12, 7)
+        # CellGridItem — 每个通道一个色块，网格线在 paint() 中绘制。
+        self._cell_grid = CellGridItem(self.array_config)
         self.p_table.addItem(self._cell_grid)
         # 数值文字
         self._cell_txts = []
-        for r in range(12):
+        for r in range(self.rows):
             row_t = []
-            for c in range(7):
+            for c in range(self.cols):
                 t = pg.TextItem("", color='k', anchor=(0.5, 0.5))
                 self.p_table.addItem(t)
                 t.setPos(c, r)
@@ -560,21 +641,22 @@ class RealTimePlot:
         self.p_grad = self.win.addPlot(row=1, col=3, rowspan=3, title="Gradient Arrows")
         self.p_grad.hideAxis('left'); self.p_grad.hideAxis('bottom')
         self.p_grad.setAspectLocked(); self.p_grad.invertY(True)
-        self.p_grad.setXRange(-0.5, 6.5); self.p_grad.setYRange(-0.5, 11.5)
+        self.p_grad.setXRange(-0.5, x_end)
+        self.p_grad.setYRange(-0.5, y_end)
         self.p_grad.getViewBox().setBackgroundColor('w')
         self.p_grad.getViewBox().setBorder(pg.mkPen(width=0))
-        self._grid_lines = GridLinesItem(12, 7)
+        self._grid_lines = GridLinesItem(self.array_config)
         self.p_grad.addItem(self._grid_lines)
         self._g_lines = []
         self._g_heads = []
-        for _ in range(84):
+        for _ in range(self.rows * self.cols):
             ln = self.p_grad.plot([0, 0], [0, 0], pen=pg.mkPen('k', width=1.5))
             self._g_lines.append(ln)
             dot = pg.ScatterPlotItem()
             self.p_grad.addItem(dot)
             self._g_heads.append(dot)
         self._g_txts = []
-        for _ in range(84):
+        for _ in range(self.rows * self.cols):
             t = pg.TextItem("", color='k', anchor=(0.5, 0.5))
             self.p_grad.addItem(t)
             self._g_txts.append(t)
@@ -614,7 +696,8 @@ class RealTimePlot:
         Args:
             pzt_angle_deg: PZT 压力方向角，单位为度。
             force_angle_deg: 六维力方向角，单位为度。
-            press_table_arr: 84 个压力值，可 reshape 为 ``(12, 7)``。
+            press_table_arr: ``rows * cols`` 个压力值，可 reshape 为当前实例
+                的 ``(rows, cols)``。
             total_press_val: 当前帧压力总和。
             cop_curr_x, cop_curr_y: 当前 CoP 的阵列坐标。
             cop_base_x, cop_base_y: 接触基准 CoP；``None`` 时使用当前 CoP。
@@ -622,11 +705,11 @@ class RealTimePlot:
             force_fx_val, force_fy_val, force_fz_val: 原始六维力分量。
             cal_fx_val, cal_fy_val, cal_fz_val: 可选标定力分量。
             cop_state: CoP 状态编号，通常 0/1/2 分别表示未接触、粗略和精细。
-            gradient: 可选 ``(12, 7, 2)`` 梯度数组。
+            gradient: 可选 ``(rows, cols, 2)`` 梯度数组。
             contact_init: 是否已经锁定初始接触基准。
             refined: 是否已完成精修；保留该接口参数供上层调用。
             pzt_table_angle_deg: 压力表坐标专用方向角，可选。
-            region_mask: 可选 ``(12, 7)`` 区域编号掩码。
+            region_mask: 可选 ``(rows, cols)`` 区域编号掩码。
             regions: 可选区域字典序列，每项包含 ``id``、``cop`` 和 ``delta``。
             centroid: 可选整帧形心 ``(x, y)``。
             motion_state: 滑移状态枚举值或整数，0/1/2 为未接触/静摩擦/滑移。
@@ -649,9 +732,30 @@ class RealTimePlot:
             ``refined`` 当前仅为兼容调用方的语义参数，未参与绘图分支。
         """
         with self.lock:
+            press_values = np.asarray(press_table_arr)
+            expected_shape = (self.rows, self.cols)
+            if press_values.size != self.rows * self.cols:
+                raise ValueError(
+                    f"压力显示数据必须包含 {self.rows * self.cols} 个通道，"
+                    f"实际为 {press_values.size}"
+                )
+            if gradient is not None:
+                gradient_values = np.asarray(gradient)
+                if gradient_values.shape != expected_shape + (2,):
+                    raise ValueError(
+                        f"gradient 形状必须为 {expected_shape + (2,)}，"
+                        f"实际为 {gradient_values.shape}"
+                    )
+            if region_mask is not None:
+                region_values = np.asarray(region_mask)
+                if region_values.shape != expected_shape:
+                    raise ValueError(
+                        f"region_mask 形状必须为 {expected_shape}，"
+                        f"实际为 {region_values.shape}"
+                    )
             self._pzt_angle_deg = pzt_angle_deg
             self._force_angle_deg = force_angle_deg
-            self._press_table_arr = press_table_arr.reshape(self.rows, self.cols)
+            self._press_table_arr = press_values.reshape(self.rows, self.cols)
             self._cop_curr_x = cop_curr_x
             self._cop_curr_y = cop_curr_y
             self._cop_base_x = cop_curr_x if cop_base_x is None else cop_base_x
@@ -666,10 +770,10 @@ class RealTimePlot:
             self._contact_init = contact_init
             self._pzt_table_angle_deg = pzt_table_angle_deg
             if gradient is not None:
-                self._gradient_arr = np.asarray(gradient, dtype=np.float32)
+                self._gradient_arr = gradient_values.astype(np.float32, copy=True)
             self._region_mask = (np.zeros((self.rows, self.cols), dtype=np.int32)
                                  if region_mask is None
-                                 else np.asarray(region_mask, dtype=np.int32))
+                                 else region_values.astype(np.int32, copy=True))
             self._regions = regions or []
             self._centroid_xy = centroid
             self._motion_state = int(motion_state)
@@ -740,6 +844,20 @@ class RealTimePlot:
             if cal_fz_val is not None:
                 self.full_fz_cal_list.append(cal_fz_val)
 
+    def set_analysis_csv_path(self, csv_path: str | Path | None) -> None:
+        """登记本次实时历史对应的 CSV，供退出分析图使用同 stem 命名。
+
+        Args:
+            csv_path: 当前会话实际写入的 CSV 路径；``None`` 清除登记。
+
+        Returns:
+            ``None``。
+
+        Side Effects:
+            只更新实例中的路径元数据，不创建文件，也不改变实时采样。
+        """
+        self._analysis_csv_path = None if csv_path is None else str(csv_path)
+
     # ===== 更新 =====
     def update_all(self):
         """从线程安全状态刷新全部 Qt 图元。
@@ -797,8 +915,9 @@ class RealTimePlot:
             f"d={slip_motion_distance:.3f} c={slip_confidence:.3f}"
         )
 
-        # 初始 CoP 未确定时冻结蓝色箭头（与红色一致）
-        _fa = force_angle_deg if contact_init else 0.0
+        # contact_init 只表示是否有可用的接触 origin。它不能二次屏蔽已经
+        # 产生的有限压力、CoP、方向或力数据。
+        _fa = float(force_angle_deg) if np.isfinite(force_angle_deg) else 0.0
 
         # Direction: PZT=red + Force=blue
         fs = self._font_size(12)
@@ -813,8 +932,8 @@ class RealTimePlot:
         # 角度向量模长（STICK=静态CoP delta，SLIP=EMA滑移向量）。
         pzt_arrow_len = min(max(angle_vector_magnitude * 0.5, 0.0), 0.65)
         self._update_arrow(self._mag_pzt, pzt_angle_deg, pzt_arrow_len, 'r')
-        _force_fx = 0.0 if (force_fx_val is None or np.isnan(force_fx_val)) else force_fx_val
-        _force_fy = 0.0 if (force_fy_val is None or np.isnan(force_fy_val)) else force_fy_val
+        _force_fx = float(force_fx_val) if np.isfinite(force_fx_val) else 0.0
+        _force_fy = float(force_fy_val) if np.isfinite(force_fy_val) else 0.0
         force_arrow_len = min(max(np.hypot(_force_fx, _force_fy) * 0.05, 0.0), 0.65)
         self._update_arrow(self._mag_frc, _fa, force_arrow_len, 'b')
         self._mag_txt_pzt.setHtml(self._html(f'PZT_Angle: {pzt_angle_deg:.1f}°', 'red', fs))
@@ -839,39 +958,66 @@ class RealTimePlot:
             self._t_err.setHtml(self._html(f'Error: {err_hist[-1]:.1f}°', 'green', fs))
             self._t_err.setPos(int(max(len(x_vals) - 1, 1) * 0.85), 180 - 180 * 0.12)
 
-        # Pressure table + CoP + Gradient：仅在初始 CoP 确定后显示
-        if contact_init:
-            cell_vmax = max(np.max(press_table_arr), self._heat_vmax)
-            self._cell_grid.set_data(press_table_arr, cell_vmax)
-            self._cell_grid.set_regions(region_mask, self.config.region_palette)
-            for row_idx in range(12):
-                for col_idx in range(7):
-                    cell_val = press_table_arr[row_idx, col_idx]
-                    self._cell_txts[row_idx][col_idx].setText(f"{cell_val:.0f}" if cell_val > 0 else "")
-            # CoP dots + arrow (region 模式下 cop_curr 为 NaN, 只显示 region 自己的点)
-            if not np.isnan(cop_curr_x) and not np.isnan(cop_curr_y):
-                spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
-                if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
-                    spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
-            else:
-                spots = []
-            self._cop_dots.setData(spots=spots)
+        # Pressure Table 始终绘制当前原始/处理后压力矩阵和单元值。只有叠加层
+        # 受 contact_init 控制，避免已有 ADC 在尚未建立 origin 时被清零。
+        finite_pressure = press_table_arr[np.isfinite(press_table_arr)]
+        current_max = float(np.max(finite_pressure)) if finite_pressure.size else 0.0
+        self._cell_grid.set_data(press_table_arr, max(current_max, self._heat_vmax))
+        display_region_mask = (
+            region_mask if contact_init else np.zeros((self.rows, self.cols), dtype=np.int32)
+        )
+        display_palette = self.config.region_palette if contact_init else []
+        self._cell_grid.set_regions(display_region_mask, display_palette)
+        for row_idx in range(self.rows):
+            for col_idx in range(self.cols):
+                cell_val = press_table_arr[row_idx, col_idx]
+                self._cell_txts[row_idx][col_idx].setText(
+                    f"{cell_val:.0f}" if np.isfinite(cell_val) and cell_val > 0 else ""
+                )
+
+        # 当前 CoP 是当前帧的有效观测，即使尚无 origin 也可以显示；origin、
+        # CoP 位移箭头、区域和梯度属于接触叠加层。
+        if np.isfinite(cop_curr_x) and np.isfinite(cop_curr_y):
+            spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
+            if contact_init and np.isfinite(cop_base_x) and np.isfinite(cop_base_y):
+                spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
+        else:
+            spots = []
+        self._cop_dots.setData(spots=spots)
+
+        if not contact_init:
+            self._centroid_dot.setData(spots=[])
+            self._cop_arr.setData([], [])
+            self._cop_hL.setData([], [])
+            self._cop_hR.setData([], [])
+            self._region_cop_dots.setData(spots=[])
+            self._region_base_dots.setData(spots=[])
+            for part_set in self._region_arrows:
+                for part in part_set:
+                    part.setData([], [])
+            for grad_ln, grad_dot in zip(self._g_lines, self._g_heads):
+                grad_ln.setData([], [])
+                grad_dot.setData(x=[], y=[])
+            for t in self._g_txts:
+                t.setText("")
+            self._grad_cop_dots.setData(spots=[])
+        else:
             # 整帧形心（不加权, 与压力无关）
             if self._centroid_xy is not None:
                 self._centroid_dot.setData(spots=[{'pos': self._centroid_xy, 'brush': 'm', 'symbol': 'd', 'size': 14}])
             else:
                 self._centroid_dot.setData(spots=[])
-            if not np.isnan(cop_base_x) and not np.isnan(cop_base_y) and np.hypot(cop_delta_x, cop_delta_y) > 0.05:
+            if np.isfinite(cop_base_x) and np.isfinite(cop_base_y) and np.hypot(cop_delta_x, cop_delta_y) > 0.05:
                 table_angle = pzt_table_angle_deg if pzt_table_angle_deg is not None else pzt_angle_deg
                 self._update_arrow((self._cop_arr, self._cop_hL, self._cop_hR),
-                                   table_angle,
-                                   np.hypot(cop_delta_x, cop_delta_y), 'r', (cop_base_x, cop_base_y))
+                                   table_angle, np.hypot(cop_delta_x, cop_delta_y), 'r',
+                                   (cop_base_x, cop_base_y))
             else:
                 self._cop_arr.setData([], [])
                 self._cop_hL.setData([], [])
                 self._cop_hR.setData([], [])
 
-            # per-region CoP 点 + 角度箭头（region 外框色, 与整帧同款; 外框线由 CellGridItem 保留）
+            # per-region CoP 点 + 角度箭头
             cop_spots, base_spots = [], []
             for i, reg in enumerate(regions):
                 cx, cy = reg['cop']
@@ -891,24 +1037,20 @@ class RealTimePlot:
                             part.setData([], [])
             self._region_cop_dots.setData(spots=cop_spots)
             self._region_base_dots.setData(spots=base_spots)
-            # region 数量减少时清理上一帧多余箭头，避免残影。
-            for i in range(
-                min(len(regions), self.config.max_region_arrows),
-                self.config.max_region_arrows,
-            ):
+            for i in range(min(len(regions), self.config.max_region_arrows), self.config.max_region_arrows):
                 for part in self._region_arrows[i]:
                     part.setData([], [])
 
             # Gradient arrows
-            if not np.isnan(cop_curr_x) and not np.isnan(cop_curr_y):
+            if np.isfinite(cop_curr_x) and np.isfinite(cop_curr_y):
                 grad_spots = [{'pos': (cop_curr_x, cop_curr_y), 'brush': 'g', 'size': 12}]
-                if not np.isnan(cop_base_x) and not np.isnan(cop_base_y):
+                if np.isfinite(cop_base_x) and np.isfinite(cop_base_y):
                     grad_spots.append({'pos': (cop_base_x, cop_base_y), 'brush': 'b', 'symbol': 'x', 'size': 15})
             else:
                 grad_spots = []
             self._grad_cop_dots.setData(spots=grad_spots)
             for grad_idx, (grad_ln, grad_dot) in enumerate(zip(self._g_lines, self._g_heads)):
-                grad_row, grad_col = divmod(grad_idx, 7)
+                grad_row, grad_col = divmod(grad_idx, self.cols)
                 grad_x, grad_y = grad_arr[grad_row, grad_col, 0], grad_arr[grad_row, grad_col, 1]
                 grad_norm = np.hypot(grad_x, grad_y)
                 if grad_norm > 1.0:
@@ -924,29 +1066,6 @@ class RealTimePlot:
                     grad_ln.setData([], [])
                     grad_dot.setData(x=[], y=[])
                     self._g_txts[grad_idx].setText("")
-        else:
-            # CoP 未确定：清空两张表
-            self._cell_grid.set_data(np.zeros((12, 7)), 1.0)
-            self._cell_grid.set_regions(np.zeros((12, 7), dtype=np.int32), [])
-            for row_idx in range(12):
-                for col_idx in range(7):
-                    self._cell_txts[row_idx][col_idx].setText("")
-            self._cop_dots.setData(spots=[])
-            self._centroid_dot.setData(spots=[])
-            self._cop_arr.setData([], [])
-            self._cop_hL.setData([], [])
-            self._cop_hR.setData([], [])
-            self._region_cop_dots.setData(spots=[])
-            self._region_base_dots.setData(spots=[])
-            for part_set in self._region_arrows:
-                for part in part_set:
-                    part.setData([], [])
-            for grad_ln, grad_dot in zip(self._g_lines, self._g_heads):
-                grad_ln.setData([], [])
-                grad_dot.setData(x=[], y=[])
-            for t in self._g_txts:
-                t.setText("")
-            self._grad_cop_dots.setData(spots=[])
 
     @staticmethod
     def _html(text, color, size=16):
@@ -1040,12 +1159,14 @@ class RealTimePlot:
                 txt_r.setPos(int(max(len(xs) - 1, 1) * 1), hi - span * 0.19)
 
     # ===== 全程静态图 (matplotlib Agg, 缺则 skip) =====
-    def plot_full_analysis(self, save_dir):
+    def plot_full_analysis(self, save_dir, csv_path=None):
         """将实例累计历史绘制为 PNG 静态分析图。
 
         Args:
-            save_dir: PNG 输出目录；文件名自动选择为
-                ``full_analysis_cop_<n>.png``，避免覆盖已有文件。
+            save_dir: PNG 输出目录；当没有登记 CSV 时作为回退目录。
+            csv_path: 可选的对应 CSV 路径；有值时输出与 CSV 同目录、同
+                stem 的 ``.png``，例如 ``COP_test_0826_3.csv`` 对应
+                ``COP_test_0826_3.png``。省略时使用会话登记的 CSV 路径。
 
         Returns:
             成功保存或无数据/缺少 Matplotlib 时返回 ``None``。无数据时打印
@@ -1107,7 +1228,22 @@ class RealTimePlot:
         for row in axes:
             for ax in row: ax.set_xlabel("Time (ms)", fontsize=9)
         plt.tight_layout()
-        idx = 1
-        while os.path.exists(os.path.join(save_dir, f"full_analysis_cop_{idx}.png")): idx += 1
-        sp = os.path.join(save_dir, f"full_analysis_cop_{idx}.png")
+        source_csv = csv_path or self._analysis_csv_path
+        if source_csv is None:
+            # 直接调用 GUI 方法且没有会话登记时，选择目录内最新的普通
+            # CSV；正常完整会话总是在 start() 后登记精确路径。
+            candidates = sorted(
+                (
+                    path for path in Path(save_dir).glob("*.csv")
+                    if path.is_file() and not path.name.startswith("_")
+                ),
+                key=lambda path: (path.stat().st_mtime, str(path)),
+                reverse=True,
+            )
+            source_csv = candidates[0] if candidates else None
+        if source_csv is None:
+            sp = Path(save_dir) / "analysis.png"
+        else:
+            sp = full_analysis_png_path(source_csv)
+        sp.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(sp, dpi=300); print(f"📊 已保存：{sp}"); plt.close(fig)

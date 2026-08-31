@@ -4,13 +4,15 @@
 Qt/Matplotlib 的 Python API。终端输出由示例或调用方自行决定。
 """
 
+import inspect
 import sys
+import warnings
 from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..config import PressureConfig, ProcessingConfig
+from ..config import ArrayConfig, PressureConfig, ProcessingConfig
 from ..processing.calibration import FitCalibrationModel
 from ..processing.cop import PRSensorAngle
 from ..processing.slip import SlipDetector, TangentialMotionState
@@ -48,14 +50,62 @@ def angle_difference(a: float, b: float) -> float:
     return min(difference, 360.0 - difference)
 
 
+def _construct_sensor_factory(factory, *, port, config=None, array_config=None):
+    """按工厂签名传递压力配置和唯一阵列布局对象。
+
+    自定义工厂只要声明 ``array_config`` 即可接收动态尺寸；只声明 ``port``
+    的简单测试工厂仍可使用，但不会产生另一套行列默认值。
+    """
+    try:
+        signature = inspect.signature(factory)
+    except (TypeError, ValueError):
+        return factory(port=port)
+    parameters = signature.parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    kwargs = {}
+    if accepts_kwargs or "port" in parameters:
+        kwargs["port"] = port
+    for name, value in (("config", config), ("array_config", array_config)):
+        if value is not None and (accepts_kwargs or name in parameters):
+            kwargs[name] = value
+    return factory(**kwargs)
+
+
+def _validate_component_array_config(component, expected, *, label):
+    """校验注入组件声明的阵列布局与当前应用布局一致。
+
+    未声明 ``array_config`` 的轻量测试替身和第三方适配器仍可使用；一旦组件
+    显式声明布局，就在读取硬件数据前拒绝尺寸不一致，避免错误延迟到 reshape、
+    CSV 或 GUI 阶段才暴露。
+    """
+    component_config = getattr(component, "array_config", None)
+    if component_config is None:
+        return
+    component_shape = getattr(component_config, "shape", None)
+    if component_shape is None:
+        raise TypeError(f"{label}.array_config 必须提供 shape")
+    try:
+        actual_shape = tuple(component_shape)
+    except TypeError as exc:
+        raise TypeError(f"{label}.array_config.shape 必须可转换为二维尺寸") from exc
+    if actual_shape != expected.shape:
+        raise ValueError(
+            f"{label} 阵列尺寸为 {actual_shape}，"
+            f"但当前 ArrayConfig 为 {expected.shape}"
+        )
+
+
 @dataclass
 class TangentialFrame:
     """公开的单帧压力结果。
 
     公开采集 API 只返回这八个字段。``base_data`` 是 SDK 实际使用的
-    84 通道压力数据；调用方需要终端显示或自定义矩阵计算时，可以自行
-    ``reshape(12, 7)``。
-    ``adc_sum`` 是对象中唯一的 84 通道 ADC 总和字段；108 列 CSV 使用同名
+    ``rows * cols`` 通道压力数据；调用方需要终端显示或自定义矩阵计算时，
+    可以按自己的配置 reshape。
+    ``adc_sum`` 是对象中唯一的 ADC 总和字段；默认 12×7 时，108 列 CSV 使用同名
     ``adc_sum`` 列，二者语义一致。
     """
 
@@ -114,7 +164,7 @@ class TangentialSample:
 
 
 class TangentialSampleProcessor:
-    """把一个 84 通道压力帧处理为完整的内部 ``TangentialSample``。
+    """把一个动态通道数压力帧处理为完整的内部 ``TangentialSample``。
 
     该内部类编排动态阈值、CoP、梯度、区域、滑移和标定，具体算法委托给
     ``PRSensorAngle``、``SlipDetector`` 和 ``FitCalibrationModel``。
@@ -130,7 +180,8 @@ class TangentialSampleProcessor:
                  region_mode=None, median_window=None,
                  processing_config: ProcessingConfig | None = None,
                  slip_detector: SlipDetector | None = None,
-                 consistence_calibrator=None):
+                 consistence_calibrator=None,
+                 array_config: ArrayConfig | None = None):
         """初始化单帧处理器和偏移量中值滤波状态。
 
         Args:
@@ -158,6 +209,10 @@ class TangentialSampleProcessor:
             ValueError: ``region_mode`` 不支持或 ``median_window <= 0``。
         """
         defaults = (processing_config or ProcessingConfig()).validate()
+        array_config = ArrayConfig() if array_config is None else array_config
+        if not isinstance(array_config, ArrayConfig):
+            raise TypeError("TangentialSampleProcessor.array_config 必须是 ArrayConfig")
+        array_config.validate()
         cal_dim = defaults.cal_dim if cal_dim is None else cal_dim
         region_mode = defaults.region_mode if region_mode is None else region_mode
         median_window = defaults.median_window if median_window is None else median_window
@@ -165,29 +220,53 @@ class TangentialSampleProcessor:
             raise ValueError("region_mode 必须是 full、region 或 both")
         if median_window <= 0:
             raise ValueError("median_window 必须大于0")
-        self.cop_sensor = cop_sensor or PRSensorAngle(config=defaults.cop)
+        self.array_config = array_config
+        self.cop_sensor = cop_sensor or PRSensorAngle(
+            array_config=self.array_config, config=defaults.cop
+        )
+        sensor_array_config = getattr(self.cop_sensor, "array_config", None)
+        sensor_shape = getattr(sensor_array_config, "shape", None)
+        if sensor_shape is None:
+            sensor_shape = (
+                getattr(self.cop_sensor, "rows", None),
+                getattr(self.cop_sensor, "cols", None),
+            )
+        if sensor_shape != self.array_config.shape:
+            raise ValueError(
+                "cop_sensor 的阵列尺寸必须与 ArrayConfig 一致："
+                f"期望 {self.array_config.rows}x{self.array_config.cols}，"
+                f"实际 {sensor_shape[0]}x{sensor_shape[1]}"
+            )
         self.slip_config = defaults.slip
         self.slip_detector = slip_detector or SlipDetector(
             config=defaults.slip,
-            rows=self.cop_sensor.rows,
-            cols=self.cop_sensor.cols,
+            array_config=self.array_config,
         )
         self.calibration = calibration
-        expected_channels = self.cop_sensor.rows * self.cop_sensor.cols
+        expected_channels = self.array_config.channel_count
         if consistence_calibrator is not None:
             self.consistence_calibrator = consistence_calibrator
         elif defaults.consistence.enabled:
-            if expected_channels != 84:
-                raise ValueError(
-                    "一致性标定只支持固定的 12×7/84 通道压力阵列；"
-                    f"当前处理器为 {expected_channels} 通道，请关闭一致性标定"
-                )
             from ..processing.calconsistence import ConsistenceCalibrator
             self.consistence_calibrator = ConsistenceCalibrator.from_config(
                 defaults.consistence
             )
         else:
             self.consistence_calibrator = None
+        calibrator_channels = getattr(
+            self.consistence_calibrator, "channel_count", None
+        )
+        if self.consistence_calibrator is not None and calibrator_channels is None:
+            scale = np.asarray(
+                getattr(self.consistence_calibrator, "scale", ()), dtype=np.float64
+            )
+            calibrator_channels = scale.size
+        if (self.consistence_calibrator is not None
+                and int(calibrator_channels) != expected_channels):
+            raise ValueError(
+                "一致性标定系数通道数必须与 ArrayConfig.channel_count 一致："
+                f"期望 {expected_channels}，实际 {calibrator_channels}"
+            )
         self.cal_dim = cal_dim
         self.region_mode = region_mode
         self._dx_values = deque(maxlen=median_window)
@@ -199,7 +278,7 @@ class TangentialSampleProcessor:
         Args:
             dx (float): 平滑后的 CoP X 偏移。
             dy (float): 平滑后的 CoP Y 偏移。
-            adc_sum (float): 84 通道 ADC 总和。
+            adc_sum (float): 当前阵列所有通道 ADC 总和。
 
         Returns:
             tuple[float, float, float]: Fx、Fy、Fz 预测值；没有模型或模型
@@ -222,7 +301,7 @@ class TangentialSampleProcessor:
 
         Args:
             raw_data (array-like): 原始 ADC 通道序列；长度必须等于
-                ``cop_sensor.rows * cop_sensor.cols``，当前为 84。
+                ``array_config.channel_count``。
             frame (Mapping | None): 可选传感器元数据，读取其中的
                 ``request_seq``、``tx_t``、``rx_t`` 和 ``latency_s``；默认
                 ``None`` 表示使用内部结果的缺省元数据。
@@ -240,7 +319,7 @@ class TangentialSampleProcessor:
             滤波队列。
         """
         raw_values = np.asarray(raw_data, dtype=np.float64).reshape(-1)
-        expected = self.cop_sensor.rows * self.cop_sensor.cols
+        expected = self.array_config.channel_count
         if raw_values.size != expected:
             raise ValueError(f"压力帧通道数必须为{expected}，实际为{raw_values.size}")
         if not np.all(np.isfinite(raw_values)):
@@ -251,7 +330,7 @@ class TangentialSampleProcessor:
         else:
             consistence_values = self.consistence_calibrator.apply(raw_values)
             values = consistence_values.copy()
-        matrix = values.reshape(self.cop_sensor.rows, self.cop_sensor.cols)
+        matrix = values.reshape(self.array_config.shape)
         self.cop_sensor.dynamic_threshold(matrix)
 
         use_full = self.region_mode in ("full", "both")
@@ -270,7 +349,7 @@ class TangentialSampleProcessor:
             origin_x = origin_y = None
             state = 0
             gradient = np.zeros(
-                (self.cop_sensor.rows, self.cop_sensor.cols, 2),
+                (*self.array_config.shape, 2),
                 dtype=np.float64,
             )
             centroid = None
@@ -404,13 +483,16 @@ class TangentialFrameProcessor:
         _sample_processor (TangentialSampleProcessor): 本门面独占的内部样本处理器。
     """
 
-    def __init__(self, cop_sensor=None, calibration=None, cal_dim=None,
+    def __init__(self, array_config: ArrayConfig | None = None,
+                 cop_sensor=None, calibration=None, cal_dim=None,
                  region_mode=None, median_window=None,
                  processing_config: ProcessingConfig | None = None,
                  slip_detector: SlipDetector | None = None):
         """初始化公开门面及其内部样本处理器。
 
         Args:
+            array_config (ArrayConfig | None): 整个处理链共用的阵列布局对象。
+                省略时使用默认 ``ArrayConfig``。
             cop_sensor (PRSensorAngle | None): 传给内部
                 ``TangentialSampleProcessor`` 的 CoP 计算器；为 ``None`` 时
                 创建默认实例。
@@ -428,6 +510,11 @@ class TangentialFrameProcessor:
         Raises:
             ValueError: 处理配置中的区域模式或滤波窗口非法。
         """
+        array_config = ArrayConfig() if array_config is None else array_config
+        if not isinstance(array_config, ArrayConfig):
+            raise TypeError("TangentialFrameProcessor.array_config 必须是 ArrayConfig")
+        array_config.validate()
+        self.array_config = array_config
         self._sample_processor = TangentialSampleProcessor(
             cop_sensor=cop_sensor,
             calibration=calibration,
@@ -436,6 +523,7 @@ class TangentialFrameProcessor:
             median_window=median_window,
             processing_config=processing_config,
             slip_detector=slip_detector,
+            array_config=self.array_config,
         )
 
     @staticmethod
@@ -467,7 +555,8 @@ class TangentialFrameProcessor:
         """处理一帧原始压力数据并返回简化公开结果。
 
         Args:
-            raw_data (array-like): 原始 ADC 通道序列；当前必须包含 84 个通道。
+            raw_data (array-like): 原始 ADC 通道序列；必须包含
+                ``rows * cols`` 个通道。
             frame (Mapping | None): 可选压力帧元数据；完整应用使用它保存
                 真实时间和请求序号，公开结果不暴露这些元数据。
 
@@ -498,7 +587,8 @@ class TangentialSensorAPI:
     def __init__(self, sensor=None, processor=None, sensor_factory=None,
                  model_path=None, pressure_port=None,
                  config: PressureConfig | None = None,
-                 processing_config: ProcessingConfig | None = None):
+                 processing_config: ProcessingConfig | None = None,
+                 array_config: ArrayConfig | None = None):
         """创建压力采集 API，并按需构造传感器和标定处理器。
 
         Args:
@@ -517,6 +607,8 @@ class TangentialSensorAPI:
                 周期、响应超时、队列和启动超时默认值。
             processing_config (ProcessingConfig | None): 单帧处理配置；未注入
                 ``processor`` 时用于创建 CoP 和标定处理器。
+            array_config (ArrayConfig | None): 整个压力采集、处理和显示链共用
+                的阵列布局对象；省略时使用默认 ``ArrayConfig``。
 
         Returns:
             None: 保存传感器、处理器和关闭状态。
@@ -529,6 +621,13 @@ class TangentialSensorAPI:
             若未注入 ``sensor``，会立即调用传感器工厂；若未注入
             ``processor``，会立即加载标定模型。
         """
+        processing_config = processing_config or ProcessingConfig()
+        processing_config.validate()
+        array_config = ArrayConfig() if array_config is None else array_config
+        if not isinstance(array_config, ArrayConfig):
+            raise TypeError("TangentialSensorAPI.array_config 必须是 ArrayConfig")
+        array_config.validate()
+        self.array_config = array_config
         if config is None:
             config = PressureConfig()
             if pressure_port is not None:
@@ -547,21 +646,40 @@ class TangentialSensorAPI:
                     queue_size=config.frame_queue_size,
                     baudrate=config.baudrate,
                     _startup_timeout_s=config.startup_timeout_s,
+                    array_config=array_config,
                 )
             else:
-                sensor = sensor_factory(port=pressure_port)
+                sensor = _construct_sensor_factory(
+                    sensor_factory,
+                    port=pressure_port,
+                    config=config,
+                    array_config=array_config,
+                )
             sensor_created = True
         try:
+            _validate_component_array_config(
+                sensor, array_config, label="TangentialSensorAPI.sensor"
+            )
             if processor is None:
                 calibration = (
                     FitCalibrationModel.from_default()
                     if model_path is None
                     else FitCalibrationModel.from_path(model_path)
                 )
-                processing_config = processing_config or ProcessingConfig()
-                processing_config.validate()
+                if (model_path is None
+                        and array_config.shape != ArrayConfig.DEFAULT_SHAPE):
+                    warnings.warn(
+                        "内置fit模型仅由原12×7硬件训练；当前非12×7阵列的"
+                        "标定力不具备自动的物理有效性，请提供对应阵列模型",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
                 processor = TangentialFrameProcessor(
-                    cop_sensor=PRSensorAngle(**processing_config.cop.as_kwargs()),
+                    array_config=array_config,
+                    cop_sensor=PRSensorAngle(
+                        array_config=array_config,
+                        config=processing_config.cop,
+                    ),
                     calibration=calibration,
                     processing_config=processing_config,
                 )
@@ -569,6 +687,9 @@ class TangentialSensorAPI:
                 raise TypeError(
                     "TangentialSensorAPI.processor 必须是 TangentialFrameProcessor"
                 )
+            _validate_component_array_config(
+                processor, array_config, label="TangentialSensorAPI.processor"
+            )
         except Exception:
             if sensor_created:
                 close = getattr(sensor, "close", None)
@@ -652,49 +773,68 @@ class TangentialSensorAPI:
         return False
 
 
-def format_terminal_sample(sample: TangentialFrame) -> str:
-    """把公开帧格式化为固定布局的终端文本。
+def format_terminal_sample(
+    sample: TangentialFrame, array_config: ArrayConfig | None = None
+) -> str:
+    """把公开帧格式化为指定阵列布局的终端文本。
 
     Args:
-        sample (TangentialFrame): 要显示的单帧结果；``base_data`` 必须包含 84
-            个 ADC 通道，并会在此处 reshape 为 12×7。
+            sample (TangentialFrame): 要显示的单帧结果；``base_data`` 必须包含
+                ``array_config.channel_count`` 个 ADC 通道。
+            array_config (ArrayConfig | None): 当前阵列布局；省略时使用默认布局。
 
     Returns:
-        str: 包含 12 行 ADC 以及 adc_sum、CoP、角度、dx/dy 和运动状态的
+        str: 包含 ``rows`` 行 ADC 以及 adc_sum、CoP、角度、dx/dy 和运动状态的
         换行文本；不会写入终端。
 
     Raises:
         AttributeError: ``sample`` 缺少所需字段时抛出。
         ValueError: 格式化字段不是可格式化数值时抛出。
     """
-    matrix = np.asarray(sample.base_data).reshape(12, 7)
-    rows = [" ".join(f"{value:7.0f}" for value in row) for row in matrix]
-    rows.extend([
+    array_config = ArrayConfig() if array_config is None else array_config
+    if not isinstance(array_config, ArrayConfig):
+        raise TypeError("format_terminal_sample.array_config 必须是 ArrayConfig")
+    array_config.validate()
+    rows, cols = array_config.shape
+    values = np.asarray(sample.base_data)
+    if values.size != rows * cols:
+        raise ValueError(
+            f"终端帧通道数必须为 {rows * cols}，实际为 {values.size}"
+        )
+    matrix = values.reshape(rows, cols)
+    lines = [" ".join(f"{value:7.0f}" for value in row) for row in matrix]
+    lines.extend([
         f"adc_sum={sample.adc_sum:14.3f}",
         f"cop_x={sample.cop_x:11.4f} cop_y={sample.cop_y:11.4f} "
         f"angle={sample.angle:10.3f}",
         f"dx={sample.dx:11.4f} dy={sample.dy:11.4f} "
         f"motion_state={sample.motion_state.name}",
     ])
-    return "\n".join(rows)
+    return "\n".join(lines)
 
 
 class FixedTerminalRenderer:
     """每帧只执行一次 ``write``/``flush`` 的固定布局终端渲染器。"""
 
-    def __init__(self, stream=None):
+    def __init__(self, stream=None, array_config: ArrayConfig | None = None):
         """初始化终端渲染器。
 
         Args:
-            stream (TextIO | None): 可写文本流；为 ``None`` 时使用当前
+        stream (TextIO | None): 可写文本流；为 ``None`` 时使用当前
                 ``sys.stdout``。
+            array_config (ArrayConfig | None): 当前阵列布局；省略时使用默认布局。
         """
         self.stream = stream or sys.stdout
+        self.array_config = ArrayConfig() if array_config is None else array_config
+        if not isinstance(self.array_config, ArrayConfig):
+            raise TypeError("FixedTerminalRenderer.array_config 必须是 ArrayConfig")
+        self.array_config.validate()
+        self.rows, self.cols = self.array_config.shape
         self._first_frame = True
 
     def render(self, sample: TangentialFrame) -> str:
         """格式化并立即刷新一帧终端输出。"""
-        text = format_terminal_sample(sample)
+        text = format_terminal_sample(sample, self.array_config)
         prefix = "\x1b[2J\x1b[H" if self._first_frame else "\x1b[H"
         self._first_frame = False
         self.stream.write(prefix + text + "\n")

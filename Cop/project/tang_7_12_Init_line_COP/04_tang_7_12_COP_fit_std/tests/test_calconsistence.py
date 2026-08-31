@@ -24,6 +24,7 @@ from tangential.processing.slip import SlipResult, TangentialMotionState
 def write_calibration_csv(
     path: Path,
     *,
+    channel_count: int = 84,
     baseline_rows: int = 2,
     loaded_rows: int = 2,
     omit_channel: int | None = None,
@@ -35,7 +36,8 @@ def write_calibration_csv(
 ) -> None:
     """写入只存在于临时目录的最小两状态标定 CSV。"""
     channels = [
-        channel for channel in range(1, 85) if channel != omit_channel
+        channel for channel in range(1, channel_count + 1)
+        if channel != omit_channel
     ]
     headers = ["  CoP_state  ", *(f" ch{channel} " for channel in channels)]
     with path.open("w", encoding="utf-8", newline="") as stream:
@@ -86,7 +88,7 @@ class ConsistenceCalibrationTests(unittest.TestCase):
                 self.assertTrue(
                     {
                         "scale", "offset", "states", "targets", "sample_counts",
-                        "source_sha256", "state_column",
+                        "source_sha256", "state_column", "channel_count",
                     }.issubset(archive.files)
                 )
                 self.assertEqual(archive["scale"].shape, (84,))
@@ -115,7 +117,9 @@ class ConsistenceCalibrationTests(unittest.TestCase):
 
     def test_validation_rejects_missing_columns_states_nan_and_nonpositive_span(self):
         cases = (
-            ("missing channel", {"omit_channel": 84}, "缺少列"),
+            # 动态发现以文件中最大的连续通道号为 N；因此缺少末尾 ch84
+            # 不再是“固定84通道”错误，缺少中间编号才明确构成非连续表头。
+            ("non-contiguous channel", {"omit_channel": 2}, "连续"),
             ("missing loaded state", {"include_loaded": False}, "state=2"),
             ("nan", {"nan_channel": 1}, "有限数字"),
             ("nonpositive span", {"nonpositive_channel": 1}, "严格大于"),
@@ -130,6 +134,49 @@ class ConsistenceCalibrationTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ValueError, expected):
                     ConsistenceCalibrator.fit_from_csv(config)
+
+    def test_dynamic_15_channel_fit_save_and_load(self):
+        """一致性标定应从 ch1...ch15 自动得到 15 通道系数。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path = root / "input-15.csv"
+            output_path = root / "coefficients-15.npz"
+            write_calibration_csv(csv_path, channel_count=15)
+            config = ConsistenceCalibrationConfig(
+                csv_path=csv_path,
+                output_path=output_path,
+                target_min=100.0,
+                target_max=200.0,
+            )
+
+            calibrator = ConsistenceCalibrator.fit_from_csv(config)
+            self.assertEqual(calibrator.channel_count, 15)
+            self.assertEqual(calibrator.scale.shape, (15,))
+            self.assertEqual(calibrator.offset.shape, (15,))
+            raw = np.arange(15, dtype=np.float64)
+            corrected = calibrator.apply(raw)
+            saved = calibrator.save(force=False)
+            with np.load(saved, allow_pickle=False) as archive:
+                self.assertEqual(int(archive["channel_count"]), 15)
+                self.assertEqual(archive["scale"].shape, (15,))
+            loaded = ConsistenceCalibrator.from_path(
+                saved, clip_min=None, clip_max=None
+            )
+            self.assertEqual(loaded.channel_count, 15)
+            np.testing.assert_allclose(loaded.apply(raw), corrected)
+
+    def test_non_contiguous_channel_headers_are_rejected(self):
+        """ch1、ch2、ch4 这类跳号表头不能被静默解释为三通道。"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "non-contiguous.csv"
+            write_calibration_csv(path, channel_count=4, omit_channel=3)
+            with self.assertRaisesRegex(ValueError, "连续"):
+                ConsistenceCalibrator.fit_from_csv(
+                    ConsistenceCalibrationConfig(
+                        csv_path=path,
+                        output_path=Path(directory) / "output.npz",
+                    )
+                )
 
     def test_unrelated_state_nan_is_ignored_but_selected_state_nan_fails(self):
         with tempfile.TemporaryDirectory() as directory:

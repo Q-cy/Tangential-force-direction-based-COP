@@ -1,18 +1,32 @@
 # 04_tang_7_12_COP_fit_std：Agent 工作手册
 
-本文对应 Tangential SDK 0.5.0 的实际架构。修改前必须读取并核对源码；不得恢复旧入口，不得复制协议、CoP、标定或 108 列 CSV 实现。
+本文对应 Tangential SDK 0.6.0 的实际架构。修改前必须读取并核对源码；不得恢复旧入口，不得复制协议、CoP、标定、频谱或 108 列 CSV 实现。
+
+## 0. 默认协作与执行分工
+
+除非用户在当前任务中明确指定其他方式，本项目默认采用以下角色分工：
+
+- Sol-Mid负责理解需求、检查现有实现、制定修改方案、定义验收标准和最终review；不得把未经核对的Luna输出直接当作完成结果。
+- Luna-Max负责按Sol-Mid方案执行源码、测试和维护者文档修改；必须限制在本项目目录内，并复用已有唯一实现。
+- Sol-Mid必须检查实际文件差异、测试输出、数据语义和资源生命周期后才可向用户报告完成。
+- 若当前会话没有可调用或可见的Luna-Max子代理能力，主代理必须明确说明，并按相同方案、review和验收标准自行执行；禁止声称已委派给不存在的子代理。
+- 项目唯一验收环境为`/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python`，不得使用裸`python`或其他Conda环境代替。
+- 默认不构建Cython扩展、`.so`或wheel；只有用户明确要求构建或交付二进制时才执行。
+- 默认不执行Git写操作；只有用户在当前任务中明确授权时才允许`add`、`commit`、`revert`、`restore`或`reset`。Git只读检查仍受本文第8节限制。
+- 所有读取、修改、生成结果和测试必须限制在`04_tang_7_12_COP_fit_std`项目目录及允许的临时目录；未经用户明确命令不得修改其他项目。
 
 ## 1. 项目定位和交付边界
 
-项目提供 12×7 PZT 压力阵列与可选六维力传感器的采集、CoP、角度、梯度、切向力标定、实时 GUI、CSV 保存、训练和离线绘图。
+项目提供可配置行列数的 PZT 压力阵列与可选六维力传感器采集、CoP、角度、梯度、切向力标定、实时 GUI、CSV 保存、训练和离线绘图。默认阵列为 12×7，但尺寸不是协议不变量。
 
 - 正式源码目录是 src/tangential/。
 - 源码仓库完整保留所有 Python .py；源码模式可通过 PYTHONPATH=src 直接运行，不要求预编译 .so。
-- 发布 wheel 目标是 Linux x86_64、CPython 3.11，名称为 tangential_sensor-0.5.0-cp311-cp311-linux_x86_64.whl。
-- wheel 内部 runtime、acquisition、sensors、processing、storage 是多个 CPython 扩展 .so；公开 API、config、CLI、examples、gui、tools 和类型声明保留可读 Python。
+- 发布 wheel 目标是 Linux x86_64、CPython 3.11，名称为 tangential_sensor-0.6.0-cp311-cp311-linux_x86_64.whl。
+- wheel 内部 runtime、acquisition、sensors、processing、storage 是多个 CPython 扩展 .so；公开 API、config、CLI、examples、gui、tools 和类型声明保留可读 Python。频谱处理是第12个内部扩展，频谱 GUI 保留可读 Python。
 - .so 只是 Python 扩展，不提供稳定 C++/Rust ABI；不得把它描述为原生跨语言 SDK。
 - 保密用户不要发布 sdist，因为 sdist 包含 Python 源码。源码仓库是内部维护源。
 - Python 最低版本为 3.11；核心运行依赖和 full 可选依赖由 pyproject.toml 声明，requirements.txt 是完整开发/GUI 环境。
+- 本项目唯一开发和验收 Conda 环境是 ``TimeDrift_GRU``，解释器固定为 ``/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python``。Agent 运行源码、测试、``compileall`` 或 wheel 构建时不得使用裸 ``python``，也不得使用 base 环境或系统解释器；命令前应设置任务专用变量 ``TANGENTIAL_PYTHON`` 并显式调用它。
 
 ## 2. 实际目录和职责
 
@@ -24,6 +38,14 @@
 ├── pyproject.toml                    # 包元数据、依赖、入口、资源和构建依赖，关于
 ├── setup.py                          # Cython扩展清单、编译指令和wheel源码过滤
 ├── MANIFEST.in                       # 源码分发清单
+├── analysis/
+│   ├── offline_friction_spectrum_0827.py   # 0827前三次摩擦CSV的可复现离线回放与频谱对比
+│   ├── offline_friction_spectrum_0827_4.py # 0827_4单次完整静止/静摩擦/滑动过程分析
+│   ├── offline_friction_feature_evaluation_0827_4.py # CV/平坦度/高频占比/质心评估
+│   ├── offline_target_band_evaluation_0827_4.py # 目标带占比、绝对量和局部峰评估
+│   └── offline_score2_audit_0827_4.py # 历史fraction-only规则审计，不接入运行时
+├── data/
+│   └── spectrum_feature_research_summary.md # 历史频谱特征、指标、失败原因和单记录限制归档
 ├── src/tangential/
 │   ├── __init__.py                   # 稳定顶层公共 API 和版本
 │   ├── api.py                        # 可读公开 API 门面
@@ -46,12 +68,15 @@
 │   │   ├── cop.py                    # PRSensorAngle、CoP、状态机、梯度和区域
 │   │   ├── slip.py                   # 归一化斑块平移、CoP短窗和STICK/SLIP状态
 │   │   ├── calibration.py            # fit_coefs.bin 读取和模型预测
-│   │   ├── calconsistence.py         # 离线 CSV 拟合、NPZ 加载和84通道一致性修正
+│   │   ├── spectrum.py               # 真实rx_t重采样、0.5秒CoP速度STFT、目标带功率占比和完整历史
+│   │   ├── spectrum.pyi              # 频谱/检测内部扩展的静态类型签名
+│   │   ├── calconsistence.py         # 离线 CSV 动态通道拟合、NPZ 加载和一致性修正
 │   │   └── calconsistence.pyi       # 一致性标定扩展的静态签名
 │   ├── storage/
-│   │   └── csv.py                    # 唯一 108 列表头和行构造
+│   │   └── csv.py                    # 唯一 108 列表头、行构造和 CSV→同stem PNG 命名
 │   ├── gui/
-│   │   └── realtime.py               # PyQtGraph 实时显示
+│   │   ├── realtime.py               # PyQtGraph 主实时显示
+│   │   └── spectrum.py               # X/Y/合成速度谱、合成幅值瀑布和唯一功率占比状态窗口
 │   ├── tools/
 │   │   ├── training.py               # 离线拟合和模型写出
 │   │   └── plotting.py               # CSV 解析、绘图和完整分析
@@ -71,15 +96,15 @@ runtime、acquisition、sensors、processing、storage 是运行时核心实现�
 
 ## 3. 公共 API 和示例边界
 
-稳定源码 API 从 tangential 顶层导入，包括以下 32 个名称；普通用户推荐其中 3 个：TangentialSensorAPI、TangentialFrameProcessor、TangentialFrame。配置、应用、工具和高级/底层名称仍保留在源码与顶层导出中，供完整程序和维护者使用：
+稳定源码 API 从 tangential 顶层导入，包括以下 33 个名称；普通用户推荐其中 3 个：TangentialSensorAPI、TangentialFrameProcessor、TangentialFrame。配置、应用、工具和高级/底层名称仍保留在源码与顶层导出中，供完整程序和维护者使用：
 
 - TangentialSensorAPI、TangentialFrame、TangentialFrameProcessor。
 - ``TangentialFrame`` 的字段严格为 ``base_data``、``adc_sum``、``cop_x``、``cop_y``、
-  ``angle``、``dx``、``dy``、``motion_state``；其中 ``adc_sum`` 是 84 通道
+  ``angle``、``dx``、``dy``、``motion_state``；其中 ``adc_sum`` 是当前阵列全部通道
   ADC 之和，也是公开对象中唯一的 ADC 总和名称。
 - FixedTerminalRenderer、format_terminal_sample、compute_vector_angle、angle_difference。
 - FitCalibrationModel、PRSensorAngle、PressureSensor、TangentialMotionState、SlipResult、SlipDetector、SlipConfig。
-- PressureConfig、ForceConfig、CopConfig、ProcessingConfig、CalibrationConfig、SyncConfig、OutputConfig、GuiConfig、TrainingConfig、PlotConfig、FullApplicationConfig。
+- ArrayConfig、PressureConfig、ForceConfig、CopConfig、ProcessingConfig、CalibrationConfig、SyncConfig、OutputConfig、GuiConfig、TrainingConfig、PlotConfig、FullApplicationConfig。
 - train_model、TrainingResult、plot_csv、plot_full_analysis、PlotResult、run_application。
 - run_dual_application：在一个 QApplication 中启动两路完整、相互隔离的 GUI 会话。
 
@@ -95,7 +120,7 @@ examples/dual_sensor.py 展示两路完整应用用法：每个 ``FullApplicatio
 
 双传感器运行和验收必须严格按以下顺序执行：
 
-1. 插入两只压力设备。运行 ``python -m serial.tools.list_ports -v`` 和
+1. 插入两只压力设备。先设置 ``TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python``，再运行 ``"$TANGENTIAL_PYTHON" -m serial.tools.list_ports -v`` 和
    ``ls -l /dev/serial/by-id/``，取得两个不同物理设备的实际路径；没有列出
    端口时不得继续启动示例。
 2. 用第1步查到的真实路径分别设置 ``PORT_A``、``PORT_B``。不得原样输入
@@ -114,9 +139,10 @@ examples/dual_sensor.py 展示两路完整应用用法：每个 ``FullApplicatio
 源码运行命令：
 
 ~~~bash
+TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python
 PORT_A=/dev/serial/by-id/DEVICE_A_ID
 PORT_B=/dev/serial/by-id/DEVICE_B_ID
-PYTHONPATH=src python -m tangential.examples.dual_sensor \
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m tangential.examples.dual_sensor \
   --port-a "$PORT_A" \
   --port-b "$PORT_B"
 ~~~
@@ -124,7 +150,8 @@ PYTHONPATH=src python -m tangential.examples.dual_sensor \
 安装wheel后运行命令：
 
 ~~~bash
-python -m tangential.examples.dual_sensor \
+TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python
+"$TANGENTIAL_PYTHON" -m tangential.examples.dual_sensor \
   --port-a "$PORT_A" \
   --port-b "$PORT_B"
 ~~~
@@ -135,7 +162,7 @@ python -m tangential.examples.dual_sensor \
 
 该示例启动一个 ``QApplication``、两个 ``RealTimePlot`` 和两个
 ``acquisition_loop``，两路都完整执行压力采集、CoP、角度、梯度、标定、实时
-曲线/压力表、108列 CSV 和退出后的分析图；它不再是终端摘要示例。默认只启用
+曲线/压力表、动态通道 CSV 和退出后的分析图；默认 12×7 时仍为108列。它不再是终端摘要示例。默认只启用
 压力传感器，只有显式提供 ``--force-port-a``/``--force-port-b`` 才启用对应
 六维力通道，避免两路同时打开默认 ``/dev/ttyUSB1``。修改示例时必须复用
 ``run_dual_application``、``FullAcquisitionSession`` 和 ``acquisition_loop``，
@@ -144,7 +171,8 @@ python -m tangential.examples.dual_sensor \
 统一 CLI 也提供同一入口：
 
 ~~~bash
-PYTHONPATH=src python -m tangential.cli dual \
+TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m tangential.cli dual \
   --port-a "$PORT_A" --port-b "$PORT_B" \
   --save-dir ./data/dual
 ~~~
@@ -162,14 +190,17 @@ PYTHONPATH=src python -m tangential.cli dual \
 
 所有用户可调参数集中在 config.py，按功能使用 dataclass：
 
+- ArrayConfig：全项目最基础的阵列行数、列数、shape、通道数和协议数据字节数；默认12×7，必须位于其他功能配置之前。
 - PressureConfig：压力端口、波特率、目标频率、响应超时、队列和启动超时。
 - ForceConfig：六维力 enabled 开关、端口、波特率、目标频率、响应超时、队列、启动超时和校零参数。
-- CopConfig：阈值、背景学习、稳定帧、区域和二次精修。
+- CopConfig：阈值、背景学习、稳定帧、区域和二次精修；不得包含阵列行列数。
 - ProcessingConfig：标定维度、区域模式、中值窗口和精修归零策略。
 - CalibrationConfig：外部模型路径。
 - SyncConfig：主循环频率、GUI 频率、匹配窗口、统计周期和缓存。
 - OutputConfig：CSV 目录。
 - GuiConfig：Qt刷新周期、窗口标题、历史长度、热力图色阶、窗口尺寸、区域箭头和配色。
+- SpectrumConfig：160 Hz重采样、0.5秒速度STFT、2–70 Hz完整分析频带、
+  滑移频带功率占比阈值、连续窗滞回和NPZ/窗口参数。
 - TrainingConfig、PlotConfig：离线训练和绘图。
 - ConsistenceCalibrationConfig：维护者内部统一配置，包含运行期开关/系数路径和离线输入、输出、状态、目标与裁剪参数；不得再建立第二个一致性配置类。
 - FullApplicationConfig：以上配置的组合。
@@ -180,7 +211,7 @@ PYTHONPATH=src python -m tangential.cli dual \
 CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py 内置默认
 ~~~
 
-协议帧头、CRC、固定 12×7/84 通道布局、固定帧长度和 108 列 CSV 属于协议不变量，不复制到 config，也不在调用方重新定义。
+协议帧头、CRC、地址和每通道 uint16 编码属于协议不变量。阵列尺寸只在公共 ``ArrayConfig.rows/cols`` 配置；``FullApplicationConfig.array``、压力请求读取长度、应答长度、处理矩阵、CSV 通道列、终端和 GUI 网格必须共享同一个布局对象，不得在 ``CopConfig`` 或调用方另设第二套行列默认值。默认 12×7 输出108列，任意尺寸输出 ``rows*cols+24`` 列。
 
 修改 ``config.py`` 默认值只影响之后从该源码或重新构建wheel创建的默认配置；
 已经安装的旧wheel和已经构造的对象不会自动更新。用户代码优先显式传入分类
@@ -190,6 +221,12 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
 
 - 压力和六维力请求目标均为 200 Hz、5 ms 周期；单请求在途，设备响应慢时实际频率自然下降。
 - 压力合法帧解析完成后立即记录真实 rx_t；rel_ms/delta_ms 不得由 GUI、主循环 sleep 或重采样生成。
+- 单路完整应用的频谱只接受`state=2`的有限、严格递增CoP帧；使用未经过`dx/dy`中值滤波的绝对`cop_x/cop_y`，按真实`rx_t`线性重采样到160 Hz。每个81点CoP位置窗差分为80点速度，再用0.5秒周期Hann窗计算2–70 Hz X/Y/合成单边速度谱；每0.05秒最多生成一份快照。
+- 运行时唯一判定指标是`slip_band_power_ratio`：默认24–28 Hz内`amplitude_x**2 + amplitude_y**2`的功率和，除以完整2–70 Hz全部频点的总功率。运行时不得重新引入score1/score2命名、ignored mask、CV、高频辅助占比、质心、prominence或`motion/active/entropy/flatness/peak/flux`分类特征。逐频点冻结`baseline_power`与`relative_power_db`作为旁路显示和记录保留，但绝不进入ratio、阈值或状态。
+- 完整0.5秒窗前状态为`WAITING`；第一份完整窗直接以`STICK`输出，不等待旁路基线。之后STICK中`ratio >= slip_band_power_ratio_threshold`连续`enter_windows=3`窗进入SLIP；SLIP中`ratio <`同一默认0.30阈值连续`exit_windows=5`窗回到STICK。阈值和连续窗只是当前可调初值，不是生产验证结论。`SpectrumSnapshot`保留时间、频率、X/Y/合成幅值、旁路基线/相对dB及其建立状态、ratio、摩擦状态、阈值和revision。
+- 旁路基线从接触后的第一份完整频谱窗开始收集，达到`baseline_duration_s`后对每个频点取时间中位数并冻结。建立前`baseline_power`和`relative_power_db`为NaN，ratio状态仍正常推进；建立后GUI和NPZ记录真实相对dB。接触结束时清除基线；通信gap保留已冻结基线，但丢弃未完成的基线样本，禁止跨gap拼接。
+- `SpectrumConfig.max_gap_s`默认0.160秒；不超过该值的间隔在线性补齐160 Hz网格后继续短窗，补点不是硬件测量。非目标状态、非法值、倒序时间或严格超过160 ms的gap清空重采样窗、滞回计数并回到WAITING；重新积满81点后从STICK开始，完整快照历史不删除。GUI显示三条当前幅值谱、相对基线dB曲线、相对dB瀑布、ratio/阈值/状态/连续窗和等待进度，不得显示灰带或已删除指标。单路退出原子保存新schema的`_spectrum.npz`；旧NPZ不迁移，无快照不创建。双路禁止创建分析器、窗口和NPZ。
+- `analysis/`只保存维护者历史离线实验脚本，不被`tangential`运行时、CLI或wheel入口导入；既有脚本和结果不得删除。历史score1六特征、CV/高频占比/质心/平坦度、目标带占比/绝对量/prominence、归一化AND与fraction-only审计统一记录在`data/spectrum_feature_research_summary.md`。CSV没有同步事件标记时，阶段边界和滑动开始只能标为候选值，不得写成ground truth或直接固化为生产规则。静摩擦负样本必须包含开始施加切向力、快速形变和保持段。
 - 压力帧按 seq 顺序驱动；每个合法压力帧最多处理和保存一次。
 - 最小 API 的数据流固定为 ``TangentialSensorAPI → PressureSensor/decode → TangentialSampleProcessor._process_sample() → TangentialSample → TangentialFrameProcessor._to_tangential_frame() → TangentialFrame``；``TangentialSample`` 只供完整应用内部直接消费，公开处理器和传感器始终只返回 ``TangentialFrame``，不得从顶层、``tangential.api``、``tangential.runtime.__all__`` 或公开 ``sensor.pyi`` 导出内部类型。
 - 每个力帧最多匹配一次；匹配窗口为 0.015 秒。
@@ -197,7 +234,7 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
 - 压力设备必需；六维力连接或普通帧校零失败时降级为压力模式。
 - 启动校零和运行期重新归零只使用普通力数据帧，不发送额外置零命令；串口只能有一个消费者。
 - CSV 只能由 storage/csv.py 的 TABLE_CSV_HEADER 和 build_csv_row 生成。
-- CSV 固定列 ``adc_sum`` 表示同一帧 84 通道 ADC 之和；对象字段与 CSV 列均
+- CSV 固定语义列 ``adc_sum`` 表示同一帧全部 ``rows*cols`` 通道 ADC 之和；对象字段与 CSV 列均
   使用 ``adc_sum``，不得重新引入 ``total``、``sum`` 或其它别名。
 - 压力数据流固定为 ``raw_data → consistence_data → base_data``：传输帧使用
   ``payload``，解码数组使用 ``raw_data``；启用一致性标定时所有 CoP、梯度、
@@ -208,7 +245,7 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
   当前配置字段为唯一来源，默认路径必须位于项目 ``data/`` 且后缀为 ``.csv``；
   不得在测试或文档中另行写死某个采集文件名。默认 ``output_path`` 解析为项目
   ``src/tangential/resources/consistence_coeffs.npz``。
-- 离线标定唯一命令是源码模式 ``PYTHONPATH=src python -m
+- 离线标定唯一命令是源码模式 ``PYTHONPATH=src "$TANGENTIAL_PYTHON" -m
   tangential.processing.calconsistence``。该模块不使用 argparse、不访问硬件，按统一
   配置读取 CSV 和写出 NPZ；``force`` 默认 ``True``，连续运行必须覆盖并更新同名
   NPZ。底层 ``ConsistenceCalibrator.save(force=False)`` 和显式配置
@@ -236,6 +273,7 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
   力箭头和 Pressure Table 的 origin/current CoP 几何保持原语义。只有旧代码
   直接调用 ``RealTimePlot.set_data`` 且 ``angle_vector_magnitude=None`` 时允许
   回退到 ``hypot(cop_delta_x, cop_delta_y)``；正式会话必须显式传 sample 字段。
+- 实时 GUI 的压力矩阵、单元值、PZT_Z 和有限的 PZT_X/Y、Force_X/Y/Z 时序每帧都必须更新，不能由 ``contact_init`` 二次屏蔽。``contact_init`` 只控制依赖已建立 origin 的基准点、位移箭头、region 和 gradient 叠加层；未建立 origin 时也必须显示已接收的压力矩阵和有效当前 CoP。
 - 异常、Ctrl+C、窗口关闭和无数据退出必须释放停止事件、线程、进程、串口、CSV 和 Qt 资源。
 
 ## 6. 修改路由
@@ -247,6 +285,8 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
 | 六维力协议、校零和进程        | sensors/force.py                                  | test_data.py、集成测试             |
 | seq、缓存和时间匹配           | acquisition/buffer.py、runtime/synchronization.py | test_data.py、集成测试             |
 | CoP、阈值、状态机、梯度、区域 | processing/cop.py                                 | API、GUI、集成测试                 |
+| CoP频谱、短窗摩擦检测与时频显示 | processing/spectrum.py、gui/spectrum.py、runtime/session.py | 频谱/检测算法、GUI、NPZ和集成测试 |
+| 离线摩擦频谱实验与候选规则 | analysis/offline_friction_spectrum_*.py、analysis/offline_friction_feature_evaluation_*.py | 运行脚本、检查JSON/CSV/PNG且不得影响运行时导入 |
 | 模型读取和预测                | processing/calibration.py                         | 模型回归测试                       |
 | 一致性标定                    | processing/calconsistence.py、config.py           | 标定器、源码入口、资源和数据流测试 |
 | 最小 API 和示例               | api.py、runtime/sensor.py、examples/minimal.py    | test_tangential_api.py、结构测试   |
@@ -264,15 +304,16 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
 源码运行：
 
 ~~~bash
-python -m pip install -r requirements.txt
-PYTHONPATH=src python -m tangential.examples.minimal
-PYTHONPATH=src python -m tangential.examples.full
-PYTHONPATH=src python -m tangential.processing.calconsistence
+TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python
+"$TANGENTIAL_PYTHON" -m pip install -r requirements.txt
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m tangential.examples.minimal
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m tangential.examples.full
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m tangential.processing.calconsistence
 ~~~
 
 Cython>=3.1,<4 是构建依赖，已在 pyproject.toml 声明；requirements.txt 供 no-build-isolation 开发构建使用。
 
-setup.py 当前把以下11个内部模块分别编译为同名扩展：runtime/sensor、runtime/session、runtime/synchronization、acquisition/buffer、sensors/pressure、sensors/force、processing/cop、processing/calibration、processing/calconsistence、processing/slip、storage/csv。新增或移动编译模块时必须同步更新 setup.py、同名 .pyi、package-data 和分发测试。
+setup.py 当前把以下12个内部模块分别编译为同名扩展：runtime/sensor、runtime/session、runtime/synchronization、acquisition/buffer、sensors/pressure、sensors/force、processing/cop、processing/calibration、processing/calconsistence、processing/slip、processing/spectrum、storage/csv。新增或移动编译模块时必须同步更新 setup.py、同名 .pyi、package-data 和分发测试。
 
 ``BinaryWheelBuildPy.run`` 必须在复制package前清理旧 ``build/lib*/tangential``
 输出，防止已删除或重命名的模块残留进wheel。分发测试必须明确检查旧模块名
@@ -283,31 +324,34 @@ Cython必须保持 language_level=3、annotation_typing=False、binding=True、e
 构建 wheel：
 
 ~~~bash
-python -m pip wheel . --no-deps --no-build-isolation -w dist
+TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python
+"$TANGENTIAL_PYTHON" -m pip wheel . --no-deps --no-build-isolation -w dist
 ~~~
 
 构建结果应为：
 
 ~~~text
-dist/tangential_sensor-0.5.0-cp311-cp311-linux_x86_64.whl
+dist/tangential_sensor-0.6.0-cp311-cp311-linux_x86_64.whl
 ~~~
 
 完整测试：
 
 ~~~bash
+TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python
 PYTHONPATH=src \
 QT_QPA_PLATFORM=offscreen \
 MPLCONFIGDIR=/tmp/pzt-mplconfig \
-python -m unittest discover -s tests -q
+"$TANGENTIAL_PYTHON" -m unittest discover -s tests -q
 ~~~
 
 附加检查：
 
 ~~~bash
-PYTHONPATH=src python -m compileall -q src/tangential tests
+TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m compileall -q src/tangential tests
 ~~~
 
-分发验收应检查 wheel 中存在11个内部 .so、11个同名 .pyi、py.typed、已确认的资源文件和CLI入口，同时不存在对应内部 .py、生成的 C/C++ 文件或 share/ 模型目录。`consistence_coeffs.npz` 只有在 `ConsistenceCalibrationConfig.csv_path` 指向的标定数据来源确认并生成后才能加入 wheel；不得把标定 CSV 本身或未经确认的数据打包。确认模型可在脱离源码目录加载，函数签名和文档可查看；源码模式和隔离安装模式都要运行完整测试。不要生成或向保密用户发布 sdist。
+分发验收应检查 wheel 中存在12个内部 .so、12个同名 .pyi、py.typed、已确认的资源文件和CLI入口，同时不存在对应内部 .py、生成的 C/C++ 文件或 share/ 模型目录。`consistence_coeffs.npz` 只有在 `ConsistenceCalibrationConfig.csv_path` 指向的标定数据来源确认并生成后才能加入 wheel；不得把标定 CSV 本身或未经确认的数据打包。确认模型可在脱离源码目录加载，函数签名和文档可查看；源码模式和隔离安装模式都要运行完整测试。不要生成或向保密用户发布 sdist。
 
 dist/中的wheel和build/中的中间产物不属于源码修改内容。最终交付时必须在报告中给出wheel绝对路径、平台标签和测试结果。
 

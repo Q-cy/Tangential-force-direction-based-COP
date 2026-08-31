@@ -10,7 +10,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tangential.config import ForceConfig, FullApplicationConfig, GuiConfig, OutputConfig
+from tangential.config import (
+    ArrayConfig,
+    CopConfig,
+    ForceConfig,
+    FullApplicationConfig,
+    GuiConfig,
+    OutputConfig,
+    ProcessingConfig,
+    SpectrumConfig,
+)
 from tangential.examples.dual_sensor import (
     _build_parser,
     build_configs_from_args,
@@ -139,8 +148,10 @@ class DualSensorExampleTests(unittest.TestCase):
 class _FakePlot:
     """不依赖 Qt 的完整窗口替身。"""
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, rows=12, cols=7):
         self.config = config
+        self.rows = rows
+        self.cols = cols
         self.statuses = []
         self.analysis_dirs = []
 
@@ -243,6 +254,126 @@ class DualRunnerLifecycleTests(unittest.TestCase):
                 [plot.analysis_dirs for plot in plots],
                 [[config_a.save_dir], [config_b.save_dir]],
             )
+
+    def test_two_plots_receive_independent_array_dimensions(self):
+        """双路 runner 必须把各自 ProcessingConfig 的尺寸传给窗口。"""
+        with tempfile.TemporaryDirectory() as root:
+            config_a = FullApplicationConfig(
+                output=OutputConfig(save_dir=str(Path(root) / "a")),
+                gui=GuiConfig(window_title="Sensor A"),
+                force=ForceConfig(enabled=False),
+                array=ArrayConfig(rows=3, cols=5),
+                processing=ProcessingConfig(cop=CopConfig()),
+            )
+            config_b = FullApplicationConfig(
+                pressure_port="/dev/b",
+                output=OutputConfig(save_dir=str(Path(root) / "b")),
+                gui=GuiConfig(window_title="Sensor B"),
+                force=ForceConfig(enabled=False),
+                array=ArrayConfig(rows=4, cols=4),
+                processing=ProcessingConfig(cop=CopConfig()),
+            )
+            plots = []
+
+            class App:
+                @staticmethod
+                def instance():
+                    return None
+
+                def __init__(self, argv):
+                    pass
+
+                def exec(self):
+                    time.sleep(0.02)
+
+                def quit(self):
+                    pass
+
+            class TimerFactory(_FakeTimer):
+                def __init__(self):
+                    super().__init__()
+                    self._signal = self._Signal(self)
+
+            def plot_factory(config=None, array_config=None):
+                layout = array_config or ArrayConfig()
+                plot = _FakePlot(config, layout.rows, layout.cols)
+                plots.append(plot)
+                return plot
+
+            def worker(plot, stop_event, config):
+                del plot, config
+                stop_event.wait(1)
+
+            with mock.patch.object(session_module.QtWidgets, "QApplication", App), \
+                 mock.patch.object(session_module.QtCore, "QTimer", TimerFactory):
+                DualApplicationRunner(
+                    config_a,
+                    config_b,
+                    worker_target=worker,
+                    plot_factory=plot_factory,
+                ).run()
+
+            self.assertEqual([(plot.rows, plot.cols) for plot in plots], [(3, 5), (4, 4)])
+
+    def test_default_acquisition_boundary_always_disables_spectrum(self):
+        """双路忽略两份频谱开关并向真实默认边界传入禁用参数。"""
+        with tempfile.TemporaryDirectory() as root:
+            config_a = FullApplicationConfig(
+                output=OutputConfig(save_dir=str(Path(root) / "a")),
+                gui=GuiConfig(window_title="Sensor A"),
+                force=ForceConfig(enabled=False),
+                spectrum=SpectrumConfig(enabled=True, enabled_in_dual=True),
+            )
+            config_b = FullApplicationConfig(
+                pressure_port="/dev/b",
+                output=OutputConfig(save_dir=str(Path(root) / "b")),
+                gui=GuiConfig(window_title="Sensor B"),
+                force=ForceConfig(enabled=False),
+                spectrum=SpectrumConfig(enabled=True, enabled_in_dual=True),
+            )
+
+            class App:
+                @staticmethod
+                def instance():
+                    return None
+
+                def __init__(self, argv):
+                    pass
+
+                def exec(self):
+                    time.sleep(0.03)
+
+                def quit(self):
+                    pass
+
+            class TimerFactory(_FakeTimer):
+                def __init__(self):
+                    super().__init__()
+                    self._signal = self._Signal(self)
+
+            observed = []
+
+            def boundary(plot, **kwargs):
+                observed.append(kwargs)
+
+            with mock.patch.object(session_module.QtWidgets, "QApplication", App), \
+                 mock.patch.object(session_module.QtCore, "QTimer", TimerFactory), \
+                 mock.patch.object(
+                     session_module, "acquisition_loop", side_effect=boundary
+                 ):
+                DualApplicationRunner(
+                    config_a,
+                    config_b,
+                    plot_factory=_FakePlot,
+                ).run()
+
+            self.assertEqual(len(observed), 2)
+            self.assertEqual({id(item["config"]) for item in observed}, {
+                id(config_a), id(config_b),
+            })
+            for kwargs in observed:
+                self.assertIsNone(kwargs["spectrum_sink"])
+                self.assertFalse(kwargs["enable_spectrum"])
 
     def test_worker_error_sets_both_stop_events(self):
         """任一路后台异常都会让另一路停止并完成清理。"""

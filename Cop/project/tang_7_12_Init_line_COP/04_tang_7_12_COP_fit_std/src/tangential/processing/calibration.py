@@ -335,12 +335,12 @@ class FitCalibrationModel:
             return cls(path=resource_name, error=exc)
 
     def predict(self, dx, dy, adc_sum, cal_dim="3D"):
-        """根据 CoP 位移和 84 通道 ADC 总和预测 Fx、Fy、Fz。
+        """根据 CoP 位移和阵列 ADC 总和预测 Fx、Fy、Fz。
 
         Args:
             dx: CoP X 位移，单位为传感器 cell。
             dy: CoP Y 位移，单位为传感器 cell。
-            adc_sum: 84 通道 ADC 总和；``cal_dim="3D"`` 时作为第三输入。
+            adc_sum: 当前阵列全部通道 ADC 总和；``cal_dim="3D"`` 时作为第三输入。
             cal_dim: 标定维度；``"3D"`` 使用 dx/dy/adc_sum，否则只使用 dx/dy。
 
         Returns:

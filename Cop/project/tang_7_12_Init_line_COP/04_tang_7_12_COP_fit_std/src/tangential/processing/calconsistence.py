@@ -1,6 +1,6 @@
-"""84 通道压阻阵列离线一致性标定与运行时系数加载。
+"""可配置通道压阻阵列离线一致性标定与运行时系数加载。
 
-离线阶段从调用方指定的 CSV 读取 ``CoP_state`` 和 ``ch1`` 到 ``ch84``，
+离线阶段从调用方指定的 CSV 自动发现连续的 ``ch1`` 到 ``chN``，
 根据卸载/加载两组样本生成每通道两点仿射系数。运行时只加载安全的
 ``.npz`` 系数文件并应用到一帧原始 ADC，不访问离线 CSV。
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import re
 import zipfile
 from importlib import resources
 from pathlib import Path
@@ -19,9 +20,34 @@ import numpy as np
 from ..config import ConsistenceCalibrationConfig
 
 
-CHANNEL_COUNT = 84
 DEFAULT_RESOURCE_NAME = "consistence_coeffs.npz"
-_CHANNEL_NAMES = tuple(f"ch{index}" for index in range(1, CHANNEL_COUNT + 1))
+
+
+def _discover_channel_names(headers: list[str]) -> tuple[str, ...]:
+    """从 CSV 表头发现连续的 ``ch1`` 到 ``chN`` 通道列。
+
+    仅把完整匹配 ``ch`` 加正整数的列视为压力通道，并拒绝缺号、跳号或
+    从 1 以外开始的表头，避免把非连续列静默当成阵列数据。
+    """
+    discovered: dict[int, str] = {}
+    pattern = re.compile(r"^ch([1-9][0-9]*)$")
+    for header in headers:
+        match = pattern.fullmatch(header)
+        if match is not None:
+            index = int(match.group(1))
+            discovered[index] = header
+    if not discovered:
+        raise ValueError("一致性标定 CSV 缺少连续压力通道列 ch1...chN")
+    maximum = max(discovered)
+    expected = tuple(range(1, maximum + 1))
+    actual = tuple(sorted(discovered))
+    if actual != expected:
+        missing = sorted(set(expected) - set(actual))
+        raise ValueError(
+            "一致性标定 CSV 的压力通道必须从 ch1 连续到 chN，"
+            f"缺少: {', '.join(f'ch{index}' for index in missing) or '无'}"
+        )
+    return tuple(discovered[index] for index in expected)
 
 
 def _as_finite_float(value: Any, *, label: str) -> float:
@@ -42,7 +68,7 @@ def _read_calibration_csv(
     baseline_state: int,
     loaded_state: int,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """严格读取两种状态下的 84 通道数据和源文件摘要。"""
+    """严格读取两种状态下的动态通道数据和源文件摘要。"""
     path = Path(csv_path)
     if not path.is_file():
         raise FileNotFoundError(f"一致性标定 CSV 不存在: {path}")
@@ -61,12 +87,13 @@ def _read_calibration_csv(
             raise ValueError("一致性标定 CSV 表头不能包含空列名")
         if len(set(headers)) != len(headers):
             raise ValueError("一致性标定 CSV 表头包含重复列名")
-        required = (state_column.strip(), *_CHANNEL_NAMES)
+        channel_names = _discover_channel_names(headers)
+        required = (state_column.strip(), *channel_names)
         missing = [name for name in required if name not in headers]
         if missing:
             raise ValueError("一致性标定 CSV 缺少列: " + ", ".join(missing))
         state_index = headers.index(state_column.strip())
-        channel_indices = [headers.index(name) for name in _CHANNEL_NAMES]
+        channel_indices = [headers.index(name) for name in channel_names]
 
         row_count = 0
         for line_number, row in enumerate(reader, start=2):
@@ -90,7 +117,7 @@ def _read_calibration_csv(
                 continue
             values = [
                 _as_finite_float(
-                    row[index], label=f"第 {line_number} 行 {_CHANNEL_NAMES[offset]}"
+                    row[index], label=f"第 {line_number} 行 {channel_names[offset]}"
                 )
                 for offset, index in enumerate(channel_indices)
             ]
@@ -111,6 +138,7 @@ def _read_calibration_csv(
         "baseline_count": len(baseline_rows),
         "loaded_count": len(loaded_rows),
         "row_count": row_count,
+        "channel_count": len(channel_names),
     }
     return (
         np.asarray(baseline_rows, dtype=np.float64),
@@ -120,11 +148,12 @@ def _read_calibration_csv(
 
 
 class ConsistenceCalibrator:
-    """保存并应用 84 通道一致性标定系数。
+    """保存并应用任意正整数通道数的一致性标定系数。
 
     Args:
-        scale: 每通道乘法系数，形状必须为 ``(84,)``。
-        offset: 每通道偏移系数，形状必须为 ``(84,)``。
+        scale: 每通道乘法系数，形状为 ``(channel_count,)``。
+        offset: 每通道偏移系数，形状为 ``(channel_count,)``，必须与
+            ``scale`` 长度相同。
         clip_min: 应用结果的可选下限，默认 0。
         clip_max: 应用结果的可选上限，默认不裁剪。
         metadata: 离线拟合元数据；只用于诊断和保存，不参与计算。
@@ -145,6 +174,12 @@ class ConsistenceCalibrator:
     ) -> None:
         self.scale = self._validate_coefficients(scale, "scale")
         self.offset = self._validate_coefficients(offset, "offset")
+        if self.scale.shape != self.offset.shape:
+            raise ValueError(
+                "scale 和 offset 必须具有相同通道数："
+                f"{self.scale.size} != {self.offset.size}"
+            )
+        self.channel_count = int(self.scale.size)
         if clip_min is not None and not np.isfinite(clip_min):
             raise ValueError("clip_min 必须是有限数字或 None")
         if clip_max is not None and not np.isfinite(clip_max):
@@ -154,14 +189,28 @@ class ConsistenceCalibrator:
         self.clip_min = None if clip_min is None else float(clip_min)
         self.clip_max = None if clip_max is None else float(clip_max)
         self.metadata = dict(metadata or {})
+        metadata_count = self.metadata.get("channel_count")
+        if metadata_count is not None:
+            try:
+                metadata_count = int(np.asarray(metadata_count).item())
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ValueError("一致性标定 metadata.channel_count 必须是整数") from exc
+            if metadata_count != self.channel_count:
+                raise ValueError(
+                    "metadata.channel_count 与系数长度不一致："
+                    f"{metadata_count} != {self.channel_count}"
+                )
+        self.metadata["channel_count"] = self.channel_count
         self.output_path = None if output_path is None else Path(output_path)
 
     @staticmethod
     def _validate_coefficients(values: Any, name: str) -> np.ndarray:
-        """校验并复制一组 84 通道系数。"""
+        """校验并复制一组动态通道系数。"""
         array = np.asarray(values, dtype=np.float64)
-        if array.shape != (CHANNEL_COUNT,):
-            raise ValueError(f"{name} 必须是形状 ({CHANNEL_COUNT},)，实际为 {array.shape}")
+        if array.ndim != 1 or array.size <= 0:
+            raise ValueError(
+                f"{name} 必须是一维正长度数组，实际形状为 {array.shape}"
+            )
         if not np.all(np.isfinite(array)):
             raise ValueError(f"{name} 不能包含 NaN 或无穷值")
         return array.copy()
@@ -206,6 +255,7 @@ class ConsistenceCalibrator:
         offset = config.target_min - baseline_median * scale
         metadata.update(
             {
+                "channel_count": int(baseline.shape[1]),
                 "state_column": config.state_column.strip(),
                 "baseline_state": config.baseline_state,
                 "loaded_state": config.loaded_state,
@@ -326,18 +376,20 @@ class ConsistenceCalibrator:
         """把一帧原始 ADC 转换为一致性标定后的独立数组。
 
         Args:
-            raw_data: 长度为84的一维原始 ADC 序列。
+            raw_data: 长度为 ``channel_count`` 的一维原始 ADC 序列。
 
         Returns:
-            numpy.ndarray: ``float64`` 的84通道校正数据；不会修改输入。
+            numpy.ndarray: ``float64`` 的 ``channel_count`` 通道校正数据；
+                不会修改输入。
 
         Raises:
-            ValueError: 输入不是84通道或包含非有限值。
+            ValueError: 输入通道数不是系数通道数或包含非有限值。
         """
         values = np.asarray(raw_data, dtype=np.float64).reshape(-1)
-        if values.shape != (CHANNEL_COUNT,):
+        if values.shape != (self.channel_count,):
             raise ValueError(
-                f"一致性标定输入必须是形状 ({CHANNEL_COUNT},)，实际为 {values.shape}"
+                "一致性标定输入通道数必须为 "
+                f"{self.channel_count}，实际形状为 {values.shape}"
             )
         if not np.all(np.isfinite(values)):
             raise ValueError("一致性标定输入不能包含 NaN 或无穷值")
@@ -374,10 +426,12 @@ class ConsistenceCalibrator:
         if output.exists() and not force:
             raise FileExistsError(f"一致性标定系数已存在，使用 force 覆盖: {output}")
         output.parent.mkdir(parents=True, exist_ok=True)
-        metadata = self.metadata
+        metadata = dict(self.metadata)
+        metadata["channel_count"] = self.channel_count
         arrays: dict[str, Any] = {
             "scale": self.scale,
             "offset": self.offset,
+            "channel_count": np.array(self.channel_count, dtype=np.int64),
             "clip_min": np.array(
                 np.nan if self.clip_min is None else self.clip_min, dtype=np.float64
             ),
@@ -441,7 +495,6 @@ def main() -> int:
 
 
 __all__ = [
-    "CHANNEL_COUNT",
     "DEFAULT_RESOURCE_NAME",
     "ConsistenceCalibrationConfig",
     "ConsistenceCalibrator",

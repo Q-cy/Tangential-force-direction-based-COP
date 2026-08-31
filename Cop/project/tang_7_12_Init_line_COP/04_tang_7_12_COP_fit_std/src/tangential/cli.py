@@ -28,7 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(                                       # 实例化一个顶层命令解析器对象
         prog="tangential",                                                  # prog = program
-        description="12×7 PZT 压力阵列与六维力采集、分析和标定工具",
+        description="可配置行列数的 PZT 压力阵列与六维力采集、分析和标定工具",
     )
     parser.add_argument("--version", action="version", version=VERSION)     # 顶层解析器实例.add_argument
     commands = parser.add_subparsers(dest="command", required=True)         # 子命令，dest = destination，执行 tangential app → args.command = "app"
@@ -118,7 +118,7 @@ def _handle_example(args: argparse.Namespace) -> int:
             ``main`` 转换为错误码 1。
 
     Side Effects:
-        打开压力传感器并持续向标准输出写入 12×7 ADC 和计算结果；离开
+        打开压力传感器并持续向标准输出写入配置尺寸的 ADC 和计算结果；离开
         ``with`` 块时关闭传感器。
     """
     from .config import PressureConfig

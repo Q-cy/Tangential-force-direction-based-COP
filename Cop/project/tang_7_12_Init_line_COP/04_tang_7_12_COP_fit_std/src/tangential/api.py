@@ -13,6 +13,7 @@ from .runtime.sensor import (
     compute_vector_angle,
     format_terminal_sample,
 )
+from .config import ArrayConfig
 from .processing.slip import SlipDetector, SlipResult, TangentialMotionState
 
 # 控制 from tangential import * 会导入哪些
@@ -27,4 +28,5 @@ __all__ = [
     "TangentialMotionState",
     "SlipResult",
     "SlipDetector",
+    "ArrayConfig",
 ]

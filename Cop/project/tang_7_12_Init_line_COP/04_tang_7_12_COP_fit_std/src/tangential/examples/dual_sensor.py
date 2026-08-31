@@ -1,7 +1,7 @@
 """双路完整实时采集示例。
 
 该示例与 ``examples/full.py`` 使用同一套完整会话：每一路都显示压力表、
-梯度、CoP、角度、标定和实时曲线，保存完整 108 列 CSV，并在退出时生成
+梯度、CoP、角度、标定和实时曲线，按各自通道数保存动态列 CSV，并在退出时生成
 结束分析图。两路只共享一个 ``QApplication``，设备、会话、窗口和输出目录
 均保持独立。
 """
@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ..application import run_dual_application
 from ..config import (
+    ArrayConfig,
     CalibrationConfig,
     ForceConfig,
     FullApplicationConfig,
@@ -31,6 +32,7 @@ def build_config(
     save_dir: str | os.PathLike[str],
     model_path: str | None,
     window_title: str,
+    array_config: ArrayConfig | None = None,
 ) -> FullApplicationConfig:
     """创建一路双传感器完整应用配置。
 
@@ -40,6 +42,7 @@ def build_config(
         save_dir: 该路独立 CSV 和结束分析图目录。
         model_path: 可选外部模型路径；为 ``None`` 时使用内置模型。
         window_title: 该路 GUI 窗口标题。
+        array_config: 该路独占的阵列布局对象；省略时创建默认布局。
 
     Returns:
         FullApplicationConfig: 可直接传给 ``run_dual_application`` 的配置。
@@ -52,6 +55,7 @@ def build_config(
         port=force_port or "/dev/ttyUSB1",
     )
     return FullApplicationConfig(
+        array=array_config or ArrayConfig(),
         pressure=PressureConfig(port=pressure_port),
         force=force,
         calibration=CalibrationConfig(model_path=model_path),
@@ -129,7 +133,7 @@ def build_configs_from_args(args: argparse.Namespace) -> tuple[
 def _build_parser() -> argparse.ArgumentParser:
     """创建双路完整 GUI 示例的命令行解析器。"""
     parser = argparse.ArgumentParser(
-        description="同时运行两个独立的完整压力采集 GUI（CSV 为 108 列）"
+        description="同时运行两个独立的完整压力采集 GUI（CSV 列数按阵列尺寸变化）"
     )
     parser.add_argument("--port-a", required=True, help="Sensor A 压力串口")
     parser.add_argument("--port-b", required=True, help="Sensor B 压力串口")

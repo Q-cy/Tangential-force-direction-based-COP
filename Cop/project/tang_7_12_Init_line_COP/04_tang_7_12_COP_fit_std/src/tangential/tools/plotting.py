@@ -17,6 +17,7 @@ import numpy as np
 
 from ..config import PlotConfig
 from ..runtime.sensor import angle_difference
+from ..storage.csv import full_analysis_png_path
 
 _ANGLE_COLUMNS = {"ADC_angle", "Force_angle", "Force_cal_angle"}
 RowsSpec: TypeAlias = tuple[int | None, int | None] | slice | str | None
@@ -584,8 +585,7 @@ def _output_path(config: PlotConfig, first_path: Path, *, full: bool) -> Path:
     Args:
         config: Plot configuration; ``save_path`` overrides the derived name.
         first_path: First input CSV, used to derive the default filename.
-        full: Select ``full_analysis_<stem>.png`` when true, otherwise
-            ``<stem>_plot.png``.
+        full: Select ``<stem>.png`` when true, otherwise ``<stem>_plot.png``.
     Returns:
         Destination :class:`Path` whose parent directory exists.
     Raises:
@@ -594,8 +594,11 @@ def _output_path(config: PlotConfig, first_path: Path, *, full: bool) -> Path:
     if config.save_path is not None:
         path = Path(config.save_path)
     else:
-        name = f"full_analysis_{first_path.stem}.png" if full else f"{first_path.stem}_plot.png"
-        path = first_path.parent / name
+        path = (
+            full_analysis_png_path(first_path)
+            if full
+            else first_path.parent / f"{first_path.stem}_plot.png"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 

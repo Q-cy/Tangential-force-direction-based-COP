@@ -24,6 +24,7 @@ COMPILED_MODULES = {
     "tangential/processing/calconsistence",
     "tangential/processing/cop",
     "tangential/processing/slip",
+    "tangential/processing/spectrum",
     "tangential/runtime/sensor",
     "tangential/runtime/session",
     "tangential/runtime/synchronization",
@@ -131,7 +132,7 @@ class DistributionConfigurationTests(unittest.TestCase):
 
         project = config["project"]
         self.assertEqual(project["name"], "tangential-sensor")
-        self.assertEqual(project["version"], "0.5.0")
+        self.assertEqual(project["version"], "0.6.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["scripts"], {"tangential": "tangential.cli:main"})
         self.assertEqual(set(project["dependencies"]), {"numpy", "scipy", "pyserial"})
@@ -159,7 +160,7 @@ class DistributionConfigurationTests(unittest.TestCase):
         from tangential import __version__
         from tangential.cli import VERSION
 
-        self.assertEqual(project_version, "0.5.0")
+        self.assertEqual(project_version, "0.6.0")
         self.assertEqual(__version__, project_version)
         self.assertEqual(VERSION, project_version)
 
@@ -174,9 +175,9 @@ class DistributionConfigurationTests(unittest.TestCase):
         self.assertIn("recursive-include src/tangential *.pyi", lines)
         self.assertIn("include src/tangential/py.typed", lines)
 
-    def test_cython_module_manifest_has_eleven_sources_and_stubs(self):
-        """资源来源未定时仍无条件校验 11 个扩展的源码/签名清单。"""
-        self.assertEqual(len(COMPILED_MODULES), 11)
+    def test_cython_module_manifest_has_twelve_sources_and_stubs(self):
+        """无论默认数据资源是否存在，都校验 12 个扩展的源码/签名清单。"""
+        self.assertEqual(len(COMPILED_MODULES), 12)
         setup_text = (PROJECT_ROOT / "setup.py").read_text(encoding="utf-8")
         for module in COMPILED_MODULES:
             package_path = PACKAGE_ROOT / Path(*module.split("/")[1:])
@@ -236,7 +237,7 @@ class WheelDistributionTests(unittest.TestCase):
             )
             self.assertEqual(build.returncode, 0, msg=build.stderr or build.stdout)
 
-            wheels = sorted(wheel_dir.glob("tangential_sensor-0.5.0-*.whl"))
+            wheels = sorted(wheel_dir.glob("tangential_sensor-0.6.0-*.whl"))
             self.assertEqual(len(wheels), 1, msg=build.stdout)
             wheel_path = wheels[0]
             with zipfile.ZipFile(wheel_path) as archive:
@@ -278,7 +279,7 @@ class WheelDistributionTests(unittest.TestCase):
                 self.assertNotIn("tangential/examples/dual_pressure.py", names)
                 self.assertIn("tangential/examples/dual_sensor.py", names)
                 self.assertNotIn(
-                    "tangential_sensor-0.5.0.data/data/share/tangential/fit_coefs.bin",
+                    "tangential_sensor-0.6.0.data/data/share/tangential/fit_coefs.bin",
                     names,
                 )
 
@@ -323,7 +324,7 @@ class WheelDistributionTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(version.returncode, 0, msg=version.stderr)
-            self.assertEqual(version.stdout.strip(), "0.5.0")
+            self.assertEqual(version.stdout.strip(), "0.6.0")
 
             for command in ("example", "app", "dual", "plot", "fit"):
                 help_result = subprocess.run(

@@ -91,6 +91,7 @@ class StructureAndConfigTests(unittest.TestCase):
         import tangential.runtime
 
         expected = {
+            "ArrayConfig",
             "TangentialSensorAPI", "TangentialFrame",
             "TangentialFrameProcessor", "FixedTerminalRenderer",
             "FitCalibrationModel", "FullApplicationConfig", "PRSensorAngle",
@@ -103,7 +104,7 @@ class StructureAndConfigTests(unittest.TestCase):
             "SlipDetector", "run_application", "run_dual_application",
         }
         self.assertEqual(set(tangential.__all__), expected)
-        self.assertEqual(len(tangential.__all__), 32)
+        self.assertEqual(len(tangential.__all__), 33)
         for name in (
             "ConsistenceCalibrationConfig",
             "ConsistenceCalibrator",
@@ -223,7 +224,7 @@ class StructureAndConfigTests(unittest.TestCase):
 
         self.assertTrue(
             developer_guide.startswith(
-                "# Tangential Sensor SDK 0.5.0 开发者维护指南"
+                "# Tangential Sensor SDK 0.6.0 开发者维护指南"
             )
         )
         self.assertIn("TangentialSample", developer_guide)
@@ -244,7 +245,8 @@ class StructureAndConfigTests(unittest.TestCase):
             "clip_min",
             "clip_max",
             "force",
-            "PYTHONPATH=src python -m tangential.processing.calconsistence",
+            "TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python",
+            'PYTHONPATH=src "$TANGENTIAL_PYTHON" -m tangential.processing.calconsistence',
             "TANGENTIAL_CONSISTENCE_ENABLED",
             "run_dual_application(config_a, config_b)",
         ):
@@ -254,6 +256,10 @@ class StructureAndConfigTests(unittest.TestCase):
         self.assertNotIn("第一部分：", developer_guide)
         self.assertNotIn("第二部分：", developer_guide)
         self.assertNotIn("严格内容超集", developer_guide)
+        self.assertNotIn(
+            "PYTHONPATH=src python -m tangential.processing.calconsistence",
+            developer_guide,
+        )
 
         for document in (user_guide, developer_guide):
             self.assertNotIn("Rust", document)

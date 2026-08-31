@@ -29,6 +29,7 @@ COMPILED_MODULES = {
     "tangential.processing.calibration": "src/tangential/processing/calibration.py",
     "tangential.processing.calconsistence": "src/tangential/processing/calconsistence.py",
     "tangential.processing.slip": "src/tangential/processing/slip.py",
+    "tangential.processing.spectrum": "src/tangential/processing/spectrum.py",
     "tangential.storage.csv": "src/tangential/storage/csv.py",
 }
 

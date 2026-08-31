@@ -16,7 +16,7 @@ import math
 
 import numpy as np
 
-from ..config import SlipConfig
+from ..config import ArrayConfig, SlipConfig
 
 
 class TangentialMotionState(IntEnum):
@@ -76,12 +76,12 @@ class _MotionSample:
 
 
 class SlipDetector:
-    """逐帧检测 12×7 压力阵列的全局滑移。
+    """逐帧检测可配置压力阵列的全局滑移。
 
     Args:
         config: 滑移参数；为 ``None`` 时使用 ``SlipConfig`` 默认值。
-        rows: 压力阵列行数，默认 12。
-        cols: 压力阵列列数，默认 7。
+        array_config: 整个项目共用的阵列布局；为 ``None`` 时使用默认
+            ``ArrayConfig()``。
 
     ``update`` 的 ``cop_x/cop_y`` 必须使用当前项目的全局 CoP 坐标约定：
     x 为列、y 为行。角度坐标转换由上层复用
@@ -91,12 +91,15 @@ class SlipDetector:
     """
 
     def __init__(self, config: SlipConfig | None = None,
-                 rows: int = 12, cols: int = 7) -> None:
+                 array_config: ArrayConfig | None = None) -> None:
         self.config = (config or SlipConfig()).validate()
-        if rows <= 0 or cols <= 0:
-            raise ValueError("SlipDetector.rows/cols 必须大于 0")
-        self.rows = int(rows)
-        self.cols = int(cols)
+        array_config = ArrayConfig() if array_config is None else array_config
+        if not isinstance(array_config, ArrayConfig):
+            raise TypeError("SlipDetector.array_config 必须是 ArrayConfig")
+        array_config.validate()
+        self.array_config = array_config
+        # 仅作为布局对象的派生快捷属性；不构造第二套默认尺寸。
+        self.rows, self.cols = self.array_config.shape
         self._history: deque[_MotionSample] = deque(
             maxlen=self.config.window_frames
         )

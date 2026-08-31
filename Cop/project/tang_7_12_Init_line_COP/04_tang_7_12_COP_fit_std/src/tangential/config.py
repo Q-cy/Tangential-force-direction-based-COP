@@ -1,6 +1,6 @@
 """Tangential SDK 的集中配置定义。
 
-协议帧头、CRC、固定阵列尺寸和 108 列 CSV 等协议不变量留在各自实现中；
+协议帧头、CRC、动态帧长度和 CSV 列布局等协议不变量留在各自实现中；
 本模块只保存用户能够调整的设备、处理、同步、输出和离线工具参数。
 环境变量只提供默认值，显式构造的 dataclass 字段始终具有更高优先级。
 """
@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
+from numbers import Integral
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -58,11 +60,89 @@ def _coerce_finite(value: Any, label: str, *, allow_none: bool = False) -> float
         return None
     try:
         converted = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{label} 必须是有限数字") from exc
     if not np.isfinite(converted):
         raise ValueError(f"{label} 必须是有限数字")
     return converted
+
+
+def _validate_array_dimensions(rows: Any, cols: Any, *, label: str = "阵列") -> tuple[int, int]:
+    """严格校验压力阵列尺寸并返回 ``(rows, cols)``。
+
+    ``rows`` 和 ``cols`` 同时决定协议中的传感器字节数、二维处理矩阵、CSV
+    通道列和 GUI 网格，因此所有需要尺寸的内部模块都应复用这个校验。布尔值
+    虽然是 Python ``int`` 的子类，但不是合法的阵列尺寸；浮点值也不做隐式
+    截断。协议响应的 payload 长度是 ``2 * rows * cols + 10``，长度字段为
+    16 位小端整数。
+    """
+    if isinstance(rows, bool) or not isinstance(rows, Integral):
+        raise ValueError(f"{label} rows 必须是正整数")
+    if isinstance(cols, bool) or not isinstance(cols, Integral):
+        raise ValueError(f"{label} cols 必须是正整数")
+    rows = int(rows)
+    cols = int(cols)
+    if rows <= 0 or cols <= 0:
+        raise ValueError(f"{label} rows 和 cols 必须是正整数")
+    if 2 * rows * cols + 10 > 0xFFFF:
+        raise ValueError(
+            f"{label}协议长度溢出：2*rows*cols+10 必须不超过 65535"
+        )
+    return rows, cols
+
+
+@dataclass
+class ArrayConfig:
+    """整个项目共用的压力阵列布局配置。
+
+    ``rows`` 和 ``cols`` 同时决定压力协议请求长度、解码通道数、二维算法
+    矩阵、CSV 通道列和实时 GUI 网格。所有运行时组件都应接收同一个
+    ``ArrayConfig`` 实例；组件内部的 ``rows``/``cols`` 只允许作为该对象的
+    派生只读语义使用，不能再创建第二套默认尺寸。
+
+    Attributes:
+        rows: 阵列行数，默认 12；可由 ``TANGENTIAL_ARRAY_ROWS`` 提供默认值。
+        cols: 阵列列数，默认 7；可由 ``TANGENTIAL_ARRAY_COLS`` 提供默认值。
+    """
+
+    DEFAULT_SHAPE: ClassVar[tuple[int, int]] = (12, 7)
+
+    rows: int = field(
+        default_factory=lambda: _env_int("TANGENTIAL_ARRAY_ROWS", 12)
+    )
+    cols: int = field(
+        default_factory=lambda: _env_int("TANGENTIAL_ARRAY_COLS", 7)
+    )
+
+    def __post_init__(self) -> None:
+        """创建后立即执行严格尺寸校验。"""
+        self.validate()
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """返回 ``(rows, cols)`` 二维数组形状。"""
+        return self.rows, self.cols
+
+    @property
+    def channel_count(self) -> int:
+        """返回压力通道总数 ``rows * cols``。"""
+        return self.rows * self.cols
+
+    @property
+    def sensor_bytes(self) -> int:
+        """返回一帧 ADC 数据占用的字节数 ``channel_count * 2``。"""
+        return self.channel_count * 2
+
+    def validate(self) -> "ArrayConfig":
+        """严格校验并规范化阵列尺寸，返回当前对象。
+
+        Raises:
+            ValueError: 行列不是严格正整数，或动态压力协议长度超过 16 位。
+        """
+        self.rows, self.cols = _validate_array_dimensions(
+            self.rows, self.cols, label="ArrayConfig"
+        )
+        return self
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -76,6 +156,52 @@ def _env_bool(name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"环境变量 {name} 必须是 true/false、yes/no、on/off 或 1/0")
+
+
+def _env_frequency_bands(
+    name: str,
+    default: tuple[tuple[float, float], ...],
+) -> tuple[tuple[float, float], ...]:
+    """读取逗号分隔的频段环境默认值。
+
+    环境变量格式为 ``low:high,low:high``，同时接受 ``low-high`` 作为
+    人工输入的简写。这里只负责解析，不负责 Nyquist 和频段重叠校验；
+    这些校验由 :class:`SpectrumConfig` 统一完成。
+    """
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return _parse_frequency_bands(value, name)
+
+
+def _env_frequency_band(
+    name: str,
+    default: tuple[float, float],
+) -> tuple[float, float]:
+    """读取恰好一个 ``low:high`` 目标频段的环境默认值。"""
+    bands = _env_frequency_bands(name, (default,))
+    if len(bands) != 1:
+        raise ValueError(f"环境变量 {name} 必须只包含一个 low:high 频段")
+    return bands[0]
+
+
+def _parse_frequency_bands(value: str, label: str) -> tuple[tuple[float, float], ...]:
+    """解析 ``low:high,low:high`` 形式的频段文本。"""
+    bands: list[tuple[float, float]] = []
+    for item in value.split(","):
+        text = item.strip().strip("()[]")
+        parts = re.split(r"\s*(?::|-)\s*", text, maxsplit=1)
+        if len(parts) != 2:
+            raise ValueError(
+                f"{label} 必须使用 low:high,low:high 格式"
+            )
+        try:
+            bands.append((float(parts[0]), float(parts[1])))
+        except ValueError as exc:
+            raise ValueError(
+                f"{label} 的频段必须是数字: {item!r}"
+            ) from exc
+    return tuple(bands)
 
 
 def default_model_path() -> str | None:
@@ -152,8 +278,6 @@ class ForceConfig:
 class CopConfig:
     """CoP、动态阈值、区域和二次精修参数。"""
 
-    rows: int = 12
-    cols: int = 7
     total_threshold_factor: float = 3.0
     pixel_threshold_factor: float = 5.0
     collect_frames: int = 10
@@ -168,9 +292,9 @@ class CopConfig:
     region_peak_dist: int = 3
 
     def validate(self) -> "CopConfig":
-        """校验阵列尺寸和 CoP 参数。"""
-        if self.rows <= 0 or self.cols <= 0 or self.collect_frames <= 0:
-            raise ValueError("CoP 阵列尺寸和背景帧数必须大于 0")
+        """校验 CoP 阈值、稳定、区域和精修参数。"""
+        if self.collect_frames <= 0:
+            raise ValueError("CoP 背景帧数必须大于 0")
         if self.stability_frames <= 0 or self.region_min_area <= 0:
             raise ValueError("CoP 稳定帧数和区域最小面积必须大于 0")
         if self.refine_cnt < 0 or self.reset_at_frame < 0:
@@ -180,7 +304,6 @@ class CopConfig:
     def as_kwargs(self) -> dict[str, Any]:
         """返回可直接传给 ``PRSensorAngle`` 的参数字典。"""
         return {
-            "rows": self.rows, "cols": self.cols,
             "total_threshold_factor": self.total_threshold_factor,
             "pixel_threshold_factor": self.pixel_threshold_factor,
             "collect_frames": self.collect_frames,
@@ -441,10 +564,155 @@ class GuiConfig:
         return self
 
 
+@dataclass
+class SpectrumConfig:
+    """单路 CoP 速度 STFT 与目标频带功率占比判定参数。"""
+
+    # 是否启用单路频谱分析、窗口和可选 NPZ 保存。
+    enabled: bool = field(default_factory=lambda: _env_bool("TANGENTIAL_SPECTRUM_ENABLED", True))
+    # 双传感器配置意图；双路运行入口仍强制关闭频谱，避免共享状态。
+    enabled_in_dual: bool = field(default_factory=lambda: _env_bool("TANGENTIAL_SPECTRUM_ENABLED_IN_DUAL", False))
+    # CoP 真实时间序列线性重采样频率，单位 Hz；不是单点扫描频率。
+    sample_rate_hz: float = field(default_factory=lambda: _env_float("TANGENTIAL_SPECTRUM_SAMPLE_RATE_HZ", 160.0))
+    # 速度 STFT 窗长，单位秒；默认 0.5 秒对应 80 个速度点。
+    window_duration_s: float = field(default_factory=lambda: _env_float("TANGENTIAL_SPECTRUM_WINDOW_S", 0.5))
+    # 相邻频谱快照的最小时间间隔，单位秒。
+    update_interval_s: float = field(default_factory=lambda: _env_float("TANGENTIAL_SPECTRUM_UPDATE_S", 0.05))
+    # 完整分析频带下限，单位 Hz；该范围内全部频点进入比值分母。
+    analysis_min_frequency_hz: float = field(default_factory=lambda: _env_float("TANGENTIAL_SPECTRUM_ANALYSIS_MIN_HZ", 2.0))
+    # 完整分析频带上限，单位 Hz；不得超过 Nyquist 频率。
+    analysis_max_frequency_hz: float = field(default_factory=lambda: _env_float("TANGENTIAL_SPECTRUM_ANALYSIS_MAX_HZ", 70.0))
+    # 滑移候选频带，单位 Hz；边界包含，必须位于完整分析频带内。
+    slip_band_hz: tuple[float, float] = field(
+        default_factory=lambda: _env_frequency_band(
+            "TANGENTIAL_SPECTRUM_SLIP_BAND_HZ", (24.0, 28.0)
+        )
+    )
+    # 滑移频带功率占完整分析频带功率的判定阈值，范围严格为 (0, 1)。
+    slip_band_power_ratio_threshold: float = field(
+        default_factory=lambda: _env_float(
+            "TANGENTIAL_SPECTRUM_SLIP_BAND_POWER_RATIO_THRESHOLD", 0.16
+        )
+    )
+    # STICK 状态下连续达到或超过阈值后进入 SLIP 的窗口数。
+    enter_windows: int = field(default_factory=lambda: _env_int("TANGENTIAL_SPECTRUM_ENTER_WINDOWS", 3))
+    # SLIP 状态下连续低于同一阈值后返回 STICK 的窗口数。
+    exit_windows: int = field(default_factory=lambda: _env_int("TANGENTIAL_SPECTRUM_EXIT_WINDOWS", 5))
+    # 每次接触开始后旁路收集逐频点静态基线的时长，单位秒；不阻塞ratio状态。
+    baseline_duration_s: float = field(
+        default_factory=lambda: _env_float(
+            "TANGENTIAL_SPECTRUM_BASELINE_DURATION_S", 1.0
+        )
+    )
+    # 相对基线功率计算的正数地板，避免零功率除法和无穷dB；不参与ratio。
+    baseline_power_floor: float = field(
+        default_factory=lambda: _env_float(
+            "TANGENTIAL_SPECTRUM_BASELINE_POWER_FLOOR", 1e-6
+        )
+    )
+    # 允许线性插值的相邻真实 CoP 最大时间间隔，单位秒；超过后重积完整窗。
+    max_gap_s: float = field(default_factory=lambda: _env_float("TANGENTIAL_SPECTRUM_MAX_GAP_S", 0.160))
+    # 参与频谱分析的 CoP 状态值；默认只分析 state=2 的稳定精修帧。
+    required_cop_state: int = field(default_factory=lambda: _env_int("TANGENTIAL_SPECTRUM_COP_STATE", 2))
+    # GUI 瀑布图保留的最近历史时长，单位秒；不限制会话 NPZ 历史。
+    history_duration_s: float = field(default_factory=lambda: _env_float("TANGENTIAL_SPECTRUM_HISTORY_S", 30.0))
+    # 相对基线 dB 瀑布图色阶上限使用的百分位，范围为 (0, 100]。
+    color_percentile: float = field(default_factory=lambda: _env_float("TANGENTIAL_SPECTRUM_COLOR_PERCENTILE", 95.0))
+    # 会话退出时是否保存新 schema 的频谱 NPZ；没有快照时不创建文件。
+    save_npz: bool = field(default_factory=lambda: _env_bool("TANGENTIAL_SPECTRUM_SAVE_NPZ", True))
+    # 频谱 NPZ 相对 CSV stem 的文件名后缀。
+    output_suffix: str = field(default_factory=lambda: _env("TANGENTIAL_SPECTRUM_OUTPUT_SUFFIX", "_spectrum"))
+    # 频谱窗口宽度，单位像素。
+    window_width: int = field(default_factory=lambda: _env_int("TANGENTIAL_SPECTRUM_WINDOW_WIDTH", 1200))
+    # 频谱窗口高度，单位像素。
+    window_height: int = field(default_factory=lambda: _env_int("TANGENTIAL_SPECTRUM_WINDOW_HEIGHT", 800))
+
+    @property
+    def window_samples(self) -> int:
+        """返回速度 STFT 的速度样本数。"""
+        return int(round(self.sample_rate_hz * self.window_duration_s))
+
+    @property
+    def required_samples(self) -> int:
+        """返回形成速度窗所需的 CoP 位置点数。"""
+        return self.window_samples + 1
+
+    def validate(self) -> "SpectrumConfig":
+        """规范化并校验频带、时间、滞回和显示参数。"""
+        for name in ("enabled", "enabled_in_dual", "save_npz"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"SpectrumConfig.{name} 必须是布尔值")
+        for name in (
+            "sample_rate_hz", "window_duration_s", "update_interval_s",
+            "baseline_duration_s", "baseline_power_floor", "max_gap_s",
+            "history_duration_s",
+        ):
+            value = _coerce_finite(getattr(self, name), f"SpectrumConfig.{name}")
+            if value <= 0:
+                raise ValueError(f"SpectrumConfig.{name} 必须大于 0")
+            setattr(self, name, value)
+        for name in ("analysis_min_frequency_hz", "analysis_max_frequency_hz"):
+            setattr(self, name, _coerce_finite(getattr(self, name), f"SpectrumConfig.{name}"))
+        nyquist = self.sample_rate_hz / 2.0
+        if not 0 <= self.analysis_min_frequency_hz < self.analysis_max_frequency_hz:
+            raise ValueError("SpectrumConfig 分析频带必须满足 0 <= min < max")
+        if self.analysis_max_frequency_hz > nyquist:
+            raise ValueError("SpectrumConfig.analysis_max_frequency_hz 不能超过 Nyquist 频率")
+        raw_band = self.slip_band_hz
+        if isinstance(raw_band, str):
+            parsed = _parse_frequency_bands(raw_band, "SpectrumConfig.slip_band_hz")
+            if len(parsed) != 1:
+                raise ValueError("SpectrumConfig.slip_band_hz 必须只有一个 low:high 频段")
+            raw_band = parsed[0]
+        try:
+            low, high = raw_band
+        except (TypeError, ValueError) as exc:
+            raise ValueError("SpectrumConfig.slip_band_hz 必须是 (low, high)") from exc
+        low = _coerce_finite(low, "SpectrumConfig.slip_band_hz.low")
+        high = _coerce_finite(high, "SpectrumConfig.slip_band_hz.high")
+        if not self.analysis_min_frequency_hz <= low < high <= self.analysis_max_frequency_hz:
+            raise ValueError("SpectrumConfig.slip_band_hz 必须位于完整分析频带内并满足 low < high")
+        self.slip_band_hz = (low, high)
+        samples = self.sample_rate_hz * self.window_duration_s
+        if abs(samples - round(samples)) > 1e-9 or round(samples) < 2:
+            raise ValueError("SpectrumConfig.sample_rate_hz * window_duration_s 必须是至少 2 的整数")
+        if self.update_interval_s > self.window_duration_s:
+            raise ValueError("SpectrumConfig.update_interval_s 不能大于窗长")
+        if self.baseline_duration_s < self.update_interval_s:
+            raise ValueError("SpectrumConfig.baseline_duration_s 不能小于更新间隔")
+        if self.history_duration_s < self.update_interval_s:
+            raise ValueError("SpectrumConfig.history_duration_s 不能小于更新间隔")
+        frequency_hz = np.fft.rfftfreq(self.window_samples, d=1.0 / self.sample_rate_hz)
+        if not np.any((frequency_hz >= low - 1e-12) & (frequency_hz <= high + 1e-12)):
+            raise ValueError("SpectrumConfig.slip_band_hz 没有对应的 FFT 频点")
+        threshold = _coerce_finite(
+            self.slip_band_power_ratio_threshold,
+            "SpectrumConfig.slip_band_power_ratio_threshold",
+        )
+        if not 0 < threshold < 1:
+            raise ValueError("SpectrumConfig.slip_band_power_ratio_threshold 必须在 (0,1) 内")
+        self.slip_band_power_ratio_threshold = threshold
+        required_state = _coerce_finite(self.required_cop_state, "SpectrumConfig.required_cop_state")
+        if not required_state.is_integer() or required_state < 0:
+            raise ValueError("SpectrumConfig.required_cop_state 必须是非负整数")
+        self.required_cop_state = int(required_state)
+        self.color_percentile = _coerce_finite(self.color_percentile, "SpectrumConfig.color_percentile")
+        if not 0 < self.color_percentile <= 100:
+            raise ValueError("SpectrumConfig.color_percentile 必须在 (0,100] 内")
+        if not isinstance(self.output_suffix, str) or not self.output_suffix.strip():
+            raise ValueError("SpectrumConfig.output_suffix 不能为空")
+        for name in ("enter_windows", "exit_windows", "window_width", "window_height"):
+            value = _coerce_finite(getattr(self, name), f"SpectrumConfig.{name}")
+            if not value.is_integer() or value <= 0:
+                raise ValueError(f"SpectrumConfig.{name} 必须是大于 0 的整数")
+            setattr(self, name, int(value))
+        return self
+
 @dataclass(init=False)
 class FullApplicationConfig:
     """完整应用的分层配置聚合对象。"""
 
+    array: ArrayConfig = field(default_factory=ArrayConfig)
     pressure: PressureConfig = field(default_factory=PressureConfig)
     force: ForceConfig = field(default_factory=ForceConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
@@ -452,9 +720,11 @@ class FullApplicationConfig:
     sync: SyncConfig = field(default_factory=SyncConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     gui: GuiConfig = field(default_factory=GuiConfig)
+    spectrum: SpectrumConfig = field(default_factory=SpectrumConfig)
 
     def __init__(
         self,
+        array: ArrayConfig | None = None,
         pressure: PressureConfig | None = None,
         force: ForceConfig | None = None,
         processing: ProcessingConfig | None = None,
@@ -462,6 +732,7 @@ class FullApplicationConfig:
         sync: SyncConfig | None = None,
         output: OutputConfig | None = None,
         gui: GuiConfig | None = None,
+        spectrum: SpectrumConfig | None = None,
         **legacy_overrides: Any,
     ) -> None:
         """创建分层配置，并接受一次性的旧扁平字段覆盖。
@@ -469,13 +740,15 @@ class FullApplicationConfig:
         扁平参数只是构造适配，不再保存第二套默认值；新代码应优先传入
         ``PressureConfig``、``SyncConfig`` 等分类对象。
         """
-        self.pressure = pressure or PressureConfig()
-        self.force = force or ForceConfig()
-        self.processing = processing or ProcessingConfig()
-        self.calibration = calibration or CalibrationConfig()
-        self.sync = sync or SyncConfig()
-        self.output = output or OutputConfig()
-        self.gui = gui or GuiConfig()
+        self.array = ArrayConfig() if array is None else array
+        self.pressure = PressureConfig() if pressure is None else pressure
+        self.force = ForceConfig() if force is None else force
+        self.processing = ProcessingConfig() if processing is None else processing
+        self.calibration = CalibrationConfig() if calibration is None else calibration
+        self.sync = SyncConfig() if sync is None else sync
+        self.output = OutputConfig() if output is None else output
+        self.gui = GuiConfig() if gui is None else gui
+        self.spectrum = SpectrumConfig() if spectrum is None else spectrum
         mapping = {
             "pressure_port": (self.pressure, "port"),
             "force_port": (self.force, "port"),
@@ -505,11 +778,20 @@ class FullApplicationConfig:
 
     def __post_init__(self) -> None:
         """在应用启动前验证所有嵌套配置。"""
+        self.validate()
+
+    def validate(self) -> "FullApplicationConfig":
+        """递归校验所有嵌套配置并返回当前对象。"""
+        if not isinstance(self.array, ArrayConfig):
+            raise TypeError("FullApplicationConfig.array 必须是 ArrayConfig")
+        self.array.validate()
         self.pressure.validate()
         self.force.validate()
         self.processing.validate()
         self.sync.validate()
         self.gui.validate()
+        self.spectrum.validate()
+        return self
 
     @property
     def pressure_port(self) -> str:
@@ -630,9 +912,10 @@ class PlotConfig:
 
 
 __all__ = [
-    "PressureConfig", "ForceConfig", "CopConfig", "SlipConfig",
+    "ArrayConfig", "PressureConfig", "ForceConfig", "CopConfig", "SlipConfig",
     "ConsistenceCalibrationConfig", "ProcessingConfig",
     "CalibrationConfig", "SyncConfig", "OutputConfig", "GuiConfig",
+    "SpectrumConfig",
     "TrainingConfig", "PlotConfig", "FullApplicationConfig",
     "default_model_path", "default_save_dir",
 ]

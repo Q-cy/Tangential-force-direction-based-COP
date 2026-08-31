@@ -1,4 +1,4 @@
-# Tangential Sensor SDK 0.5.0
+# Tangential Sensor SDK 0.6.0
 
 Tangential Sensor SDK 用于采集 12×7 PZT 压力阵列和可选六维力传感器。安装 wheel 后，普通用户可以直接运行现成示例，也可以通过高层 Python API 获取 `TangentialFrame` 并接入自己的程序。
 
@@ -9,13 +9,13 @@ Tangential Sensor SDK 用于采集 12×7 PZT 压力阵列和可选六维力传�
 推荐安装完整功能，包括实时 GUI 和离线绘图：
 
 ```bash
-python -m pip install "./dist/tangential_sensor-0.5.0-cp311-cp311-linux_x86_64.whl[full]"
+python -m pip install "./dist/tangential_sensor-0.6.0-cp311-cp311-linux_x86_64.whl[full]"
 ```
 
 只使用压力采集和单帧结果时，可以不安装 GUI 可选依赖：
 
 ```bash
-python -m pip install ./dist/tangential_sensor-0.5.0-cp311-cp311-linux_x86_64.whl
+python -m pip install ./dist/tangential_sensor-0.6.0-cp311-cp311-linux_x86_64.whl
 ```
 
 安装后检查：
@@ -49,7 +49,7 @@ python -c "import tangential; print(tangential.__version__)"
 <td style="white-space:normal"><code>tangential app</code></td>
 <td style="white-space:normal">运行单路完整采集应用</td>
 <td style="white-space:normal">压力/六维力端口、保存目录和同步窗口</td>
-<td style="white-space:normal">实时 GUI、108 列 CSV 和退出分析图</td>
+<td style="white-space:normal">实时 GUI、108 列 CSV、CoP 频谱窗口和退出分析图</td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>tangential dual</code></td>
@@ -93,6 +93,8 @@ tangential app \
 ```
 
 压力设备连接失败时程序退出且不创建空 CSV。六维力设备连接或校零失败时关闭六维力通道并继续压力采集，力相关 CSV 字段写入 `NaN`。关闭窗口或按 `Ctrl+C` 后，线程、进程、串口和 CSV 都会释放。
+
+单路完整应用还会打开独立的 `CoP Spectrum` 窗口。窗口上方显示 CoP X、CoP Y 和合成幅值的实时频谱，下方显示最近约 30 秒的频谱瀑布图；频谱需要先积累约 2 秒稳定接触数据。采集结束后，CSV 同目录会生成与 CSV 同名的 `_spectrum.npz` 文件，保存频率轴、频谱时间、三个幅值矩阵以及采样配置。关闭频谱窗口只关闭显示，不会停止采集；关闭主窗口会同时关闭频谱窗口。
 
 ### 双传感器完整采集
 
@@ -154,7 +156,7 @@ tangential dual \
 
 #### 第5步：确认和停止
 
-启动后应看到标题包含 `Sensor A` 和 `Sensor B` 的两个完整 GUI。每一路都会保存 108 列 CSV，并在退出时生成自己的分析图。按 `Ctrl+C` 或关闭窗口停止；如果某一路异常，程序会报告对应的 A/B 并关闭两路资源。
+启动后应看到标题包含 `Sensor A` 和 `Sensor B` 的两个完整 GUI。每一路都会保存 108 列 CSV，并在退出时生成自己的分析图。双传感器模式不创建 CoP 频谱窗口，也不生成频谱 NPZ。按 `Ctrl+C` 或关闭窗口停止；如果某一路异常，程序会报告对应的 A/B 并关闭两路资源。
 
 ### 离线绘图
 
@@ -216,6 +218,11 @@ tangential fit \
 <td style="white-space:normal">某一路持续无数据</td>
 <td style="white-space:normal">端口、供电、设备响应或 USB 资源异常</td>
 <td style="white-space:normal">先单独运行 <code>tangential example</code> 验证该端口</td>
+</tr>
+<tr>
+<td style="white-space:normal">频谱窗口始终等待且没有曲线</td>
+<td style="white-space:normal">稳定接触状态未连续积满约2秒，或相邻有效帧间隔超过75 ms而重新计数</td>
+<td style="white-space:normal">保持稳定接触并检查USB连接和响应超时；默认75 ms可覆盖一次50 ms超时恢复，超过75 ms仍会重置当前频谱窗口</td>
 </tr>
 </tbody>
 </table>
