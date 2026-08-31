@@ -23,6 +23,7 @@ from tangential.sensors.pressure import (
     PRESSURE_RESPONSE_TIMEOUT_S,
     PRESSURE_TARGET_HZ,
     PRESSURE_FRAME_QUEUE_SIZE,
+    _CircularByteBuffer,
     PressureSensor,
 )
 
@@ -53,7 +54,8 @@ def make_force_frame(values=(1, 2, 3, 4, 5, 6)):
 
 def pressure_parser():
     sensor = PressureSensor.__new__(PressureSensor)
-    sensor._rx_buf = bytearray()
+    sensor._max_rx_buf = PressureSensor.MAX_RX_BUF
+    sensor._rx_buf = _CircularByteBuffer(sensor._max_rx_buf)
     sensor._rx_lock = threading.Lock()
     sensor._stats_lock = threading.Lock()
     sensor._stats = {
@@ -61,6 +63,10 @@ def pressure_parser():
         "length_errors": 0,
         "status_errors": 0,
         "framing_bytes": 0,
+        "rx_buffer_overruns": 0,
+        "late_responses": 0,
+        "timeout_resyncs": 0,
+        "unexpected_responses": 0,
     }
     sensor.expected_sensor_bytes = PressureSensor.EXPECTED_SENSOR_BYTES
     sensor.channel_count = sensor.expected_sensor_bytes // 2
@@ -267,26 +273,47 @@ class FakeMultiprocessingContext:
         return self.process
 
 
-class ProtocolTests(unittest.TestCase):
-    def test_pressure_fragment_and_sticky_frames(self):
+class CircularBufferTests(unittest.TestCase):
+    def test_circular_buffer_preserves_fragmented_frame(self):
+        sensor = pressure_parser()
+        frame = make_pressure_frame(range(84))
+        for chunk in (frame[:1], frame[1:37], frame[37:-1]):
+            sensor._append_rx(chunk)
+            self.assertIsNone(sensor.read_data())
+        sensor._append_rx(frame[-1:])
+        self.assertEqual(sensor.decode(sensor.read_data()), list(range(84)))
+
+    def test_circular_buffer_parses_sticky_frames_in_order(self):
         sensor = pressure_parser()
         frame1 = make_pressure_frame(range(84))
         frame2 = make_pressure_frame(range(84, 168))
 
-        sensor._rx_buf.extend(frame1[:100])
+        sensor._append_rx(frame1[:100])
         self.assertIsNone(sensor.read_data())
-        sensor._rx_buf.extend(frame1[100:] + frame2)
+        sensor._append_rx(frame1[100:] + frame2)
 
         self.assertEqual(sensor.decode(sensor.read_data()), list(range(84)))
         self.assertEqual(sensor.decode(sensor.read_data()), list(range(84, 168)))
         self.assertEqual(len(sensor._rx_buf), 0)
 
+    def test_buffer_overrun_is_counted_and_resynchronizes(self):
+        sensor = pressure_parser()
+        frame = make_pressure_frame(range(84))
+        sensor._rx_buf = _CircularByteBuffer(len(frame))
+        sensor._append_rx(b"overflow")
+        sensor._append_rx(frame)
+
+        self.assertEqual(sensor.decode(sensor.read_data()), list(range(84)))
+        self.assertGreaterEqual(sensor._stats["rx_buffer_overruns"], len(b"overflow"))
+
+
+class ProtocolTests(unittest.TestCase):
     def test_pressure_noise_and_bad_crc_recover_to_next_frame(self):
         sensor = pressure_parser()
         bad = bytearray(make_pressure_frame(range(84)))
         bad[-1] ^= 0xFF
         good = make_pressure_frame(range(84))
-        sensor._rx_buf.extend(b"noise" + bad + good)
+        sensor._append_rx(b"noise" + bad + good)
 
         self.assertEqual(sensor.decode(sensor.read_data()), list(range(84)))
         self.assertEqual(len(sensor._rx_buf), 0)
@@ -301,11 +328,21 @@ class ProtocolTests(unittest.TestCase):
         bad_status[13] = 1
         bad_status[-1] = PressureSensor.crc8_itu(bad_status[:-1])
         good = make_pressure_frame(range(84))
-        sensor._rx_buf.extend(bad_length + bad_status + good)
+        sensor._append_rx(bad_length + bad_status + good)
 
         self.assertEqual(sensor.decode(sensor.read_data()), list(range(84)))
         self.assertEqual(sensor._stats["length_errors"], 1)
         self.assertEqual(sensor._stats["status_errors"], 1)
+
+    def test_extra_complete_response_is_discarded_and_counted(self):
+        sensor = pressure_parser()
+        sensor._append_rx(make_pressure_frame(range(84)))
+        sensor._append_rx(make_pressure_frame(range(84, 168)))
+
+        self.assertEqual(sensor.decode(sensor.read_data()), list(range(84)))
+        sensor._discard_complete_buffered_responses()
+        self.assertEqual(sensor._stats["unexpected_responses"], 1)
+        self.assertEqual(len(sensor._rx_buf), 0)
 
     def test_force_fragment_bad_tail_and_sticky_frame(self):
         sensor = force_parser()
@@ -315,9 +352,9 @@ class ProtocolTests(unittest.TestCase):
             + b"\x0d\x0a"
         )
         bad = good[:-2] + b"\x00\x00"
-        sensor._rx_buf.extend(bad[:12])
+        sensor._append_rx(bad[:12])
         self.assertIsNone(sensor._try_pop_frame())
-        sensor._rx_buf.extend(bad[12:] + good)
+        sensor._append_rx(bad[12:] + good)
 
         parsed = sensor._parse_frame(sensor._try_pop_frame())
         self.assertEqual(parsed, [9.8, 19.6, 29.4, 39.2, 49.0, 58.8])
@@ -526,7 +563,7 @@ class PressureTimingTests(unittest.TestCase):
         self.assertEqual(PRESSURE_RESPONSE_TIMEOUT_S, 0.050)
         self.assertEqual(PRESSURE_FRAME_QUEUE_SIZE, 256)
 
-    def test_200hz_single_inflight_flush_and_receive_timestamp(self):
+    def test_normal_polling_does_not_flush_each_cycle(self):
         serial_port = TimedPressureSerial(response_delay_s=0.003)
         sensor = self.make_sensor(
             serial_port,
@@ -551,8 +588,8 @@ class PressureTimingTests(unittest.TestCase):
         self.assertEqual(serial_port.overlapping_writes, 0)
         self.assertGreaterEqual(statistics.median(intervals), 0.0045)
         self.assertLess(statistics.median(intervals), 0.008)
-        self.assertGreaterEqual(serial_port.input_resets, len(frames))
-        self.assertGreaterEqual(serial_port.output_resets, len(frames))
+        self.assertEqual(serial_port.input_resets, 1)
+        self.assertEqual(serial_port.output_resets, 1)
 
     def test_slow_response_skips_period_without_burst(self):
         for response_delay, minimum_interval in ((0.008, 0.007), (0.015, 0.014)):
@@ -601,6 +638,48 @@ class PressureTimingTests(unittest.TestCase):
             b - a for a, b in zip(serial_port.write_times, serial_port.write_times[1:])
         ]
         self.assertTrue(all(interval >= 0.018 for interval in intervals))
+
+    def test_late_response_is_discarded_before_next_request(self):
+        class LateThenGoodSerial(TimedPressureSerial):
+            def __init__(self):
+                super().__init__(response_delay_s=0.001)
+                self.request_index = 0
+
+            def write(self, data):
+                with self._lock:
+                    if self._outstanding:
+                        self.overlapping_writes += 1
+                    now = time.perf_counter()
+                    self.write_times.append(now)
+                    self._outstanding = True
+                    if self.request_index == 0:
+                        self._pending = make_pressure_frame(range(84))
+                        # 超过首轮超时，但落在隔离窗口内。
+                        self._ready_at = now + 0.006
+                    else:
+                        self._pending = make_pressure_frame(range(84, 168))
+                        self._ready_at = now + 0.001
+                    self.request_index += 1
+                    return len(data)
+
+        serial_port = LateThenGoodSerial()
+        sensor = self.make_sensor(
+            serial_port,
+            period_s=0.001,
+            response_timeout_s=0.004,
+        )
+        try:
+            frame = sensor.read_frame(timeout_s=0.1)
+            stats = sensor.get_timing_stats()
+        finally:
+            sensor.close()
+
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame["request_seq"], 1)
+        self.assertGreaterEqual(stats["response_timeouts"], 1)
+        self.assertGreaterEqual(stats["late_responses"], 1)
+        self.assertEqual(serial_port.overlapping_writes, 0)
+        self.assertEqual(serial_port.input_resets, 1)
 
     def test_50ms_response_deadline_recovers_on_next_cycle(self):
         class RecoverAfterTimeoutSerial(TimedPressureSerial):
@@ -730,7 +809,7 @@ class PressureTimingTests(unittest.TestCase):
         self.assertIsNotNone(frame)
         self.assertGreaterEqual(stats["serial_flush_errors"], 1)
 
-    def test_partial_frame_is_discarded_between_poll_cycles(self):
+    def test_timeout_quarantine_discards_partial_frame(self):
         class PartialThenGoodSerial(TimedPressureSerial):
             def __init__(self):
                 super().__init__(response_delay_s=0.001)
@@ -764,7 +843,8 @@ class PressureTimingTests(unittest.TestCase):
         self.assertIsNotNone(frame)
         self.assertEqual(frame["request_seq"], 1)
         self.assertGreaterEqual(stats["response_timeouts"], 1)
-        self.assertGreaterEqual(serial_port.input_resets, 2)
+        # 一次启动清理 + 一次超时隔离恢复；正常周期不会清理。
+        self.assertEqual(serial_port.input_resets, 2)
 
 
 class ForceTimingTests(unittest.TestCase):

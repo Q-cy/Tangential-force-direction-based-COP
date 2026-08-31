@@ -1,15 +1,17 @@
-"""84 通道压阻阵列离线一致性标定与运行时系数加载。
+"""84通道压阻阵列多量程分段一致性标定与运行时系数加载。
 
-离线阶段从调用方指定的 CSV 读取 ``CoP_state`` 和 ``ch1`` 到 ``ch84``，
-根据卸载/加载两组样本生成每通道两点仿射系数。运行时只加载安全的
-``.npz`` 系数文件并应用到一帧原始 ADC，不访问离线 CSV。
+离线阶段把配置目录中的每个CSV视为一个量程端点：读取最后若干个非空
+数据行并按通道求均值，再把各通道端点单调化后建立分段线性映射。运行时
+只加载安全的v2 NPZ并应用到一帧原始ADC，不访问离线CSV。
 """
 
 from __future__ import annotations
 
 import csv
 import hashlib
+import re
 import zipfile
+from collections import deque
 from importlib import resources
 from pathlib import Path
 from typing import Any, Mapping
@@ -20,12 +22,14 @@ from ..config import ConsistenceCalibrationConfig
 
 
 CHANNEL_COUNT = 84
+FORMAT_VERSION = 2
 DEFAULT_RESOURCE_NAME = "consistence_coeffs.npz"
-_CHANNEL_NAMES = tuple(f"ch{index}" for index in range(1, CHANNEL_COUNT + 1))
+_CHANNEL_NAMES = tuple(f"channel{index}" for index in range(1, CHANNEL_COUNT + 1))
+_SEGMENT_VALUE_PATTERN = re.compile(r"-(\d+(?:\.\d+)?)G$", re.IGNORECASE)
 
 
 def _as_finite_float(value: Any, *, label: str) -> float:
-    """把 CSV 单元格转换为有限浮点数。"""
+    """把CSV单元格转换为有限浮点数。"""
     try:
         converted = float(str(value).strip())
     except (TypeError, ValueError) as exc:
@@ -35,199 +39,311 @@ def _as_finite_float(value: Any, *, label: str) -> float:
     return converted
 
 
-def _read_calibration_csv(
-    csv_path: str | Path,
-    *,
-    state_column: str,
-    baseline_state: int,
-    loaded_state: int,
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """严格读取两种状态下的 84 通道数据和源文件摘要。"""
-    path = Path(csv_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"一致性标定 CSV 不存在: {path}")
+def _segment_value_from_path(path: Path) -> float:
+    """从 ``*-<数值>G.csv`` 文件名提取用于排序的量程值。"""
+    match = _SEGMENT_VALUE_PATTERN.search(path.stem)
+    if match is None:
+        raise ValueError(
+            f"一致性标定CSV文件名必须以-<数值>G结尾: {path.name}"
+        )
+    value = float(match.group(1))
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError(f"一致性标定量程值必须大于0: {path.name}")
+    return value
 
-    source_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
-    baseline_rows: list[list[float]] = []
-    loaded_rows: list[list[float]] = []
+
+def _read_segment_endpoint(
+    path: Path,
+    *,
+    tail_rows: int,
+) -> tuple[np.ndarray, int, int, str]:
+    """读取一个CSV最后 ``tail_rows`` 个非空行并返回84通道均值。"""
+    source_bytes = path.read_bytes()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
     with path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.reader(stream)
         try:
             raw_header = next(reader)
         except StopIteration as exc:
-            raise ValueError(f"一致性标定 CSV 为空: {path}") from exc
+            raise ValueError(f"一致性标定CSV为空: {path}") from exc
         headers = [str(item).strip() for item in raw_header]
         if any(not item for item in headers):
-            raise ValueError("一致性标定 CSV 表头不能包含空列名")
+            raise ValueError(f"一致性标定CSV表头不能包含空列名: {path.name}")
         if len(set(headers)) != len(headers):
-            raise ValueError("一致性标定 CSV 表头包含重复列名")
-        required = (state_column.strip(), *_CHANNEL_NAMES)
-        missing = [name for name in required if name not in headers]
+            raise ValueError(f"一致性标定CSV表头包含重复列名: {path.name}")
+        missing = [name for name in _CHANNEL_NAMES if name not in headers]
         if missing:
-            raise ValueError("一致性标定 CSV 缺少列: " + ", ".join(missing))
-        state_index = headers.index(state_column.strip())
+            raise ValueError(
+                f"一致性标定CSV {path.name} 缺少列: " + ", ".join(missing)
+            )
         channel_indices = [headers.index(name) for name in _CHANNEL_NAMES]
-
-        row_count = 0
+        tail: deque[tuple[int, list[str]]] = deque(maxlen=tail_rows)
+        nonempty_count = 0
         for line_number, row in enumerate(reader, start=2):
             if not row or not any(str(cell).strip() for cell in row):
                 continue
-            row_count += 1
-            if len(row) != len(headers):
-                raise ValueError(
-                    f"一致性标定 CSV 第 {line_number} 行列数错误："
-                    f"期望 {len(headers)}，实际 {len(row)}"
-                )
-            state_value = _as_finite_float(
-                row[state_index], label=f"第 {line_number} 行 {state_column}"
+            nonempty_count += 1
+            tail.append((line_number, row))
+
+    if nonempty_count < tail_rows:
+        raise ValueError(
+            f"一致性标定CSV {path.name} 至少需要{tail_rows}个非空数据行，"
+            f"实际为{nonempty_count}"
+        )
+    values: list[list[float]] = []
+    for line_number, row in tail:
+        if len(row) != len(headers):
+            raise ValueError(
+                f"一致性标定CSV {path.name} 第{line_number}行列数错误："
+                f"期望{len(headers)}，实际{len(row)}"
             )
-            if not state_value.is_integer():
-                raise ValueError(
-                    f"第 {line_number} 行 {state_column} 必须是整数状态"
-                )
-            state = int(state_value)
-            if state not in (baseline_state, loaded_state):
-                continue
-            values = [
+        values.append(
+            [
                 _as_finite_float(
-                    row[index], label=f"第 {line_number} 行 {_CHANNEL_NAMES[offset]}"
+                    row[index],
+                    label=f"{path.name}第{line_number}行{_CHANNEL_NAMES[offset]}",
                 )
                 for offset, index in enumerate(channel_indices)
             ]
-            if state == baseline_state:
-                baseline_rows.append(values)
-            elif state == loaded_state:
-                loaded_rows.append(values)
+        )
+    endpoint = np.mean(np.asarray(values, dtype=np.float64), axis=0)
+    invalid = np.flatnonzero(endpoint <= 0.0)
+    if invalid.size:
+        channels = ", ".join(f"channel{int(index) + 1}" for index in invalid)
+        raise ValueError(
+            f"一致性标定CSV {path.name} 的末尾均值必须大于0，问题通道: {channels}"
+        )
+    return endpoint, nonempty_count, tail[-1][0], source_sha256
 
-    if row_count == 0:
-        raise ValueError("一致性标定 CSV 没有有效数据行")
-    if not baseline_rows:
-        raise ValueError(f"一致性标定 CSV 没有 state={baseline_state} 的样本")
-    if not loaded_rows:
-        raise ValueError(f"一致性标定 CSV 没有 state={loaded_state} 的样本")
+
+def _read_calibration_directory(
+    csv_directory: str | Path,
+    *,
+    csv_pattern: str,
+    tail_rows: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """读取全部量程CSV并返回按量程升序排列的原始端点。"""
+    directory = Path(csv_directory)
+    if not directory.exists():
+        raise FileNotFoundError(f"一致性标定CSV目录不存在: {directory}")
+    if not directory.is_dir():
+        raise ValueError(f"一致性标定CSV路径不是目录: {directory}")
+    paths = [path for path in directory.glob(csv_pattern) if path.is_file()]
+    if not paths:
+        raise ValueError(
+            f"一致性标定目录没有匹配 {csv_pattern!r} 的CSV: {directory}"
+        )
+    valued_paths = [(_segment_value_from_path(path), path) for path in paths]
+    valued_paths.sort(key=lambda item: (item[0], item[1].name))
+    segment_values = np.asarray([item[0] for item in valued_paths], dtype=np.float64)
+    if np.any(np.diff(segment_values) <= 0.0):
+        raise ValueError("一致性标定CSV文件名中的量程值必须唯一且严格递增")
+
+    endpoints: list[np.ndarray] = []
+    row_counts: list[int] = []
+    last_line_numbers: list[int] = []
+    source_hashes: list[str] = []
+    combined_hash = hashlib.sha256()
+    for _segment_value, path in valued_paths:
+        endpoint, row_count, last_line, source_hash = _read_segment_endpoint(
+            path,
+            tail_rows=tail_rows,
+        )
+        endpoints.append(endpoint)
+        row_counts.append(row_count)
+        last_line_numbers.append(last_line)
+        source_hashes.append(source_hash)
+        combined_hash.update(path.name.encode("utf-8"))
+        combined_hash.update(b"\0")
+        combined_hash.update(path.read_bytes())
+        combined_hash.update(b"\0")
 
     metadata = {
-        "source_sha256": source_sha256,
-        "baseline_count": len(baseline_rows),
-        "loaded_count": len(loaded_rows),
-        "row_count": row_count,
+        "calibration_method": "piecewise_tail_mean_isotonic_v2",
+        "source_directory": str(directory.resolve()),
+        "source_pattern": csv_pattern,
+        "source_file_count": len(valued_paths),
+        "source_file_names": np.asarray(
+            [path.name for _value, path in valued_paths], dtype=np.str_
+        ),
+        "source_file_sha256": np.asarray(source_hashes, dtype=np.str_),
+        "source_combined_sha256": combined_hash.hexdigest(),
+        "source_row_counts": np.asarray(row_counts, dtype=np.int64),
+        "source_last_line_numbers": np.asarray(last_line_numbers, dtype=np.int64),
+        "tail_rows": int(tail_rows),
     }
-    return (
-        np.asarray(baseline_rows, dtype=np.float64),
-        np.asarray(loaded_rows, dtype=np.float64),
-        metadata,
+    return np.stack(endpoints), segment_values, metadata
+
+
+def _fit_channel_breakpoints(
+    raw_endpoints: np.ndarray,
+    reference_endpoints: np.ndarray,
+    *,
+    minimum_step: float,
+    max_segment_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """按原始ADC升序拟合每通道单调且有增益上限的分段断点。"""
+    from scipy.optimize import isotonic_regression
+
+    segment_count = raw_endpoints.shape[0]
+    input_breakpoints = np.zeros(
+        (segment_count + 1, CHANNEL_COUNT), dtype=np.float64
     )
+    target_breakpoints = np.zeros_like(input_breakpoints)
+    for channel in range(CHANNEL_COUNT):
+        order = np.argsort(raw_endpoints[:, channel], kind="stable")
+        sorted_inputs = raw_endpoints[order, channel]
+        fitted_targets = np.asarray(
+            isotonic_regression(
+                reference_endpoints[order], increasing=True
+            ).x,
+            dtype=np.float64,
+        )
+        previous_input = 0.0
+        previous_target = 0.0
+        for segment, (raw_input, fitted_target) in enumerate(
+            zip(sorted_inputs, fitted_targets), start=1
+        ):
+            current_input = max(
+                float(raw_input), previous_input + minimum_step
+            )
+            maximum_target = previous_target + max_segment_scale * (
+                current_input - previous_input
+            )
+            current_target = min(float(fitted_target), maximum_target)
+            current_target = max(current_target, previous_target)
+            input_breakpoints[segment, channel] = current_input
+            target_breakpoints[segment, channel] = current_target
+            previous_input = current_input
+            previous_target = current_target
+    return input_breakpoints, target_breakpoints
 
 
 class ConsistenceCalibrator:
-    """保存并应用 84 通道一致性标定系数。
-
-    Args:
-        scale: 每通道乘法系数，形状必须为 ``(84,)``。
-        offset: 每通道偏移系数，形状必须为 ``(84,)``。
-        clip_min: 应用结果的可选下限，默认 0。
-        clip_max: 应用结果的可选上限，默认不裁剪。
-        metadata: 离线拟合元数据；只用于诊断和保存，不参与计算。
-
-    Raises:
-        ValueError: 系数维度错误、包含非有限值或裁剪范围非法。
-    """
+    """保存并应用84通道多量程分段一致性标定系数。"""
 
     def __init__(
         self,
-        scale: Any,
-        offset: Any,
+        input_breakpoints: Any,
+        target_breakpoints: Any,
+        segment_scale: Any,
+        segment_offset: Any,
         *,
+        segment_values: Any | None = None,
         clip_min: float | None = 0.0,
         clip_max: float | None = None,
         metadata: Mapping[str, Any] | None = None,
         output_path: str | Path | None = None,
     ) -> None:
-        self.scale = self._validate_coefficients(scale, "scale")
-        self.offset = self._validate_coefficients(offset, "offset")
+        """校验并保存分段断点、系数、裁剪范围和审计元数据。"""
+        inputs = np.asarray(input_breakpoints, dtype=np.float64)
+        targets = np.asarray(target_breakpoints, dtype=np.float64)
+        scales = np.asarray(segment_scale, dtype=np.float64)
+        offsets = np.asarray(segment_offset, dtype=np.float64)
+        if inputs.ndim != 2 or inputs.shape[1] != CHANNEL_COUNT or inputs.shape[0] < 2:
+            raise ValueError(
+                "input_breakpoints 必须是形状(segment_count+1, 84)的二维数组"
+            )
+        segment_count = inputs.shape[0] - 1
+        if targets.shape != inputs.shape:
+            raise ValueError("target_breakpoints 必须与input_breakpoints形状相同")
+        expected_coefficients = (segment_count, CHANNEL_COUNT)
+        if scales.shape != expected_coefficients or offsets.shape != expected_coefficients:
+            raise ValueError(
+                f"segment_scale/segment_offset 必须是形状{expected_coefficients}"
+            )
+        if not all(np.all(np.isfinite(array)) for array in (inputs, targets, scales, offsets)):
+            raise ValueError("一致性标定断点和系数不能包含NaN或无穷值")
+        if np.any(np.diff(inputs, axis=0) <= 0.0):
+            raise ValueError("每个通道的input_breakpoints必须严格递增")
+        if np.any(np.diff(targets, axis=0) < 0.0):
+            raise ValueError("每个通道的target_breakpoints必须非递减")
+        if np.any(scales < 0.0):
+            raise ValueError("segment_scale不能为负数")
+        if np.any(scales > 100.0):
+            raise ValueError("segment_scale不能大于100")
+        if not np.allclose(inputs[0], 0.0) or not np.allclose(targets[0], 0.0):
+            raise ValueError("分段断点必须包含每个通道的(0, 0)锚点")
+        if segment_values is None:
+            values = np.arange(1, segment_count + 1, dtype=np.float64)
+        else:
+            values = np.asarray(segment_values, dtype=np.float64)
+        if values.shape != (segment_count,) or not np.all(np.isfinite(values)):
+            raise ValueError("segment_values必须是长度等于分段数的有限一维数组")
+        if np.any(np.diff(values) <= 0.0):
+            raise ValueError("segment_values必须严格递增")
         if clip_min is not None and not np.isfinite(clip_min):
-            raise ValueError("clip_min 必须是有限数字或 None")
+            raise ValueError("clip_min必须是有限数字或None")
         if clip_max is not None and not np.isfinite(clip_max):
-            raise ValueError("clip_max 必须是有限数字或 None")
+            raise ValueError("clip_max必须是有限数字或None")
         if clip_min is not None and clip_max is not None and clip_max < clip_min:
-            raise ValueError("clip_max 不能小于 clip_min")
+            raise ValueError("clip_max不能小于clip_min")
+        self.input_breakpoints = inputs.copy()
+        self.target_breakpoints = targets.copy()
+        self.segment_scale = scales.copy()
+        self.segment_offset = offsets.copy()
+        self.segment_values = values.copy()
         self.clip_min = None if clip_min is None else float(clip_min)
         self.clip_max = None if clip_max is None else float(clip_max)
         self.metadata = dict(metadata or {})
         self.output_path = None if output_path is None else Path(output_path)
 
-    @staticmethod
-    def _validate_coefficients(values: Any, name: str) -> np.ndarray:
-        """校验并复制一组 84 通道系数。"""
-        array = np.asarray(values, dtype=np.float64)
-        if array.shape != (CHANNEL_COUNT,):
-            raise ValueError(f"{name} 必须是形状 ({CHANNEL_COUNT},)，实际为 {array.shape}")
-        if not np.all(np.isfinite(array)):
-            raise ValueError(f"{name} 不能包含 NaN 或无穷值")
-        return array.copy()
-
     @classmethod
-    def fit_from_csv(
+    def fit_from_directory(
         cls,
         config: ConsistenceCalibrationConfig,
     ) -> "ConsistenceCalibrator":
-        """根据配置指定的 CSV 计算两点仿射一致性标定器。
-
-        Args:
-            config: 包含 CSV 路径、状态列、目标范围和裁剪设置的离线配置。
-
-        Returns:
-            ConsistenceCalibrator: 已拟合但尚未写出文件的标定器。
-
-        Raises:
-            FileNotFoundError: 输入 CSV 不存在。
-            ValueError: CSV 列、状态、数值或通道跨度不符合要求。
-        """
+        """从多个量程CSV的末尾均值拟合分段一致性标定器。"""
         config.validate()
-        baseline, loaded, metadata = _read_calibration_csv(
-            config.csv_path,
-            state_column=config.state_column,
-            baseline_state=config.baseline_state,
-            loaded_state=config.loaded_state,
+        raw_endpoints, segment_values, metadata = _read_calibration_directory(
+            config.csv_directory,
+            csv_pattern=config.csv_pattern,
+            tail_rows=config.tail_rows,
         )
-        baseline_median = np.median(baseline, axis=0)
-        loaded_median = np.median(loaded, axis=0)
-        spans = loaded_median - baseline_median
-        if not np.all(np.isfinite(spans)):
-            raise ValueError("一致性标定的通道跨度必须是有限数字")
-        invalid = np.flatnonzero(spans <= 0)
-        if invalid.size:
-            channels = ", ".join(f"ch{int(index) + 1}" for index in invalid)
-            raise ValueError(
-                "加载状态中位数必须严格大于卸载状态中位数，问题通道: " + channels
-            )
-        target_span = config.target_max - config.target_min
-        scale = target_span / spans
-        offset = config.target_min - baseline_median * scale
+        reference_endpoints = np.mean(raw_endpoints, axis=1)
+        if not np.all(np.isfinite(reference_endpoints)) or np.any(reference_endpoints <= 0.0):
+            raise ValueError("各量程的84通道目标均值必须是有限正数")
+        if np.any(np.diff(reference_endpoints) <= 0.0):
+            raise ValueError("按文件名排序后，各量程的84通道目标均值必须严格递增")
+        input_breakpoints, target_breakpoints = _fit_channel_breakpoints(
+            raw_endpoints,
+            reference_endpoints,
+            minimum_step=config.minimum_breakpoint_step,
+            max_segment_scale=config.max_segment_scale,
+        )
+        input_delta = np.diff(input_breakpoints, axis=0)
+        target_delta = np.diff(target_breakpoints, axis=0)
+        segment_scale = target_delta / input_delta
+        segment_offset = (
+            target_breakpoints[:-1]
+            - input_breakpoints[:-1] * segment_scale
+        )
+        fitted_at_source = np.empty_like(raw_endpoints)
+        for segment in range(raw_endpoints.shape[0]):
+            for channel in range(CHANNEL_COUNT):
+                fitted_at_source[segment, channel] = np.interp(
+                    raw_endpoints[segment, channel],
+                    input_breakpoints[:, channel],
+                    target_breakpoints[:, channel],
+                )
+        residual = fitted_at_source - reference_endpoints[:, None]
         metadata.update(
             {
-                "state_column": config.state_column.strip(),
-                "baseline_state": config.baseline_state,
-                "loaded_state": config.loaded_state,
-                "target_min": config.target_min,
-                "target_max": config.target_max,
-                "states": np.asarray(
-                    [config.baseline_state, config.loaded_state], dtype=np.int64
-                ),
-                "targets": np.asarray(
-                    [config.target_min, config.target_max], dtype=np.float64
-                ),
-                "sample_counts": np.asarray(
-                    [metadata["baseline_count"], metadata["loaded_count"]],
-                    dtype=np.int64,
-                ),
-                "baseline_median": baseline_median,
-                "loaded_median": loaded_median,
+                "minimum_breakpoint_step": config.minimum_breakpoint_step,
+                "max_segment_scale": config.max_segment_scale,
+                "raw_segment_endpoints": raw_endpoints,
+                "reference_endpoints": reference_endpoints,
+                "fitted_at_source_endpoints": fitted_at_source,
+                "fit_residual_rms": np.sqrt(np.mean(residual * residual, axis=0)),
+                "fit_residual_max_abs": np.max(np.abs(residual), axis=0),
             }
         )
         return cls(
-            scale,
-            offset,
+            input_breakpoints,
+            target_breakpoints,
+            segment_scale,
+            segment_offset,
+            segment_values=segment_values,
             clip_min=config.clip_min,
             clip_max=config.clip_max,
             metadata=metadata,
@@ -236,8 +352,8 @@ class ConsistenceCalibrator:
 
     @classmethod
     def fit(cls, config: ConsistenceCalibrationConfig) -> "ConsistenceCalibrator":
-        """``fit_from_csv`` 的简洁别名。"""
-        return cls.fit_from_csv(config)
+        """``fit_from_directory``的简洁别名。"""
+        return cls.fit_from_directory(config)
 
     @classmethod
     def from_path(
@@ -247,22 +363,37 @@ class ConsistenceCalibrator:
         clip_min: float | None = 0.0,
         clip_max: float | None = None,
     ) -> "ConsistenceCalibrator":
-        """从安全 NPZ 文件加载运行时一致性系数。
-
-        ``allow_pickle=False`` 严格禁止从系数文件反序列化任意 Python 对象。
-        """
+        """从安全的分段v2 NPZ加载运行时一致性系数。"""
         coefficient_path = Path(path)
         if not coefficient_path.is_file():
             raise FileNotFoundError(f"一致性标定系数不存在: {coefficient_path}")
+        required = {
+            "format_version", "input_breakpoints", "target_breakpoints",
+            "segment_scale", "segment_offset", "segment_values",
+        }
         try:
             with np.load(coefficient_path, allow_pickle=False) as archive:
-                if "scale" not in archive or "offset" not in archive:
-                    raise ValueError("系数文件必须包含 scale 和 offset")
-                scale = np.asarray(archive["scale"], dtype=np.float64)
-                offset = np.asarray(archive["offset"], dtype=np.float64)
+                version = (
+                    int(archive["format_version"].item())
+                    if "format_version" in archive else None
+                )
+                if version != FORMAT_VERSION:
+                    raise ValueError(
+                        "旧单段一致性系数不再兼容，请重新运行多量程一致性标定"
+                    )
+                missing = sorted(required.difference(archive.files))
+                if missing:
+                    raise ValueError("分段系数文件缺少字段: " + ", ".join(missing))
+                core = {
+                    name: np.asarray(archive[name], dtype=np.float64)
+                    for name in (
+                        "input_breakpoints", "target_breakpoints",
+                        "segment_scale", "segment_offset", "segment_values",
+                    )
+                }
                 metadata: dict[str, Any] = {}
                 for key in archive.files:
-                    if key in {"scale", "offset"}:
+                    if key in required:
                         continue
                     value = archive[key]
                     if value.ndim == 0:
@@ -271,12 +402,11 @@ class ConsistenceCalibrator:
         except (OSError, ValueError, TypeError, EOFError, zipfile.BadZipFile) as exc:
             raise ValueError(f"无法加载一致性标定系数 {coefficient_path}: {exc}") from exc
         return cls(
-            scale,
-            offset,
-            clip_min=clip_min,
-            clip_max=clip_max,
-            metadata=metadata,
-            output_path=coefficient_path,
+            core["input_breakpoints"], core["target_breakpoints"],
+            core["segment_scale"], core["segment_offset"],
+            segment_values=core["segment_values"],
+            clip_min=clip_min, clip_max=clip_max,
+            metadata=metadata, output_path=coefficient_path,
         )
 
     @classmethod
@@ -286,35 +416,32 @@ class ConsistenceCalibrator:
         clip_min: float | None = 0.0,
         clip_max: float | None = None,
     ) -> "ConsistenceCalibrator":
-        """加载 wheel 内置的 ``resources/consistence_coeffs.npz``。"""
+        """加载wheel内置的分段v2一致性标定资源。"""
         resource = resources.files("tangential.resources").joinpath(DEFAULT_RESOURCE_NAME)
         if not resource.is_file():
             raise FileNotFoundError(
-                f"wheel 中缺少内置一致性标定资源: tangential.resources/{DEFAULT_RESOURCE_NAME}"
+                f"wheel中缺少内置一致性标定资源: tangential.resources/{DEFAULT_RESOURCE_NAME}"
             )
         with resources.as_file(resource) as resource_path:
             calibrator = cls.from_path(
                 resource_path, clip_min=clip_min, clip_max=clip_max
             )
-        calibrator.output_path = Path(
-            f"tangential.resources/{DEFAULT_RESOURCE_NAME}"
-        )
+        calibrator.output_path = Path(f"tangential.resources/{DEFAULT_RESOURCE_NAME}")
         return calibrator
 
     @classmethod
     def from_config(
         cls, config: ConsistenceCalibrationConfig
     ) -> "ConsistenceCalibrator":
-        """按运行时配置加载外部或内置系数。"""
+        """按运行时配置加载外部或内置分段系数。"""
         config.validate()
         if not config.enabled:
             raise ValueError(
-                "ConsistenceCalibrationConfig.enabled=False 时不应加载标定器"
+                "ConsistenceCalibrationConfig.enabled=False时不应加载标定器"
             )
         if config.coefficients_path is None:
             return cls.from_default(
-                clip_min=config.clip_min,
-                clip_max=config.clip_max,
+                clip_min=config.clip_min, clip_max=config.clip_max
             )
         return cls.from_path(
             config.coefficients_path,
@@ -323,25 +450,30 @@ class ConsistenceCalibrator:
         )
 
     def apply(self, raw_data: Any) -> np.ndarray:
-        """把一帧原始 ADC 转换为一致性标定后的独立数组。
-
-        Args:
-            raw_data: 长度为84的一维原始 ADC 序列。
-
-        Returns:
-            numpy.ndarray: ``float64`` 的84通道校正数据；不会修改输入。
-
-        Raises:
-            ValueError: 输入不是84通道或包含非有限值。
-        """
+        """按每通道输入断点选择量程段并应用对应线性系数。"""
         values = np.asarray(raw_data, dtype=np.float64).reshape(-1)
         if values.shape != (CHANNEL_COUNT,):
             raise ValueError(
-                f"一致性标定输入必须是形状 ({CHANNEL_COUNT},)，实际为 {values.shape}"
+                f"一致性标定输入必须是形状({CHANNEL_COUNT},)，实际为{values.shape}"
             )
         if not np.all(np.isfinite(values)):
-            raise ValueError("一致性标定输入不能包含 NaN 或无穷值")
-        corrected = values * self.scale + self.offset
+            raise ValueError("一致性标定输入不能包含NaN或无穷值")
+        segment_count = self.segment_scale.shape[0]
+        segment_indices = np.empty(CHANNEL_COUNT, dtype=np.int64)
+        for channel in range(CHANNEL_COUNT):
+            index = int(
+                np.searchsorted(
+                    self.input_breakpoints[:, channel],
+                    values[channel],
+                    side="right",
+                ) - 1
+            )
+            segment_indices[channel] = min(max(index, 0), segment_count - 1)
+        channels = np.arange(CHANNEL_COUNT)
+        corrected = (
+            values * self.segment_scale[segment_indices, channels]
+            + self.segment_offset[segment_indices, channels]
+        )
         if self.clip_min is not None or self.clip_max is not None:
             corrected = np.clip(corrected, self.clip_min, self.clip_max)
         return corrected
@@ -354,47 +486,39 @@ class ConsistenceCalibrator:
         *,
         force: bool = False,
     ) -> Path:
-        """以不含 pickle 的 NPZ 格式保存系数和可审计元数据。
-
-        Args:
-            path: 输出路径；省略时使用拟合配置中的 ``output_path``。
-            force: 是否允许覆盖已有文件。底层安全默认值为 ``False``；维护者
-                无参数入口会显式传递统一配置中的 ``force``。
-
-        Returns:
-            pathlib.Path: 实际写出的文件路径。
-
-        Raises:
-            FileExistsError: 目标存在且未指定 ``force``。
-            OSError: 目录创建或文件写入失败。
-        """
+        """以不含pickle的NPZ v2格式保存分段系数和审计元数据。"""
         output = Path(path) if path is not None else self.output_path
         if output is None:
             raise ValueError("必须提供一致性标定系数输出路径")
         if output.exists() and not force:
-            raise FileExistsError(f"一致性标定系数已存在，使用 force 覆盖: {output}")
+            raise FileExistsError(f"一致性标定系数已存在，使用force覆盖: {output}")
         output.parent.mkdir(parents=True, exist_ok=True)
-        metadata = self.metadata
         arrays: dict[str, Any] = {
-            "scale": self.scale,
-            "offset": self.offset,
+            "format_version": np.array(FORMAT_VERSION, dtype=np.int64),
+            "input_breakpoints": self.input_breakpoints,
+            "target_breakpoints": self.target_breakpoints,
+            "segment_scale": self.segment_scale,
+            "segment_offset": self.segment_offset,
+            "segment_values": self.segment_values,
             "clip_min": np.array(
-                np.nan if self.clip_min is None else self.clip_min, dtype=np.float64
+                np.nan if self.clip_min is None else self.clip_min,
+                dtype=np.float64,
             ),
             "clip_max": np.array(
-                np.nan if self.clip_max is None else self.clip_max, dtype=np.float64
+                np.nan if self.clip_max is None else self.clip_max,
+                dtype=np.float64,
             ),
         }
-        for key, value in metadata.items():
-            if isinstance(value, str):
-                arrays[key] = np.array(value)
-            elif value is None:
+        for key, value in self.metadata.items():
+            if key in arrays or value is None:
                 continue
+            if isinstance(value, (str, Path)):
+                arrays[key] = np.array(str(value))
             else:
                 array = np.asarray(value)
                 if array.dtype.hasobject:
                     raise ValueError(
-                        f"一致性标定元数据 {key!r} 不能保存为 object/pickle 数组"
+                        f"一致性标定元数据{key!r}不能保存为object/pickle数组"
                     )
                 arrays[key] = array
         with output.open("wb") as stream:
@@ -404,49 +528,32 @@ class ConsistenceCalibrator:
 
 
 def fit_consistence(config: ConsistenceCalibrationConfig) -> ConsistenceCalibrator:
-    """离线拟合并按统一配置的覆盖策略保存一致性系数。
-
-    ``ConsistenceCalibrationConfig.force`` 默认是 ``True``，因此维护者无参数
-    命令可以重复生成同一输出；显式构造 ``force=False`` 的配置时，已有目标
-    仍由底层 ``save()`` 拒绝覆盖。
-    """
-    calibrator = ConsistenceCalibrator.fit_from_csv(config)
+    """离线拟合并按统一配置的覆盖策略保存分段一致性系数。"""
+    calibrator = ConsistenceCalibrator.fit_from_directory(config)
     calibrator.save(config.output_path, force=config.force)
     return calibrator
 
 
 def main() -> int:
-    """按 ``config.py`` 中的维护者默认配置生成或更新一致性系数。
-
-    Returns:
-        int: 标定和保存成功后返回 ``0``。
-
-    Raises:
-        FileNotFoundError: 配置的标定 CSV 不存在。
-        ValueError: CSV 数据或标定参数不合法。
-        FileExistsError: 显式把配置 ``force`` 设为 ``False`` 且输出已存在。
-
-    Side Effects:
-        读取配置的 CSV、写入配置的 NPZ，并打印输入与输出路径；默认覆盖同名
-        旧文件，不访问硬件。
-    """
+    """按 ``config.py`` 的维护者默认配置生成或更新分段一致性系数。"""
     config = ConsistenceCalibrationConfig()
-    print(f"一致性标定源 CSV: {config.csv_path}")
+    print(f"一致性标定源目录: {config.csv_directory}")
     calibrator = fit_consistence(config)
     print(
-        f"一致性标定输出 NPZ: {config.output_path} "
-        f"({len(calibrator.scale)} 通道)"
+        "一致性标定量程: "
+        + ", ".join(f"{value:g}G" for value in calibrator.segment_values)
+    )
+    print(
+        f"一致性标定输出NPZ: {config.output_path} "
+        f"({calibrator.segment_scale.shape[0]}段, {CHANNEL_COUNT}通道)"
     )
     return 0
 
 
 __all__ = [
-    "CHANNEL_COUNT",
-    "DEFAULT_RESOURCE_NAME",
-    "ConsistenceCalibrationConfig",
-    "ConsistenceCalibrator",
-    "fit_consistence",
-    "main",
+    "CHANNEL_COUNT", "FORMAT_VERSION", "DEFAULT_RESOURCE_NAME",
+    "ConsistenceCalibrationConfig", "ConsistenceCalibrator",
+    "fit_consistence", "main",
 ]
 
 

@@ -20,7 +20,7 @@ from tangential.gui.realtime import RealTimePlot
 from tangential.processing.calconsistence import ConsistenceCalibrator
 from tangential.runtime.sensor import TangentialFrameProcessor, TangentialSensorAPI
 from tangential.runtime.session import FullAcquisitionSession
-from tangential.sensors.pressure import PressureSensor
+from tangential.sensors.pressure import _CircularByteBuffer, PressureSensor
 from tangential.storage.csv import build_csv_header, build_csv_row, init_csv_file
 
 
@@ -50,10 +50,11 @@ def _pressure_parser(rows: int, cols: int) -> PressureSensor:
     sensor.expected_payload_len = sensor.expected_sensor_bytes + sensor.MIN_PAYLOAD_LEN
     sensor.expected_frame_len = 4 + sensor.expected_payload_len + 1
     sensor._max_rx_buf = max(
-        sensor.MAX_RX_BUF, sensor.expected_frame_len + sensor.READ_CHUNK_SIZE
+        sensor.MAX_RX_BUF,
+        sensor.expected_frame_len * 4,
+        sensor.expected_frame_len + sensor.READ_CHUNK_SIZE * 2,
     )
-    sensor._rx_buf_retain = max(sensor.RX_BUF_RETAIN, sensor.expected_frame_len)
-    sensor._rx_buf = bytearray()
+    sensor._rx_buf = _CircularByteBuffer(sensor._max_rx_buf)
     import threading
 
     sensor._rx_lock = threading.Lock()
@@ -63,6 +64,10 @@ def _pressure_parser(rows: int, cols: int) -> PressureSensor:
         "length_errors": 0,
         "status_errors": 0,
         "framing_bytes": 0,
+        "rx_buffer_overruns": 0,
+        "late_responses": 0,
+        "timeout_resyncs": 0,
+        "unexpected_responses": 0,
     }
     return sensor
 
@@ -75,7 +80,7 @@ class DynamicPressureTests(unittest.TestCase):
         self.assertEqual(command[11:13], struct.pack("<H", 30))
 
         expected = list(range(15))
-        sensor._rx_buf.extend(_make_pressure_frame(expected))
+        sensor._append_rx(_make_pressure_frame(expected))
         payload = sensor.read_data()
         self.assertEqual(len(payload), 30)
         self.assertEqual(sensor.decode(payload), expected)

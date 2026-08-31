@@ -61,7 +61,7 @@
 │   │   └── full.py                   # 调用 run_application 的完整示例
 │   └── resources/
 │       ├── fit_coefs.bin              # package resource 静态模型
-│       └── consistence_coeffs.npz     # 经确认来源生成的默认一致性系数（可选待补资源）
+│       └── consistence_coeffs.npz     # 由 consistence/ 多段CSV生成的默认v2一致性系数
 └── tests/                             # 协议、API、GUI、分发和回归测试
 ~~~
 
@@ -204,11 +204,21 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
   滑移、模型、GUI、终端和 CSV 都只消费 ``base_data=consistence_data``，关闭时
   ``consistence_data=None`` 且 ``base_data=raw_data``。
 - 维护者只在 ``config.py`` 的 ``ConsistenceCalibrationConfig`` 类体内编辑运行时
-  开关、CSV/NPZ路径、状态、目标、裁剪和覆盖策略。``csv_path`` 的实际文件名以
-  当前配置字段为唯一来源，默认路径必须位于项目 ``data/`` 且后缀为 ``.csv``；
-  不得在测试或文档中另行写死某个采集文件名。默认 ``output_path`` 解析为项目
+  开关、CSV目录/匹配模式、末尾行数、断点间距、局部最大增益、NPZ路径、裁剪和
+  覆盖策略。默认 ``csv_directory`` 必须解析为项目
+  ``src/tangential/resources/consistence``，其中每个 ``*-<数值>G.csv`` 代表一个
+  载荷段；默认 ``output_path`` 解析为项目
   ``src/tangential/resources/consistence_coeffs.npz``。
-- 离线标定唯一命令是源码模式 ``PYTHONPATH=src python -m
+- 每个一致性CSV只取最后 ``tail_rows`` 个非空数据行，并分别计算84通道端点；
+  该档公共ADC目标是84通道端点均值，文件名克重仅用于排序和审计。每通道按自身
+  原始ADC排序，对对应公共目标做保序回归，添加零锚点，以
+  ``minimum_breakpoint_step`` 保证输入断点严格递增，并用
+  ``max_segment_scale`` 限制局部增益，且该上限不得超过100。运行时直接按每通道
+  原始ADC选择分段，不得先猜测克重；非单调矛盾数据允许产生平台和残差，不得用
+  失控增益强行精确通过。``target_breakpoints``是补偿曲线的公共ADC目标断点，
+  不是旧式全局目标范围或状态列。
+- 离线标定唯一命令是源码模式 ``PYTHONPATH=src
+  /home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python -m
   tangential.processing.calconsistence``。该模块不使用 argparse、不访问硬件，按统一
   配置读取 CSV 和写出 NPZ；``force`` 默认 ``True``，连续运行必须覆盖并更新同名
   NPZ。底层 ``ConsistenceCalibrator.save(force=False)`` 和显式配置
@@ -264,10 +274,11 @@ CLI 显式参数 > 显式配置对象 > TANGENTIAL_* 环境默认 > config.py �
 源码运行：
 
 ~~~bash
-python -m pip install -r requirements.txt
-PYTHONPATH=src python -m tangential.examples.minimal
-PYTHONPATH=src python -m tangential.examples.full
-PYTHONPATH=src python -m tangential.processing.calconsistence
+TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python
+"$TANGENTIAL_PYTHON" -m pip install -r requirements.txt
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m tangential.examples.minimal
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m tangential.examples.full
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m tangential.processing.calconsistence
 ~~~
 
 Cython>=3.1,<4 是构建依赖，已在 pyproject.toml 声明；requirements.txt 供 no-build-isolation 开发构建使用。
@@ -304,10 +315,11 @@ python -m unittest discover -s tests -q
 附加检查：
 
 ~~~bash
-PYTHONPATH=src python -m compileall -q src/tangential tests
+PYTHONPYCACHEPREFIX=/tmp/tangential-pycache-06 \
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m compileall -q src/tangential tests
 ~~~
 
-分发验收应检查 wheel 中存在11个内部 .so、11个同名 .pyi、py.typed、已确认的资源文件和CLI入口，同时不存在对应内部 .py、生成的 C/C++ 文件或 share/ 模型目录。`consistence_coeffs.npz` 只有在 `ConsistenceCalibrationConfig.csv_path` 指向的标定数据来源确认并生成后才能加入 wheel；不得把标定 CSV 本身或未经确认的数据打包。确认模型可在脱离源码目录加载，函数签名和文档可查看；源码模式和隔离安装模式都要运行完整测试。不要生成或向保密用户发布 sdist。
+分发验收应检查 wheel 中存在11个内部 .so、11个同名 .pyi、py.typed、已确认的资源文件和CLI入口，同时不存在对应内部 .py、生成的 C/C++ 文件或 share/ 模型目录。`consistence_coeffs.npz` 只有在 `ConsistenceCalibrationConfig.csv_directory` 中的多段标定数据来源确认并生成后才能加入 wheel；不得把标定 CSV 本身或未经确认的数据打包。确认模型可在脱离源码目录加载，函数签名和文档可查看；源码模式和隔离安装模式都要运行完整测试。不要生成或向保密用户发布 sdist。
 
 dist/中的wheel和build/中的中间产物不属于源码修改内容。最终交付时必须在报告中给出wheel绝对路径、平台标签和测试结果。
 

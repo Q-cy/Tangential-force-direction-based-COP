@@ -201,7 +201,7 @@ config = FullApplicationConfig(array=ArrayConfig(rows=14, cols=5))
 │       │   ├── __init__.py
 │       │   │   └── 设备子包边界和导出；集中暴露 PressureSensor 与 SixAxisForceSensor。
 │       │   ├── pressure.py
-│       │   │   └── 串口请求 → 清缓存/分批收包 → 动态帧长、CRC、状态和载荷校验 → rows×cols 通道 ADC、真实接收时间；提供独立压力采集进程入口。
+│       │   │   └── 启动清理一次 → 串口请求/分批收包 → 持久有界循环缓存 → 动态帧长、CRC、状态和载荷校验 → rows×cols 通道 ADC、真实接收时间；提供独立压力采集进程入口。
 │       │   ├── pressure.pyi
 │       │   │   └── pressure.py 对应 Cython .so 的公开静态类型和签名；不是第二套压力协议实现。
 │       │   ├── force.py
@@ -782,27 +782,33 @@ CLI显式参数 > 显式配置对象 > TANGENTIAL_*环境默认 > dataclass内�
 
 `PressureSensor`负责硬件通信，不负责业务算法。生产模式下父进程对象创建`spawn`采集子进程；子进程中的本地`PressureSensor`使用单一I/O线程执行请求、接收和解析，再通过IPC队列把帧与统计发回父进程。
 
-每轮压力采集流程：
+启动时只清理一次串口输入/输出和内部解析缓存；之后每轮压力采集流程为：
 
 ```text
 记录cycle_start
-→ 清空本轮串口输入/输出与解析缓存
-→ 记录tx_t并发送14字节CMD_BYTES
+→ 确认没有其它请求在途
+→ 记录tx_t并发送一个14字节CMD_BYTES
 → 最长等待response_timeout_s
-→ select等待可读并批量读取最多1024字节
-→ 持久化缓存查找AA 55帧头
+→ select等待可读并分批读取最多1024字节
+→ 将每段字节追加到固定容量循环缓存
+→ 从循环缓存查找AA 55帧头
 → 读取小端payload_len
 → 验证长度、CRC、状态和`rows*cols*2`字节传感器payload
 → 记录rx_t与latency_s
 → 写入request_seq/tx_t/rx_t/latency_s/payload
+→ 删除本轮之后的额外完整响应和残留字节
 → 本轮不足period_s时等待剩余时间，超期则直接进入下一轮并计数
 ```
 
-解析器支持分包、单轮粘包、前导噪声、错误长度、CRC错误和状态错误恢复。当前策略每轮只接受一个合法响应，轮末清空残留，避免上一轮晚到数据被错误归属到下一请求。
+`_CircularByteBuffer` 是压力字节流的唯一内部缓存，容量至少覆盖多帧和动态阵列的大响应。分包数据会跨多次串口读取保留，粘包数据按帧顺序解析；前导噪声、错误长度、CRC错误和状态错误只删除能够确认错误的字节或完整错误帧，不会因为一次短读清空整个缓存。容量耗尽时丢弃最旧字节并增加 `rx_buffer_overruns`，随后重新搜索帧头。
+
+单个请求成功后只接受第一个合法响应。缓存或串口中随后已经到达的完整合法帧会删除并增加 `unexpected_responses`，不允许留给下一 `request_seq`；额外响应的残片在排空边界清理。这样可以处理粘包，同时保持“一次真实请求最多产生一帧”的归属语义。
+
+请求超时后不会立即发送下一请求，而是进入长度为一个 `response_timeout_s` 的 `QUARANTINE` 隔离阶段。隔离期间继续收包：第一个完整合法响应视为前一请求的迟到响应，删除并增加 `late_responses`，之后再排除其它残留；若隔离期没有完整合法帧，则清理内部残片、调用一次 `reset_input_buffer()` 并增加 `timeout_resyncs`，才允许下一次发送。由于设备应答没有请求序号，超过该时间边界的晚到帧无法从协议字节中数学区分，当前实现用这个时间边界避免最常见的跨请求误绑定。
 
 `read_frame()`返回`rows*cols*2`字节payload与时序元数据，`decode()`只执行`rows*cols`个little-endian `uint16`解码并保持设备原始线序。左右翻转、基线、增益、CoP和标定不属于该模块。
 
-重要统计包括`requests`、`frames`、`response_timeouts`、`crc_errors`、`length_errors`、`status_errors`、`serial_read_errors`、`serial_write_errors`、`serial_flush_errors`、`queue_drops`和`schedule_skips`，以及最近发送间隔、接收间隔和响应延迟。目标200 Hz是请求上限；设备响应约6 ms时实际频率约166 Hz属于正常物理结果。
+重要统计包括`requests`、`frames`、`response_timeouts`、`crc_errors`、`length_errors`、`status_errors`、`serial_read_errors`、`serial_write_errors`、`serial_flush_errors`、`queue_drops`、`schedule_skips`、`rx_buffer_overruns`、`late_responses`、`timeout_resyncs`和`unexpected_responses`，以及最近发送间隔、接收间隔和响应延迟。短写或写异常只计入 `serial_write_errors`、清理异常残留并等待下一调度周期，不产生压力帧，也不额外等待完整响应超时。目标200 Hz是请求上限；设备响应约6 ms时实际频率约166 Hz属于正常物理结果。
 
 压力驱动的生产结构是“父进程`PressureSensor` → spawn子进程 → 子进程内本地`PressureSensor` → 单一压力I/O线程 → 串口”。父进程只从IPC帧队列读取，父进程的`PressureThread`负责解码并追加到`TimestampedBuffer`；因此业务处理、GUI刷新和CSV写入不会成为串口消费者。
 

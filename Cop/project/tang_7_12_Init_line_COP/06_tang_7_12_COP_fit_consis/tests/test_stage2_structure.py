@@ -7,6 +7,7 @@ import inspect
 import subprocess
 import sys
 import unittest
+from dataclasses import fields
 from pathlib import Path
 from unittest import mock
 
@@ -161,9 +162,25 @@ class StructureAndConfigTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             config = ConsistenceCalibrationConfig()
             processing_config = ProcessingConfig()
-        csv_path = Path(config.csv_path)
-        self.assertEqual(csv_path.parent, PROJECT_ROOT / "data")
-        self.assertEqual(csv_path.suffix.lower(), ".csv")
+        csv_directory = Path(config.csv_directory)
+        self.assertEqual(
+            csv_directory,
+            PROJECT_ROOT / "src" / "tangential" / "resources" / "consistence",
+        )
+        self.assertEqual(config.csv_pattern, "*.csv")
+        self.assertEqual(config.tail_rows, 10)
+        self.assertEqual(config.minimum_breakpoint_step, 1.0)
+        self.assertEqual(config.max_segment_scale, 100.0)
+        consistence_fields = {item.name for item in fields(config)}
+        for removed_field in (
+            "csv_path",
+            "state_column",
+            "baseline_state",
+            "loaded_state",
+            "target_min",
+            "target_max",
+        ):
+            self.assertNotIn(removed_field, consistence_fields)
         self.assertEqual(
             Path(config.output_path),
             PROJECT_ROOT
@@ -175,7 +192,9 @@ class StructureAndConfigTests(unittest.TestCase):
         self.assertIsNone(config.coefficients_path)
         self.assertTrue(config.force)
         self.assertIsInstance(processing_config.consistence, ConsistenceCalibrationConfig)
-        self.assertEqual(Path(processing_config.consistence.csv_path), csv_path)
+        self.assertEqual(
+            Path(processing_config.consistence.csv_directory), csv_directory
+        )
 
         with mock.patch.dict(
             os.environ, {"TANGENTIAL_CONSISTENCE_ENABLED": "false"}, clear=False
@@ -233,14 +252,13 @@ class StructureAndConfigTests(unittest.TestCase):
         for maintainer_detail in (
             "ConsistenceCalibrationConfig",
             "enabled",
-            "csv_path",
+            "csv_directory",
+            "csv_pattern",
+            "tail_rows",
+            "minimum_breakpoint_step",
+            "max_segment_scale",
             "output_path",
             "coefficients_path",
-            "state_column",
-            "baseline_state",
-            "loaded_state",
-            "target_min",
-            "target_max",
             "clip_min",
             "clip_max",
             "force",

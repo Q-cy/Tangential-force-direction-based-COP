@@ -259,7 +259,7 @@ class SlipConfig:
 class ConsistenceCalibrationConfig:
     """维护者使用的运行时与离线一致性标定统一配置。
 
-    所有可编辑默认值都集中在下面的字段定义中。``csv_path`` 和
+    所有可编辑默认值都集中在下面的字段定义中。``csv_directory`` 和
     ``output_path`` 基于源码项目根目录；``coefficients_path=None`` 表示
     运行时加载 package resource。环境变量只覆盖运行期开关、外部系数路径
     和裁剪范围。``force=True`` 使维护者无参数离线命令可重复生成并覆盖旧
@@ -267,13 +267,21 @@ class ConsistenceCalibrationConfig:
     """
 
     enabled: bool = field(
-        default_factory=lambda: _env_bool("TANGENTIAL_CONSISTENCE_ENABLED", False)
+        default_factory=lambda: _env_bool("TANGENTIAL_CONSISTENCE_ENABLED", True)
     )
-    csv_path: str | os.PathLike[str] = field(
+    csv_directory: str | os.PathLike[str] = field(
         default_factory=lambda: (
-            _SOURCE_PROJECT_ROOT / "data" / "COP_test_0825_3.csv"
+            _SOURCE_PROJECT_ROOT
+            / "src"
+            / "tangential"
+            / "resources"
+            / "consistence"
         ).resolve()
     )
+    csv_pattern: str = "*.csv"
+    tail_rows: int = 10
+    minimum_breakpoint_step: float = 1.0
+    max_segment_scale: float = 100.0
     output_path: str | os.PathLike[str] = field(
         default_factory=lambda: (
             _SOURCE_PROJECT_ROOT
@@ -288,11 +296,6 @@ class ConsistenceCalibrationConfig:
             os.environ.get("TANGENTIAL_CONSISTENCE_COEFFICIENTS") or None
         )
     )
-    state_column: str = "CoP_state"
-    baseline_state: int = 0
-    loaded_state: int = 2
-    target_min: float = 0.0
-    target_max: float = 4000.0
     clip_min: float | None = field(
         default_factory=lambda: _env_optional_float(
             "TANGENTIAL_CONSISTENCE_CLIP_MIN", 0.0
@@ -306,9 +309,33 @@ class ConsistenceCalibrationConfig:
     force: bool = True
 
     def validate(self) -> "ConsistenceCalibrationConfig":
-        """校验离线标定输入、目标范围和裁剪范围。"""
-        if not str(self.csv_path).strip():
-            raise ValueError("ConsistenceCalibrationConfig.csv_path 不能为空")
+        """校验多段离线标定输入、断点间距和裁剪范围。"""
+        if not str(self.csv_directory).strip():
+            raise ValueError("ConsistenceCalibrationConfig.csv_directory 不能为空")
+        if not self.csv_pattern.strip():
+            raise ValueError("ConsistenceCalibrationConfig.csv_pattern 不能为空")
+        if self.tail_rows <= 0:
+            raise ValueError("ConsistenceCalibrationConfig.tail_rows 必须大于0")
+        self.minimum_breakpoint_step = _coerce_finite(
+            self.minimum_breakpoint_step,
+            "ConsistenceCalibrationConfig.minimum_breakpoint_step",
+        )
+        if self.minimum_breakpoint_step <= 0:
+            raise ValueError(
+                "ConsistenceCalibrationConfig.minimum_breakpoint_step 必须大于0"
+            )
+        self.max_segment_scale = _coerce_finite(
+            self.max_segment_scale,
+            "ConsistenceCalibrationConfig.max_segment_scale",
+        )
+        if self.max_segment_scale <= 0:
+            raise ValueError(
+                "ConsistenceCalibrationConfig.max_segment_scale 必须大于0"
+            )
+        if self.max_segment_scale > 100.0:
+            raise ValueError(
+                "ConsistenceCalibrationConfig.max_segment_scale 不能大于100"
+            )
         if not str(self.output_path).strip():
             raise ValueError("ConsistenceCalibrationConfig.output_path 不能为空")
         if self.coefficients_path is not None and not str(
@@ -317,18 +344,6 @@ class ConsistenceCalibrationConfig:
             raise ValueError(
                 "ConsistenceCalibrationConfig.coefficients_path 不能为空字符串"
             )
-        if not self.state_column.strip():
-            raise ValueError("ConsistenceCalibrationConfig.state_column 不能为空")
-        if self.baseline_state == self.loaded_state:
-            raise ValueError("baseline_state 和 loaded_state 不能相同")
-        self.target_min = _coerce_finite(
-            self.target_min, "ConsistenceCalibrationConfig.target_min"
-        )
-        self.target_max = _coerce_finite(
-            self.target_max, "ConsistenceCalibrationConfig.target_max"
-        )
-        if self.target_max <= self.target_min:
-            raise ValueError("target_max 必须大于 target_min")
         self.clip_min = _coerce_finite(
             self.clip_min, "ConsistenceCalibrationConfig.clip_min", allow_none=True
         )

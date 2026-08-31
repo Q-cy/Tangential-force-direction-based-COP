@@ -21,6 +21,130 @@ PRESSURE_RESPONSE_TIMEOUT_S = _DEFAULT_CONFIG.response_timeout_s
 PRESSURE_FRAME_QUEUE_SIZE = _DEFAULT_CONFIG.frame_queue_size
 
 
+class _CircularByteBuffer:
+    """用于串口字节流的固定容量 FIFO 缓冲区。
+
+    该类只保存尚未被协议解析器消费的字节。容量耗尽时丢弃最旧字节并
+    返回丢弃数量，由 ``PressureSensor`` 记录 ``rx_buffer_overruns``；不会
+    静默无限增长。调用方负责在线程锁下访问实例。
+    """
+
+    def __init__(self, capacity: int):
+        """创建循环缓冲区。
+
+        Args:
+            capacity: 最大字节数，必须是正整数。
+
+        Raises:
+            ValueError: ``capacity`` 不为正数。
+            TypeError: ``capacity`` 不是整数。
+        """
+        if isinstance(capacity, bool) or not isinstance(capacity, int):
+            raise TypeError("循环缓冲区容量必须是整数")
+        if capacity <= 0:
+            raise ValueError("循环缓冲区容量必须大于 0")
+        self.capacity = capacity
+        self._data = bytearray(capacity)
+        self._start = 0
+        self._size = 0
+
+    def __len__(self) -> int:
+        """返回当前尚未消费的字节数。"""
+        return self._size
+
+    def __bool__(self) -> bool:
+        """返回缓冲区是否包含字节。"""
+        return self._size > 0
+
+    def __bytes__(self) -> bytes:
+        """返回当前字节的 FIFO 顺序副本，不消费数据。"""
+        return self.peek(self._size)
+
+    def append(self, data) -> int:
+        """追加 bytes-like 数据并返回因溢出丢弃的旧字节数。
+
+        当单次输入本身大于容量时，只保留输入的最后 ``capacity`` 字节；
+        这仍会在返回值中计入被覆盖的旧数据和输入前缀。
+        """
+        if not data:
+            return 0
+        data = bytes(data)
+        incoming_size = len(data)
+        if incoming_size >= self.capacity:
+            dropped = self._size + incoming_size - self.capacity
+            data = data[-self.capacity:]
+            self._start = 0
+            self._size = 0
+        else:
+            dropped = max(0, self._size + incoming_size - self.capacity)
+            if dropped:
+                self._start = (self._start + dropped) % self.capacity
+                self._size -= dropped
+
+        write_pos = (self._start + self._size) % self.capacity
+        first_size = min(len(data), self.capacity - write_pos)
+        self._data[write_pos:write_pos + first_size] = data[:first_size]
+        remaining = len(data) - first_size
+        if remaining:
+            self._data[:remaining] = data[first_size:]
+        self._size += len(data)
+        return dropped
+
+    def extend(self, data) -> int:
+        """``append`` 的 bytes-like 别名，便于测试注入字节片段。"""
+        return self.append(data)
+
+    def find(self, marker: bytes) -> int:
+        """返回 marker 在当前 FIFO 数据中的首个位置。"""
+        return bytes(self).find(bytes(marker))
+
+    def peek(self, size: int, offset: int = 0) -> bytes:
+        """查看数据但不消费。
+
+        Args:
+            size: 要查看的字节数。
+            offset: 从当前 FIFO 头部跳过的字节数。
+
+        Raises:
+            ValueError: 范围超出当前缓存或参数为负数。
+        """
+        if size < 0 or offset < 0 or offset + size > self._size:
+            raise ValueError("peek 范围超出循环缓冲区")
+        if size == 0:
+            return b""
+        read_pos = (self._start + offset) % self.capacity
+        first_size = min(size, self.capacity - read_pos)
+        result = bytes(self._data[read_pos:read_pos + first_size])
+        remaining = size - first_size
+        if remaining:
+            result += bytes(self._data[:remaining])
+        return result
+
+    def discard(self, size: int) -> int:
+        """消费并丢弃 FIFO 头部的 ``size`` 个字节。"""
+        if size < 0 or size > self._size:
+            raise ValueError("discard 范围超出循环缓冲区")
+        if size:
+            self._start = (self._start + size) % self.capacity
+            self._size -= size
+            if self._size == 0:
+                self._start = 0
+        return size
+
+    def pop(self, size: int) -> bytes:
+        """取出并消费 FIFO 头部的 ``size`` 个字节。"""
+        result = self.peek(size)
+        self.discard(size)
+        return result
+
+    def clear(self) -> int:
+        """清空缓冲区并返回被清除的字节数。"""
+        discarded = self._size
+        self._start = 0
+        self._size = 0
+        return discarded
+
+
 class PressureSensor:
     """可配置行列数的 PZT 压力阵列串口采集器。
 
@@ -42,8 +166,8 @@ class PressureSensor:
     MIN_PAYLOAD_LEN = 10
     MAX_PAYLOAD_LEN = 0xFFFF
     MAX_RX_BUF = 8192
-    RX_BUF_RETAIN = 4096
     READ_CHUNK_SIZE = 1024
+    MAX_DRAIN_READS = 64
 
     def __init__(self, serial_instance=None, period_s=None,
                  response_timeout_s=None, queue_size=None,
@@ -62,7 +186,7 @@ class PressureSensor:
             period_s: 每轮轮询的目标周期，单位为秒；必须大于 0。设备响应
                 超过该周期时不补发请求，实际频率自然下降。
             response_timeout_s: 单轮等待完整合法压力帧的最长时间，单位为秒；
-                必须大于 0，超时只计数并进入下一轮。
+                必须大于 0；超时后还会进入同长度的迟到响应隔离阶段。
             queue_size: 本地或进程间压力帧队列容量，必须大于 0。
             readiness_waiter: 测试用的可读等待回调，参数/返回值分别为等待
                 秒数和 bool；生产串口路径使用 ``select``，通常保持 ``None``。
@@ -114,16 +238,16 @@ class PressureSensor:
         self.expected_sensor_bytes = sensor_bytes
         self.expected_payload_len = sensor_bytes + self.MIN_PAYLOAD_LEN
         self.expected_frame_len = 4 + self.expected_payload_len + 1
-        # 至少容纳一帧加下一次批量读入的数据；大阵列时随协议长度增长，
+        # 至少容纳若干完整帧和多次批量读入的数据；大阵列时随协议长度增长，
         # 不使用只适合默认 12x7 的固定接收缓存。
         self._max_rx_buf = max(
             self.MAX_RX_BUF,
-            self.expected_frame_len + self.READ_CHUNK_SIZE,
+            self.expected_frame_len * 4,
+            self.expected_frame_len + self.READ_CHUNK_SIZE * 2,
         )
-        self._rx_buf_retain = max(self.RX_BUF_RETAIN, self.expected_frame_len)
+        self._rx_buf = _CircularByteBuffer(self._max_rx_buf)
         self.cmd_bytes = self.build_read_command(sensor_bytes)
         self._baudrate = int(baudrate)
-        self._rx_buf = bytearray()
         self._rx_lock = threading.Lock()
         self._frame_queue = queue.Queue(maxsize=queue_size)
         self._frame_sink = _frame_sink
@@ -150,6 +274,10 @@ class PressureSensor:
             "serial_flush_errors": 0,
             "queue_drops": 0,
             "schedule_skips": 0,
+            "rx_buffer_overruns": 0,
+            "late_responses": 0,
+            "timeout_resyncs": 0,
+            "unexpected_responses": 0,
         }
         self._tx_intervals = deque(maxlen=1000)
         self._rx_intervals = deque(maxlen=1000)
@@ -157,6 +285,7 @@ class PressureSensor:
         self._last_tx_t = None
         self._last_rx_t = None
         self._last_stats_publish_t = None
+        self._request_in_flight = False
         self._closed = False
         self._io_thread = None
         self._process = None
@@ -181,6 +310,7 @@ class PressureSensor:
                 self.open_port()
             else:
                 self.ser = serial_instance
+                self._clear_startup_buffers()
             self._io_thread = threading.Thread(
                 target=self._io_loop, name="pressure-io", daemon=True
             )
@@ -387,7 +517,7 @@ class PressureSensor:
             pass
 
     def open_port(self):
-        """打开压力串口并清理启动时的输入残留。
+        """打开压力串口并执行一次启动时的残留清理。
 
         Returns:
             None；打开后的 ``serial.Serial`` 对象保存到 ``self.ser``。
@@ -398,7 +528,8 @@ class PressureSensor:
 
         Side Effects:
             以 921600 baud、非阻塞读写打开 ``self.port``，等待 0.1 秒后清空
-            输入缓冲区。该方法不启动 I/O 线程。
+            输入/输出串口缓冲区和内部解析缓存。该方法不启动 I/O 线程；
+            运行期不会在每轮重复清理。
         """
         self.ser = serial.Serial(
             self.port,
@@ -407,7 +538,7 @@ class PressureSensor:
             write_timeout=0,
         )
         time.sleep(0.1)
-        self.ser.reset_input_buffer()
+        self._clear_startup_buffers()
 
     @staticmethod
     def crc8_itu(data: bytes) -> int:
@@ -460,10 +591,11 @@ class PressureSensor:
         Raises:
             KeyError: ``name`` 不存在于内部统计字典时由字典访问抛出。
         """
-        if not hasattr(self, "_stats_lock"):
+        if not hasattr(self, "_stats_lock") or not hasattr(self, "_stats"):
             return
         with self._stats_lock:
-            self._stats[name] += amount
+            if name in self._stats:
+                self._stats[name] += amount
 
     def _append_rx(self, chunk):
         """把新收到的串口字节追加到持久化解析缓存。
@@ -475,19 +607,15 @@ class PressureSensor:
             None。
 
         Side Effects:
-            在 ``_rx_lock`` 下追加到 ``_rx_buf``；超过动态接收上限时丢弃前部，
-            至少保留完整的当前阵列响应，并增加 ``framing_bytes`` 统计。
+            在 ``_rx_lock`` 下追加到 ``_rx_buf``；超过固定容量时由循环缓冲区
+            丢弃最旧字节，并增加 ``rx_buffer_overruns`` 统计。
         """
         if not chunk:
             return
         with self._rx_lock:
-            self._rx_buf.extend(chunk)
-            max_rx_buf = getattr(self, "_max_rx_buf", self.MAX_RX_BUF)
-            rx_buf_retain = getattr(self, "_rx_buf_retain", self.RX_BUF_RETAIN)
-            if len(self._rx_buf) > max_rx_buf:
-                drop_count = len(self._rx_buf) - rx_buf_retain
-                del self._rx_buf[:drop_count]
-                self._add_stat("framing_bytes", drop_count)
+            dropped = self._rx_buf.append(chunk)
+        if dropped:
+            self._add_stat("rx_buffer_overruns", dropped)
 
     def _record_tx(self, tx_t):
         """记录一次请求发送时间并更新请求间隔统计。
@@ -557,24 +685,86 @@ class PressureSensor:
             self._add_stat("queue_drops")
             self._frame_queue.put_nowait(frame)
 
-    def _clear_cycle_buffers(self):
-        """清空本轮开始前的串口输入、输出和解析缓存。
+    def _clear_parser_buffer(self, *, count_as_framing=False):
+        """清除内部字节缓存，并可选择把字节计入 framing 统计。
 
-        Returns:
-            None。
-
-        Side Effects:
-            清空 ``_rx_buf``，调用串口的 ``reset_input_buffer`` 和
-            ``reset_output_buffer``；清空异常只增加 ``serial_flush_errors``，
-            不直接终止轮询。
+        正常轮询不调用此方法。它只用于启动、写入失败、超时恢复、额外
+        响应隔离和关闭等明确的异常/生命周期边界。
         """
-        with self._rx_lock:
-            self._rx_buf.clear()
-        for reset in (self.ser.reset_input_buffer, self.ser.reset_output_buffer):
+        if not hasattr(self, "_rx_buf"):
+            return 0
+        lock = getattr(self, "_rx_lock", None)
+        if lock is None:
+            discarded = self._rx_buf.clear()
+        else:
+            with lock:
+                discarded = self._rx_buf.clear()
+        if count_as_framing and discarded:
+            self._add_stat("framing_bytes", discarded)
+        return discarded
+
+    def _reset_input_buffer(self):
+        """在异常恢复阶段清空一次串口输入，并记录清理错误。"""
+        reset = getattr(self.ser, "reset_input_buffer", None)
+        if not callable(reset):
+            return True
+        try:
+            reset()
+        except Exception:
+            self._add_stat("serial_flush_errors")
+            return False
+        return True
+
+    def _clear_startup_buffers(self):
+        """只在串口启动时清理输入、输出和内部解析残留。
+
+        运行中的每一轮请求禁止调用串口 flush；这一步是唯一的正常启动
+        清理。``PressureSensor.__new__`` 测试替身可能没有内部锁，因此这里
+        对尚未初始化的内部字段保持安全。
+        """
+        self._clear_parser_buffer()
+        if self.ser is None:
+            return
+        self._reset_input_buffer()
+        reset_output = getattr(self.ser, "reset_output_buffer", None)
+        if callable(reset_output):
             try:
-                reset()
+                reset_output()
             except Exception:
                 self._add_stat("serial_flush_errors")
+
+    def _discard_complete_buffered_responses(self):
+        """删除内部缓存中当前已经完整解析出的额外合法帧。
+
+        返回值表示删除的合法额外帧数。残缺帧不会在这里清除，允许调用方
+        继续读取下一段字节后再判断；最终隔离边界会清除仍残留的字节。
+        """
+        discarded_frames = 0
+        while True:
+            payload = self.read_data()
+            if payload is None:
+                return discarded_frames
+            discarded_frames += 1
+            self._add_stat("unexpected_responses")
+
+    def _discard_extra_responses(self):
+        """隔离当前请求之后的额外响应，避免绑定到下一请求。
+
+        先消费已在解析缓存中的完整帧，再用非阻塞读排空已经到达串口的
+        字节。额外合法帧计入 ``unexpected_responses``；排空结束仍残留的
+        噪声或残缺帧被清除，不会跨请求保留。
+        """
+        self._discard_complete_buffered_responses()
+        for _ in range(self.MAX_DRAIN_READS):
+            chunk = self._read_chunk(0.0)
+            if not chunk:
+                break
+            self._append_rx(chunk)
+            self._discard_complete_buffered_responses()
+        with self._rx_lock:
+            has_residual = bool(self._rx_buf)
+        if has_residual:
+            self._clear_parser_buffer(count_as_framing=True)
 
     def _read_chunk(self, timeout_s):
         """等待并批量读取当前可用字节，语义与 C++ SerialPort::read 一致。
@@ -610,64 +800,115 @@ class PressureSensor:
             self._stop_event.wait(0.001)
             return b""
 
+    def _wait_for_response(self, deadline):
+        """在给定截止时间前从持久缓存解析一个合法压力响应。"""
+        while not self._stop_event.is_set():
+            payload = self.read_data()
+            if payload is not None:
+                return payload
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                return None
+            chunk = self._read_chunk(remaining)
+            if chunk:
+                self._append_rx(chunk)
+        return None
+
+    def _quarantine_after_timeout(self):
+        """隔离一次超时请求，防止迟到响应归属于下一请求。
+
+        设备应答没有请求序号，超时后继续读取一个完整的
+        ``response_timeout_s`` 作为时间边界。该阶段收到的第一个合法帧被
+        认定为迟到帧并删除；若隔离期内没有完整帧，则清理残片并重置一次
+        串口输入。超过这段边界后，协议本身无法数学上识别任意晚到的旧帧，
+        因而下一轮只能依赖设备的正常请求—响应顺序。
+        """
+        deadline = time.perf_counter() + self._response_timeout_s
+        while not self._stop_event.is_set():
+            payload = self.read_data()
+            if payload is not None:
+                self._add_stat("late_responses")
+                self._discard_extra_responses()
+                return True
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            chunk = self._read_chunk(remaining)
+            if chunk:
+                self._append_rx(chunk)
+
+        if self._stop_event.is_set():
+            return False
+        self._clear_parser_buffer(count_as_framing=True)
+        self._reset_input_buffer()
+        self._add_stat("timeout_resyncs")
+        return False
+
+    def _recover_after_write_error(self):
+        """恢复短写/写异常，不等待一个完整响应超时。"""
+        self._clear_parser_buffer(count_as_framing=True)
+        self._reset_input_buffer()
+
     def _io_loop(self):
-        """执行 C++ 式逐轮压力轮询，直到停止事件或发生未处理异常。
+        """执行持久缓存、单请求在途的压力轮询。
 
         Returns:
             None；后台线程退出时将异常写入 ``_error``，并设置停止事件。
 
         Side Effects:
-            每轮清空缓冲、发送一次 14 字节 ``CMD_BYTES``，解析一个合法响应，
-            写入带请求/接收时间的帧队列，并更新请求、帧、CRC、超时和调度统计。
-            一轮不足目标周期时等待剩余时间，超周期时增加 ``schedule_skips``。
+            每轮只发送一个请求，将串口片段追加到有界循环缓存，并在完整
+            合法响应通过长度、CRC、状态和动态通道数校验后立即记录时间戳。
+            正常轮询不会清空串口或解析缓存；超时、写异常和额外响应才进入
+            明确的恢复/隔离路径。
         """
         try:
             while not self._stop_event.is_set():
                 cycle_start = time.perf_counter()
-                self._clear_cycle_buffers()
                 tx_t = time.perf_counter()
                 request_seq = self._request_seq
                 self._request_seq += 1
                 self._record_tx(tx_t)
+
+                write_ok = False
                 try:
                     written = self.ser.write(self.cmd_bytes)
-                    if written != len(self.cmd_bytes):
+                    if written == len(self.cmd_bytes):
+                        write_ok = True
+                    else:
                         self._add_stat("serial_write_errors")
                 except Exception:
                     self._add_stat("serial_write_errors")
 
-                response_deadline = time.perf_counter() + self._response_timeout_s
                 payload = None
-                while (
-                    not self._stop_event.is_set()
-                    and time.perf_counter() < response_deadline
-                ):
-                    remaining = response_deadline - time.perf_counter()
-                    chunk = self._read_chunk(remaining)
-                    if chunk:
-                        self._append_rx(chunk)
-                        payload = self.read_data()
-                        if payload is not None:
-                            break
-
-                if payload is not None:
-                    rx_t = time.perf_counter()
-                    latency_s = rx_t - tx_t
-                    self._record_frame(rx_t, latency_s)
-                    self._queue_frame({
-                        "request_seq": request_seq,
-                        "tx_t": tx_t,
-                        "rx_t": rx_t,
-                        "latency_s": latency_s,
-                        "payload": payload,
-                    })
-                    self._publish_stats()
-                elif not self._stop_event.is_set():
-                    self._add_stat("response_timeouts")
-
-                # 单轮只接受一个响应；其余粘包/残片不带入下一请求。
-                with self._rx_lock:
-                    self._rx_buf.clear()
+                self._request_in_flight = write_ok
+                if write_ok:
+                    response_deadline = (
+                        time.perf_counter() + self._response_timeout_s
+                    )
+                    payload = self._wait_for_response(response_deadline)
+                    self._request_in_flight = False
+                    if payload is not None:
+                        # 此时第一帧已归属于当前 request_seq；同一串口读中
+                        # 的其它帧不能穿过请求边界，必须立即删除。
+                        rx_t = time.perf_counter()
+                        latency_s = rx_t - tx_t
+                        self._record_frame(rx_t, latency_s)
+                        self._queue_frame({
+                            "request_seq": request_seq,
+                            "tx_t": tx_t,
+                            "rx_t": rx_t,
+                            "latency_s": latency_s,
+                            "payload": payload,
+                        })
+                        self._discard_extra_responses()
+                        self._publish_stats()
+                    elif not self._stop_event.is_set():
+                        self._add_stat("response_timeouts")
+                        self._quarantine_after_timeout()
+                else:
+                    self._request_in_flight = False
+                    if not self._stop_event.is_set():
+                        self._recover_after_write_error()
 
                 elapsed = time.perf_counter() - cycle_start
                 if elapsed < self._period_s:
@@ -676,6 +917,7 @@ class PressureSensor:
                     self._add_stat("schedule_skips")
                 self._publish_stats()
         except Exception as exc:
+            self._request_in_flight = False
             self._error = exc
             self._stop_event.set()
 
@@ -697,51 +939,60 @@ class PressureSensor:
             while True:
                 header_pos = self._rx_buf.find(b'\xaa\x55')
                 if header_pos < 0:
-                    keep = 1 if self._rx_buf[-1:] == b'\xaa' else 0
+                    keep = (
+                        1
+                        if self._rx_buf
+                        and self._rx_buf.peek(1, len(self._rx_buf) - 1) == b'\xaa'
+                        else 0
+                    )
                     drop_count = len(self._rx_buf) - keep
                     if drop_count > 0:
-                        del self._rx_buf[:drop_count]
+                        self._rx_buf.discard(drop_count)
                         self._add_stat("framing_bytes", drop_count)
                     return None
                 if header_pos > 0:
-                    del self._rx_buf[:header_pos]
+                    self._rx_buf.discard(header_pos)
                     self._add_stat("framing_bytes", header_pos)
 
                 if len(self._rx_buf) < 4:
                     return None
-                payload_len = self._rx_buf[2] | (self._rx_buf[3] << 8)
+                header = self._rx_buf.peek(4)
+                payload_len = header[2] | (header[3] << 8)
                 if not self.MIN_PAYLOAD_LEN <= payload_len <= self.MAX_PAYLOAD_LEN:
                     self._add_stat("length_errors")
-                    del self._rx_buf[:2]
+                    # 只丢弃当前同步头的第一个字节，保留潜在的重叠
+                    # ``AA 55``，避免错误帧遮蔽后续合法帧。
+                    self._rx_buf.discard(1)
                     continue
 
                 total_len = 4 + payload_len + 1
                 if len(self._rx_buf) < total_len:
                     return None
 
-                expected_crc = self.crc8_itu(bytes(self._rx_buf[:4 + payload_len]))
-                if expected_crc != self._rx_buf[4 + payload_len]:
+                frame = self._rx_buf.peek(total_len)
+                expected_crc = self.crc8_itu(frame[:4 + payload_len])
+                if expected_crc != frame[4 + payload_len]:
                     self._add_stat("crc_errors")
-                    del self._rx_buf[:2]
+                    self._rx_buf.discard(1)
                     continue
 
                 sensor_len = payload_len - 10
-                returned_sensor_len = self._rx_buf[11] | (self._rx_buf[12] << 8)
+                returned_sensor_len = frame[11] | (frame[12] << 8)
                 expected_sensor_bytes = getattr(
                     self, "expected_sensor_bytes", self.EXPECTED_SENSOR_BYTES
                 )
                 if (sensor_len != expected_sensor_bytes
                         or returned_sensor_len != expected_sensor_bytes):
                     self._add_stat("length_errors")
-                    del self._rx_buf[:total_len]
+                    self._rx_buf.discard(total_len)
                     continue
-                if self._rx_buf[13] != 0:
+                if frame[13] != 0:
                     self._add_stat("status_errors")
-                    del self._rx_buf[:total_len]
+                    self._rx_buf.discard(total_len)
                     continue
 
-                payload = bytes(self._rx_buf[14:14 + sensor_len])
-                del self._rx_buf[:total_len]
+                payload = bytes(frame[14:14 + sensor_len])
+                self._rx_buf.discard(total_len)
                 return payload
 
     def read_frame(self, timeout_s=0.1):

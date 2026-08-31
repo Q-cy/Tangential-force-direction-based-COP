@@ -591,11 +591,11 @@ class SpectrumConfig:
     # 滑移频带功率占完整分析频带功率的判定阈值，范围严格为 (0, 1)。
     slip_band_power_ratio_threshold: float = field(
         default_factory=lambda: _env_float(
-            "TANGENTIAL_SPECTRUM_SLIP_BAND_POWER_RATIO_THRESHOLD", 0.16
+            "TANGENTIAL_SPECTRUM_SLIP_BAND_POWER_RATIO_THRESHOLD", 0.22
         )
     )
     # STICK 状态下连续达到或超过阈值后进入 SLIP 的窗口数。
-    enter_windows: int = field(default_factory=lambda: _env_int("TANGENTIAL_SPECTRUM_ENTER_WINDOWS", 3))
+    enter_windows: int = field(default_factory=lambda: _env_int("TANGENTIAL_SPECTRUM_ENTER_WINDOWS", 5))
     # SLIP 状态下连续低于同一阈值后返回 STICK 的窗口数。
     exit_windows: int = field(default_factory=lambda: _env_int("TANGENTIAL_SPECTRUM_EXIT_WINDOWS", 5))
     # 每次接触开始后旁路收集逐频点静态基线的时长，单位秒；不阻塞ratio状态。

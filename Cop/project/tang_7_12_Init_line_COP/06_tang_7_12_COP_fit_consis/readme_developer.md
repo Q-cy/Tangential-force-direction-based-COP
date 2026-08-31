@@ -751,12 +751,12 @@ CLI显式参数 > 显式配置对象 > TANGENTIAL_*环境默认 > dataclass内�
 <tr>
 <td style="white-space:normal"><code>enabled</code></td>
 <td style="white-space:normal">控制实时处理是否加载并应用一致性系数</td>
-<td style="white-space:normal"><code>True</code>；关闭时运行时直接使用原始数据</td>
+<td style="white-space:normal"><code>False</code>；需要运行时补偿时显式设为 <code>True</code></td>
 </tr>
 <tr>
-<td style="white-space:normal"><code>csv_path</code></td>
-<td style="white-space:normal">离线拟合的输入 CSV</td>
-<td style="white-space:normal">实际路径始终以 <code>config.py</code> 中该字段为准；替换时指向项目 <code>data/</code> 下已确认的 <code>.csv</code> 文件</td>
+<td style="white-space:normal"><code>csv_directory</code>、<code>csv_pattern</code></td>
+<td style="white-space:normal">多量程离线拟合的CSV目录和本层文件匹配规则</td>
+<td style="white-space:normal">默认指向 <code>src/tangential/resources/consistence/</code>，匹配 <code>*.csv</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>output_path</code></td>
@@ -769,24 +769,19 @@ CLI显式参数 > 显式配置对象 > TANGENTIAL_*环境默认 > dataclass内�
 <td style="white-space:normal"><code>None</code> 使用包内资源；填写外部 NPZ 路径则使用外部文件</td>
 </tr>
 <tr>
-<td style="white-space:normal"><code>state_column</code></td>
-<td style="white-space:normal">CSV 中表示状态的列名</td>
-<td style="white-space:normal">默认 <code>CoP_state</code>，必须与输入表头一致</td>
+<td style="white-space:normal"><code>tail_rows</code></td>
+<td style="white-space:normal">每个量程CSV参与端点计算的末尾非空行数</td>
+<td style="white-space:normal">默认 <code>10</code>，每个CSV不足该数量时停止标定</td>
 </tr>
 <tr>
-<td style="white-space:normal"><code>baseline_state</code></td>
-<td style="white-space:normal">基准/卸载状态值</td>
-<td style="white-space:normal">默认 <code>0</code></td>
+<td style="white-space:normal"><code>minimum_breakpoint_step</code></td>
+<td style="white-space:normal">保序回归后相邻原始ADC断点的最小间距</td>
+<td style="white-space:normal">默认 <code>1.0</code> ADC，防止零宽区间和除零</td>
 </tr>
 <tr>
-<td style="white-space:normal"><code>loaded_state</code></td>
-<td style="white-space:normal">加载状态值</td>
-<td style="white-space:normal">默认 <code>2</code>，不能与 <code>baseline_state</code> 相同</td>
-</tr>
-<tr>
-<td style="white-space:normal"><code>target_min</code>、<code>target_max</code></td>
-<td style="white-space:normal">两点拟合的目标范围</td>
-<td style="white-space:normal">默认 <code>0.0</code> 和 <code>4000.0</code>，<code>target_max</code> 必须更大</td>
+<td style="white-space:normal"><code>max_segment_scale</code></td>
+<td style="white-space:normal">每个通道、每个分段的最大局部增益</td>
+<td style="white-space:normal">默认 <code>100.0</code>；配置和加载系数均拒绝大于 <code>100</code></td>
 </tr>
 <tr>
 <td style="white-space:normal"><code>clip_min</code>、<code>clip_max</code></td>
@@ -807,41 +802,43 @@ CLI显式参数 > 显式配置对象 > TANGENTIAL_*环境默认 > dataclass内�
 # src/tangential/config.py
 class ConsistenceCalibrationConfig:
     enabled = True
-    csv_path = (_SOURCE_PROJECT_ROOT / "data" / "my_consistence_data.csv").resolve()
+    csv_directory = (_SOURCE_PROJECT_ROOT / "src" / "tangential" / "resources" / "consistence").resolve()
+    csv_pattern = "*.csv"
+    tail_rows = 10
+    minimum_breakpoint_step = 1.0
+    max_segment_scale = 100.0
     output_path = (_SOURCE_PROJECT_ROOT / "src" / "tangential" / "resources" / "consistence_coeffs.npz").resolve()
     coefficients_path = None
-    state_column = "CoP_state"
-    baseline_state = 0
-    loaded_state = 2
-    target_min = 0.0
-    target_max = 4000.0
     clip_min = 0.0
     clip_max = None
     force = True
 ```
 
-上面的代码只展示需要修改的字段；实际源码中的路径默认值通过 `_SOURCE_PROJECT_ROOT` 和 `field(default_factory=...)` 构造，不能把项目根目录写成依赖当前 shell 工作目录的相对路径。输入 CSV 必须包含 `state_column` 以及 `ch1` 到 `ch84`，两种状态都必须有有效、有限数据。
+上面的代码只展示需要修改的字段；实际源码中的路径默认值通过 `_SOURCE_PROJECT_ROOT` 和 `field(default_factory=...)` 构造，不能把项目根目录写成依赖当前 shell 工作目录的相对路径。每个CSV文件名必须以`-<数值>G.csv`结尾并包含`channel1`到`channel84`；允许存在`totalSum`等额外列。
 
 ### 生成 NPZ 的源码步骤
 
-1. 在 `ConsistenceCalibrationConfig` 中确认 `csv_path`、状态列、目标范围、裁剪范围和 `output_path`。
+1. 在 `ConsistenceCalibrationConfig` 中确认 `csv_directory`、`csv_pattern`、`tail_rows`、断点最小间距、局部最大增益、裁剪范围和 `output_path`。
 2. 默认 `force=True`，输出文件已存在时会直接更新；需要人工保护已有文件时，把 `force` 显式改为 `False`。
 3. 在项目根目录执行下面的无参数源码命令：
 
 ```bash
-PYTHONPATH=src python -m tangential.processing.calconsistence
+TANGENTIAL_PYTHON=/home/qcy/miniconda3/envs/TimeDrift_GRU/bin/python
+PYTHONPATH=src "$TANGENTIAL_PYTHON" -m tangential.processing.calconsistence
 ```
 
-该命令没有位置参数或选项，不使用 `argparse`，不连接硬件；模块的 `main()` 只构造 `ConsistenceCalibrationConfig()`，读取类中配置的 CSV，调用 `fit_consistence()` 并打印输入/输出路径。默认配置会把 `force=True` 沿 `main() → fit_consistence() → ConsistenceCalibrator.save()` 传递，因此连续运行会覆盖并更新同一路径下的旧 NPZ。不要给用户增加对应 CLI 子命令或路径参数。
+该命令没有位置参数或选项，不使用 `argparse`，不连接硬件；模块的 `main()` 只构造 `ConsistenceCalibrationConfig()`，读取配置目录中的全部量程CSV，调用 `fit_consistence()` 并打印目录、量程顺序和输出路径。默认配置会把 `force=True` 沿 `main() → fit_consistence() → ConsistenceCalibrator.save()` 传递，因此连续运行会覆盖并更新同一路径下的旧NPZ。不要给用户增加对应CLI子命令或路径参数。
 
-CSV 表头会去除首尾空白，再按 `state_column`、`ch1` 到 `ch84` 定位列；每个通道分别计算 `baseline_state` 和 `loaded_state` 的中位数，并执行：
+每个CSV代表一个载荷段，取最后10个非空数据行并对`channel1`到`channel84`分别求均值，形成该段的84通道原始端点。文件名中的克重只用于确定段顺序和保存审计元数据，不作为运行时预测目标；该段的公共ADC目标是84个原始端点的算术平均值。
+
+每个通道独立拟合`raw_adc → common_adc`曲线。算法先按该通道自己的原始ADC端点升序排列，同时重排这些端点对应的公共ADC目标，再对目标做等权保序回归，添加`(0, 0)`锚点，并保证相邻输入断点至少相差`minimum_breakpoint_step`。随后用`max_segment_scale`限制每个局部斜率；矛盾端点允许形成平台和拟合残差，禁止用异常大的增益强行穿过所有标定点。每段系数为：
 
 ```text
-scale = (target_max - target_min) / (loaded_median - baseline_median)
-offset = target_min - baseline_median * scale
+segment_scale = (target_high - target_low) / (input_high - input_low)
+segment_offset = target_low - input_low * segment_scale
 ```
 
-拟合前必须验证 84 个通道、两种状态均有样本、所有值有限且每个加载中位数严格大于对应卸载中位数。输出是 `allow_pickle=False` 可读取的压缩 NPZ，至少包含 `scale`、`offset`、`states`、`targets`、`sample_counts` 和源 CSV 的 `source_sha256`。维护者无参数入口默认覆盖同名 NPZ；底层 `ConsistenceCalibrator.save()` 的 `force` 参数仍默认 `False`，显式配置 `ConsistenceCalibrationConfig(force=False)` 也会在目标已存在时抛出 `FileExistsError`。维护测试使用临时 CSV，不能使用正在增长或未经确认的采集文件。
+运行时不需要先识别克重或量程标签；每个通道直接按当前原始ADC在自己的单调输入断点中选择分段并执行映射。低于首段时使用零点到首段外推，高于末段时沿最后一段外推，最后应用`clip_min/clip_max`。输出是`allow_pickle=False`可读取的v2压缩NPZ，核心字段为`input_breakpoints`、`target_breakpoints`、`segment_scale`、`segment_offset`和`segment_values`，并保存原始端点、公共目标、端点拟合结果、残差和文件哈希。旧单段`scale/offset` NPZ不兼容，必须重新运行标定。维护者无参数入口默认覆盖同名NPZ；底层`save(force=False)`仍拒绝覆盖。
 
 ### 运行时语义和资源选择
 
